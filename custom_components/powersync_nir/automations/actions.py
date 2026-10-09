@@ -13702,7 +13702,8 @@ async def _action_start_ev_charging_dynamic_locked(
                 initial_soc = live_status.get("battery_soc")
 
             session = await session_manager.start_session(
-                vehicle_id=vehicle_id,
+                vehicle_id=params.get("active_logical_vehicle_id", vehicle_id),
+                loadpoint_id=vehicle_id,
                 mode=owner_mode,
                 start_soc=int(initial_soc) if initial_soc else None,
             )

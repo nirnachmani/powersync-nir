@@ -73,6 +73,7 @@ class ChargingSession:
     id: str
     vehicle_id: str
     start_time: str  # ISO format
+    loadpoint_id: Optional[str] = None
     end_time: Optional[str] = None
 
     # Energy tracking
@@ -113,6 +114,7 @@ class ChargingSession:
         data = {
             "id": self.id,
             "vehicle_id": self.vehicle_id,
+            "loadpoint_id": self.loadpoint_id,
             "start_time": self.start_time,
             "end_time": self.end_time,
             "total_energy_kwh": self.total_energy_kwh,
@@ -145,6 +147,7 @@ class ChargingSession:
             id=data["id"],
             vehicle_id=data["vehicle_id"],
             start_time=data["start_time"],
+            loadpoint_id=data.get("loadpoint_id"),
             end_time=data.get("end_time"),
             total_energy_kwh=data.get("total_energy_kwh", 0.0),
             solar_energy_kwh=data.get("solar_energy_kwh", 0.0),
@@ -384,6 +387,7 @@ class ChargingSessionManager:
         mode: str,
         start_soc: Optional[int] = None,
         target_soc: Optional[int] = None,
+        loadpoint_id: Optional[str] = None,
     ) -> ChargingSession:
         """Start a new charging session.
 
@@ -398,21 +402,23 @@ class ChargingSessionManager:
         """
         async with self._session_lock:
             await self._load_sessions()
+            session_key = loadpoint_id or vehicle_id
 
-            # End any existing session for this vehicle
-            if vehicle_id in self.active_sessions:
-                await self._end_session_unlocked(vehicle_id, "new_session_started")
+            # End any existing session for this physical loadpoint.
+            if session_key in self.active_sessions:
+                await self._end_session_unlocked(session_key, "new_session_started")
 
             session = ChargingSession(
                 id=str(uuid.uuid4()),
                 vehicle_id=vehicle_id,
                 start_time=dt_util.now().isoformat(),
+                loadpoint_id=loadpoint_id,
                 mode=mode,
                 start_soc=start_soc,
                 target_soc=target_soc,
             )
 
-            self.active_sessions[vehicle_id] = session
+            self.active_sessions[session_key] = session
             _LOGGER.info(f"Started charging session {session.id} for {vehicle_id} (mode={mode})")
 
             return session

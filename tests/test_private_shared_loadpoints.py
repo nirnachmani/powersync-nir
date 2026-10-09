@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ACTIONS = ROOT / "custom_components/powersync_nir/automations/actions.py"
 PLANNER = ROOT / "custom_components/powersync_nir/automations/ev_charging_planner.py"
+SESSIONS = ROOT / "custom_components/powersync_nir/automations/ev_charging_session.py"
 
 GENERIC_SHARED_LOADPOINT = {
     "binding_id": "generic_home",
@@ -48,3 +49,10 @@ def test_unknown_connected_vehicle_state_cannot_start_or_change_shared_charger()
     assert "resolve_shared_loadpoint_command" in source and "no selected shared logical EV profile" in source, (
         "missing fail-closed connected-profile resolution before Generic commands"
     )
+
+
+def test_physical_session_key_is_separate_from_logical_vehicle_attribution():
+    """A shared charger has one active session keyed by loadpoint, not profile."""
+    source = SESSIONS.read_text()
+
+    assert "loadpoint_id" in source and 'session_key = loadpoint_id or vehicle_id' in source
