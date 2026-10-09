@@ -11,7 +11,7 @@ This fork adds two logical EV profiles sharing one selected physical Generic Cha
 
 ## Android compatibility exception
 
-The released PowerSync Android app hard-codes `/api/power_sync/...`. PowerSync Nir deliberately keeps that HTTP namespace and response contract. Therefore it replaces—not coexists with—the original PowerSync integration in an HA instance.
+The released PowerSync Android app hard-codes `/api/power_sync/...`. PowerSync Nir deliberately keeps that HTTP namespace and response contract. Therefore it replaces—not coexists with—the original PowerSync integration in an HA instance. The versioned static route/vehicle-field baseline and controlled-capture procedure are in [`tests/contracts/android_app/`](tests/contracts/android_app/README.md).
 
 ## Deployment
 
