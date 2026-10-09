@@ -1,0 +1,50 @@
+{
+  "app": {
+    "package": "com.powersync.mobile",
+    "version": "1.0.7",
+    "build": 336
+  },
+  "vehicles": [
+    {
+      "id": "ev_profile_a",
+      "vehicle_id": "ev_profile_a",
+      "vin": null,
+      "display_name": "Profile A",
+      "model": "Generic EV",
+      "battery_level": null,
+      "charging_state": "Disconnected",
+      "charge_limit_soc": null,
+      "charger_power": 0,
+      "is_online": true,
+      "is_plugged_in": false,
+      "data_updated_at": "2026-10-09T00:00:00+00:00"
+    },
+    {
+      "id": "ev_profile_b",
+      "vehicle_id": "ev_profile_b",
+      "vin": null,
+      "display_name": "Profile B",
+      "model": "Generic EV",
+      "battery_level": null,
+      "charging_state": "Disconnected",
+      "charge_limit_soc": null,
+      "charger_power": 0,
+      "is_online": true,
+      "is_plugged_in": false,
+      "data_updated_at": "2026-10-09T00:00:00+00:00"
+    }
+  ],
+  "vehicle_config_write": {
+    "route": "/api/power_sync/ev/vehicle_config",
+    "key": "vehicle_id"
+  },
+  "command": {
+    "route": "/api/power_sync/ev/vehicles/{vehicle_id}/command",
+    "selected_id_in_path": true
+  },
+  "global_policy_routes": [
+    "/api/power_sync/ev/solar_surplus_config",
+    "/api/power_sync/ev/price_level_charging/settings",
+    "/api/power_sync/ev/scheduled_charging/settings"
+  ]
+}
