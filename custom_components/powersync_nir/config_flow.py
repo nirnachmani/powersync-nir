@@ -482,6 +482,11 @@ from .const import (
     CONF_GENERIC_CHARGER_SOC_ENTITY,
     CONF_GENERIC_CHARGER_SOC_ENTITY_2,
     CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH,
+    CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY,
+    CONF_SHARED_LOADPOINT_PROFILE_A_NAME,
+    CONF_SHARED_LOADPOINT_PROFILE_A_STATE,
+    CONF_SHARED_LOADPOINT_PROFILE_B_NAME,
+    CONF_SHARED_LOADPOINT_PROFILE_B_STATE,
     # Sigenergy EV charger configuration
     CONF_SIGENERGY_CHARGER_ENABLED,
     CONF_SIGENERGY_CHARGER_TYPE,
@@ -15608,6 +15613,29 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     "invalid_tesla_ble_vehicle_mapping"
                 )
 
+            shared_values = {
+                key: str(user_input.get(key) or "").strip()
+                for key in (
+                    CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY,
+                    CONF_SHARED_LOADPOINT_PROFILE_A_NAME,
+                    CONF_SHARED_LOADPOINT_PROFILE_A_STATE,
+                    CONF_SHARED_LOADPOINT_PROFILE_B_NAME,
+                    CONF_SHARED_LOADPOINT_PROFILE_B_STATE,
+                )
+            }
+            if any(shared_values.values()):
+                if not all(shared_values.values()):
+                    errors[CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY] = (
+                        "incomplete_shared_loadpoint_binding"
+                    )
+                elif (
+                    shared_values[CONF_SHARED_LOADPOINT_PROFILE_A_STATE].casefold()
+                    == shared_values[CONF_SHARED_LOADPOINT_PROFILE_B_STATE].casefold()
+                ):
+                    errors[CONF_SHARED_LOADPOINT_PROFILE_B_STATE] = (
+                        "duplicate_shared_loadpoint_state"
+                    )
+
             if not errors:
                 # Store EV data for potential zaptec_cloud step
                 self._ev_options_data = dict(user_input)
@@ -15770,6 +15798,27 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 mode=NumberSelectorMode.BOX,
                 unit_of_measurement="kWh",
             )),
+            # Shared physical loadpoint: stable profile IDs; names are app-visible.
+            vol.Optional(
+                CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY,
+                default=self._get_option(CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY, ""),
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            vol.Optional(
+                CONF_SHARED_LOADPOINT_PROFILE_A_NAME,
+                default=self._get_option(CONF_SHARED_LOADPOINT_PROFILE_A_NAME, ""),
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            vol.Optional(
+                CONF_SHARED_LOADPOINT_PROFILE_A_STATE,
+                default=self._get_option(CONF_SHARED_LOADPOINT_PROFILE_A_STATE, ""),
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            vol.Optional(
+                CONF_SHARED_LOADPOINT_PROFILE_B_NAME,
+                default=self._get_option(CONF_SHARED_LOADPOINT_PROFILE_B_NAME, ""),
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            vol.Optional(
+                CONF_SHARED_LOADPOINT_PROFILE_B_STATE,
+                default=self._get_option(CONF_SHARED_LOADPOINT_PROFILE_B_STATE, ""),
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             # Sigenergy EVAC/EVDC charger direct Modbus control
             vol.Optional(
                 CONF_SIGENERGY_CHARGER_ENABLED,
@@ -16039,6 +16088,15 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             final_data[CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH] = float(
                 generic_capacity
             )
+
+        for key in (
+            CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY,
+            CONF_SHARED_LOADPOINT_PROFILE_A_NAME,
+            CONF_SHARED_LOADPOINT_PROFILE_A_STATE,
+            CONF_SHARED_LOADPOINT_PROFILE_B_NAME,
+            CONF_SHARED_LOADPOINT_PROFILE_B_STATE,
+        ):
+            final_data[key] = str(ev_input.get(key, "") or "").strip()
 
         # Add Sigenergy EV charger settings
         final_data[CONF_SIGENERGY_CHARGER_ENABLED] = ev_input.get(

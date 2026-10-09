@@ -21243,6 +21243,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 len(stored_vehicle_configs),
                 len(canonical_vehicle_configs),
             )
+
+    from .automations.shared_loadpoint import ensure_shared_logical_vehicle_configs
+    if await ensure_shared_logical_vehicle_configs(entry, automation_store):
+        _LOGGER.info("Ensured configured shared-loadpoint logical EV profiles")
+
     persisted_tokens = automation_store.get_push_tokens()
     if persisted_tokens:
         domain_data = hass.data.setdefault(DOMAIN, {})

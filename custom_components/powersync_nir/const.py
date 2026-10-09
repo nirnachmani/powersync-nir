@@ -182,6 +182,15 @@ CONF_GENERIC_CHARGER_SOC_ENTITY = "generic_charger_soc_entity"
 CONF_GENERIC_CHARGER_SOC_ENTITY_2 = "generic_charger_soc_entity_2"
 CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH = "generic_charger_battery_capacity_kwh"
 
+# One physical Generic Charger or Sigenergy EVAC shared by two logical profiles.
+CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY = (
+    "shared_loadpoint_connected_vehicle_entity"
+)
+CONF_SHARED_LOADPOINT_PROFILE_A_NAME = "shared_loadpoint_profile_a_name"
+CONF_SHARED_LOADPOINT_PROFILE_A_STATE = "shared_loadpoint_profile_a_state"
+CONF_SHARED_LOADPOINT_PROFILE_B_NAME = "shared_loadpoint_profile_b_name"
+CONF_SHARED_LOADPOINT_PROFILE_B_STATE = "shared_loadpoint_profile_b_state"
+
 # Sigenergy EV Charger configuration
 CONF_SIGENERGY_CHARGER_ENABLED = "sigenergy_charger_enabled"
 CONF_SIGENERGY_CHARGER_TYPE = "sigenergy_charger_type"

@@ -1,0 +1,118 @@
+"""Tests for two named profiles bound to one physical loadpoint."""
+
+from __future__ import annotations
+
+import asyncio
+import importlib.util
+import sys
+import types
+from pathlib import Path
+from types import SimpleNamespace
+
+
+ROOT = Path(__file__).resolve().parents[1]
+COMPONENT_ROOT = ROOT / "custom_components" / "powersync_nir"
+
+
+def _load_shared_loadpoint():
+    """Load the pure binding module without importing HA's integration package."""
+    for name, path in (
+        ("custom_components", ROOT / "custom_components"),
+        ("custom_components.powersync_nir", COMPONENT_ROOT),
+        ("custom_components.powersync_nir.automations", COMPONENT_ROOT / "automations"),
+    ):
+        package = types.ModuleType(name)
+        package.__path__ = [str(path)]
+        sys.modules.setdefault(name, package)
+    for name, path in (
+        ("custom_components.powersync_nir.const", COMPONENT_ROOT / "const.py"),
+        (
+            "custom_components.powersync_nir.automations.shared_loadpoint",
+            COMPONENT_ROOT / "automations" / "shared_loadpoint.py",
+        ),
+    ):
+        spec = importlib.util.spec_from_file_location(name, path)
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules["custom_components.powersync_nir.automations.shared_loadpoint"]
+
+
+shared_loadpoint = _load_shared_loadpoint()
+PROFILE_A_ID = shared_loadpoint.PROFILE_A_ID
+PROFILE_B_ID = shared_loadpoint.PROFILE_B_ID
+SharedLoadpointBinding = shared_loadpoint.SharedLoadpointBinding
+ensure_shared_logical_vehicle_configs = shared_loadpoint.ensure_shared_logical_vehicle_configs
+shared_profile_configs = shared_loadpoint.shared_profile_configs
+
+
+class FakeStore:
+    def __init__(self):
+        self._data = {"vehicle_charging_configs": []}
+        self.saves = 0
+
+    async def async_save(self):
+        self.saves += 1
+
+
+def _entry(**options):
+    return SimpleNamespace(data={}, options=options)
+
+
+def _options(**overrides):
+    options = {
+        "generic_charger_enabled": True,
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "GWM Tank 500",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Tesla Model Y",
+        "shared_loadpoint_profile_b_state": "model_y",
+    }
+    options.update(overrides)
+    return options
+
+
+def test_binding_resolves_two_profiles_and_fails_closed():
+    binding = SharedLoadpointBinding.from_options(_options())
+
+    assert binding is not None
+    assert binding.resolve_state(" TANK ") == PROFILE_A_ID
+    assert binding.resolve_state("MODEL_Y") == PROFILE_B_ID
+    assert binding.resolve_state("unknown") is None
+    assert binding.resolve_state("unavailable") is None
+
+
+def test_duplicate_mapping_state_disables_the_binding():
+    assert SharedLoadpointBinding.from_options(
+        _options(shared_loadpoint_profile_b_state="Tank")
+    ) is None
+
+
+def test_profile_configs_are_named_and_share_one_physical_backend():
+    configs = shared_profile_configs(_entry(**_options()))
+
+    assert [(item["vehicle_id"], item["display_name"]) for item in configs] == [
+        (PROFILE_A_ID, "GWM Tank 500"),
+        (PROFILE_B_ID, "Tesla Model Y"),
+    ]
+    assert {item["charger_type"] for item in configs} == {"generic"}
+    assert all(item["shared_loadpoint"] for item in configs)
+
+
+def test_ensure_profiles_preserves_app_owned_config_and_updates_name():
+    async def exercise():
+        store = FakeStore()
+        entry = _entry(**_options())
+
+        assert await ensure_shared_logical_vehicle_configs(entry, store)
+        store._data["vehicle_charging_configs"][0]["max_amps"] = 20
+        entry.options["shared_loadpoint_profile_a_name"] = "Tank 500"
+
+        assert await ensure_shared_logical_vehicle_configs(entry, store)
+        first = store._data["vehicle_charging_configs"][0]
+        assert first["display_name"] == "Tank 500"
+        assert first["max_amps"] == 20
+        assert store.saves == 2
+
+    asyncio.run(exercise())
