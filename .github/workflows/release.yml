@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'custom_components/power_sync/manifest.json'
+      - 'custom_components/powersync_nir/manifest.json'
 
 permissions:
   contents: write
@@ -20,7 +20,7 @@ jobs:
       - name: Get version from manifest
         id: version
         run: |
-          VERSION=$(python3 -c "import json; print(json.load(open('custom_components/power_sync/manifest.json'))['version'])")
+          VERSION=$(python3 -c "import json; print(json.load(open('custom_components/powersync_nir/manifest.json'))['version'])")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Detected version: $VERSION"
 

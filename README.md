@@ -1,7 +1,7 @@
 <div align="center">
   <img src="https://raw.githubusercontent.com/bolagnaise/PowerSync/main/logo-circle.png" alt="PowerSync Logo" width="180"/>
 
-  # PowerSync
+  # PowerSync Nir
 
   Intelligent battery energy management for Home Assistant. Automatically optimize your battery system with dynamic electricity pricing to minimize costs and maximize savings.
 
@@ -97,7 +97,7 @@ Solar inverters that bypass the battery can be curtailed during negative feed-in
 ## Quick Start
 
 1. **Install** via [HACS](#installation) (custom repository)
-2. **Add Integration** — Settings > Devices & Services > Add Integration > "PowerSync"
+2. **Add Integration** — Settings > Devices & Services > Add Integration > "PowerSync Nir"
 3. **Pick your electricity provider** and enter API credentials if required
 4. **Connect your battery system** and enter connection details, or choose **Custom / external controller** and select your existing Home Assistant telemetry entities
 5. **Done!** Sensors appear automatically and a **PowerSync dashboard** is auto-created in your sidebar. Enable [Smart Optimization](https://github.com/bolagnaise/PowerSync/wiki/Smart-Optimization) for automated scheduling, or install the [Mobile App](#mobile-app) for remote control.
