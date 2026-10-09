@@ -61,6 +61,7 @@ class SharedLoadpointBinding:
             or not binding.profile_b_name
             or not binding.profile_a_state
             or not binding.profile_b_state
+            or binding.profile_a_name.casefold() == binding.profile_b_name.casefold()
             or binding.profile_a_state == binding.profile_b_state
         ):
             return None

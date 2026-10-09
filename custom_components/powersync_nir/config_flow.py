@@ -15629,6 +15629,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         "incomplete_shared_loadpoint_binding"
                     )
                 elif (
+                    shared_values[CONF_SHARED_LOADPOINT_PROFILE_A_NAME].casefold()
+                    == shared_values[CONF_SHARED_LOADPOINT_PROFILE_B_NAME].casefold()
+                ):
+                    errors[CONF_SHARED_LOADPOINT_PROFILE_B_NAME] = (
+                        "duplicate_shared_loadpoint_name"
+                    )
+                elif (
                     shared_values[CONF_SHARED_LOADPOINT_PROFILE_A_STATE].casefold()
                     == shared_values[CONF_SHARED_LOADPOINT_PROFILE_B_STATE].casefold()
                 ):

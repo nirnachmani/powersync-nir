@@ -89,6 +89,12 @@ def test_duplicate_mapping_state_disables_the_binding():
     ) is None
 
 
+def test_duplicate_profile_names_disable_the_binding():
+    assert SharedLoadpointBinding.from_options(
+        _options(shared_loadpoint_profile_b_name="  gwm TANK 500 ")
+    ) is None
+
+
 def test_profile_configs_are_named_and_share_one_physical_backend():
     configs = shared_profile_configs(_entry(**_options()))
 
