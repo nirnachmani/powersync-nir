@@ -102,6 +102,62 @@ def resolve_active_shared_profile(hass: Any, config_entry: Any) -> str | None:
     return binding.resolve_state(state.state)
 
 
+def resolve_shared_loadpoint_command(
+    hass: Any,
+    config_entry: Any,
+    requested_vehicle_id: Any,
+    params: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Resolve a selected logical profile to its sole physical command identity.
+
+    A configured binding turns profile selection into a mandatory safety gate:
+    unknown selection and commands addressed to the non-selected profile are not
+    converted into Generic/EVAC hardware commands. Unrelated backends retain
+    their existing parameter mapping unchanged.
+    """
+    binding = binding_for_entry(config_entry)
+    if binding is None:
+        return dict(params)
+
+    requested_id = str(requested_vehicle_id or "").strip()
+    if requested_id not in (PROFILE_A_ID, PROFILE_B_ID):
+        # A complete binding replaces the anonymous charger identity for every
+        # Generic/EVAC command. Do not let a legacy physical ID bypass it.
+        if str(params.get("charger_type") or "").strip().lower() in (
+            "generic",
+            "sigenergy",
+        ):
+            return None
+        return dict(params)
+
+    active_profile_id = resolve_active_shared_profile(hass, config_entry)
+    if active_profile_id != requested_id:
+        return None
+
+    options = {**getattr(config_entry, "data", {}), **getattr(config_entry, "options", {})}
+    charger_type = str(params.get("charger_type") or "").strip().lower()
+    physical_id: str | None = None
+    if charger_type == "generic" and options.get(CONF_GENERIC_CHARGER_ENABLED):
+        physical_id = "generic_ev"
+    elif (
+        charger_type == "sigenergy"
+        and options.get(CONF_SIGENERGY_CHARGER_ENABLED)
+        and options.get(CONF_SIGENERGY_CHARGER_TYPE) == SIGENERGY_CHARGER_EVAC
+    ):
+        physical_id = "sigenergy_charger"
+    if physical_id is None:
+        return None
+
+    return {
+        **params,
+        "vehicle_id": physical_id,
+        "vehicle_vin": physical_id,
+        "logical_vehicle_id": requested_id,
+        "active_logical_vehicle_id": active_profile_id,
+        "shared_loadpoint_binding": True,
+    }
+
+
 def shared_profile_configs(config_entry: Any) -> list[dict[str, Any]]:
     """Return the two app-visible logical configs when a complete binding exists."""
     binding = binding_for_entry(config_entry)
@@ -109,15 +165,18 @@ def shared_profile_configs(config_entry: Any) -> list[dict[str, Any]]:
         return []
     options = {**getattr(config_entry, "data", {}), **getattr(config_entry, "options", {})}
     charger_type = ""
-    if options.get(CONF_GENERIC_CHARGER_ENABLED):
-        charger_type = "generic"
-    elif (
+    generic_enabled = bool(options.get(CONF_GENERIC_CHARGER_ENABLED))
+    sigenergy_evac_enabled = bool(
         options.get(CONF_SIGENERGY_CHARGER_ENABLED)
         and options.get(CONF_SIGENERGY_CHARGER_TYPE) == SIGENERGY_CHARGER_EVAC
-    ):
-        charger_type = "sigenergy"
-    if not charger_type:
+    )
+    # A shared binding has exactly one physical command target.
+    if generic_enabled == sigenergy_evac_enabled:
         return []
+    if generic_enabled:
+        charger_type = "generic"
+    elif sigenergy_evac_enabled:
+        charger_type = "sigenergy"
     return [
         {
             "vehicle_id": PROFILE_A_ID,

@@ -15624,7 +15624,15 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 )
             }
             if any(shared_values.values()):
-                if not all(shared_values.values()):
+                if (
+                    user_input.get(CONF_GENERIC_CHARGER_ENABLED)
+                    and user_input.get(CONF_SIGENERGY_CHARGER_ENABLED)
+                    and user_input.get(CONF_SIGENERGY_CHARGER_TYPE) == SIGENERGY_CHARGER_EVAC
+                ):
+                    errors[CONF_GENERIC_CHARGER_ENABLED] = (
+                        "shared_loadpoint_multiple_backends"
+                    )
+                elif not all(shared_values.values()):
                     errors[CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY] = (
                         "incomplete_shared_loadpoint_binding"
                     )

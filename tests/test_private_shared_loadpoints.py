@@ -45,6 +45,6 @@ def test_unknown_connected_vehicle_state_cannot_start_or_change_shared_charger()
     """Unknown/unavailable/unmapped profile selection fails closed for starts."""
     source = PLANNER.read_text()
 
-    assert "connected_vehicle_entity" in source and "unmapped" in source, (
+    assert "resolve_shared_loadpoint_command" in source and "no selected shared logical EV profile" in source, (
         "missing fail-closed connected-profile resolution before Generic commands"
     )

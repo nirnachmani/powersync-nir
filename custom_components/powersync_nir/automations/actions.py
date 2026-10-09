@@ -12495,6 +12495,34 @@ async def _action_start_ev_charging_dynamic_locked(
     entry_id = config_entry.entry_id
     vehicle_id = params.get("vehicle_vin") or params.get("vehicle_id") or DEFAULT_VEHICLE_ID
 
+    # A logical shared profile must be authorised and canonicalised before any
+    # state, lease, timer, session, or hardware-command lookup is made.
+    if params.get("charger_type") in ("generic", "sigenergy"):
+        from .shared_loadpoint import (
+            SharedLoadpointBinding,
+            binding_for_entry,
+            resolve_shared_loadpoint_command,
+        )
+
+        binding: SharedLoadpointBinding | None = binding_for_entry(config_entry)
+        if binding is not None:
+            requested_profile_id = params.get("active_logical_vehicle_id") or params.get(
+                "logical_vehicle_id"
+            ) or vehicle_id
+            resolved_params = resolve_shared_loadpoint_command(
+                hass,
+                config_entry,
+                requested_profile_id,
+                params,
+            )
+            if resolved_params is None:
+                _LOGGER.info(
+                    "Dynamic EV start blocked: shared loadpoint profile is not selected"
+                )
+                return False
+            params = resolved_params
+            vehicle_id = params["vehicle_id"]
+
     if params.get("charger_type", "tesla") == "tesla":
         canonical_vehicle_id = _canonical_dynamic_tesla_vehicle_id(
             hass,
@@ -13757,6 +13785,26 @@ async def _action_stop_ev_charging_dynamic(
     entry_id = config_entry.entry_id
     stop_charging = params.get("stop_charging", True)
     vehicle_id = params.get("vehicle_id") or params.get("vehicle_vin")
+    if params.get("charger_type") in ("generic", "sigenergy"):
+        from .shared_loadpoint import binding_for_entry, resolve_shared_loadpoint_command
+
+        if binding_for_entry(config_entry) is not None:
+            requested_profile_id = params.get("active_logical_vehicle_id") or params.get(
+                "logical_vehicle_id"
+            ) or vehicle_id
+            resolved_params = resolve_shared_loadpoint_command(
+                hass,
+                config_entry,
+                requested_profile_id,
+                params,
+            )
+            if resolved_params is None:
+                _LOGGER.info(
+                    "Dynamic EV stop blocked: shared loadpoint profile is not selected"
+                )
+                return False
+            params = resolved_params
+            vehicle_id = params["vehicle_id"]
     if vehicle_id:
         canonical_vehicle_id = _canonical_dynamic_tesla_vehicle_id(
             hass,

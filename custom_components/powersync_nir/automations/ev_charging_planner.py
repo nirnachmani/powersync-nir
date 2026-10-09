@@ -9084,7 +9084,15 @@ def _build_dynamic_charging_params(
     )
     params["vehicle_vin"] = loadpoint_id
     params["vehicle_id"] = loadpoint_id
-    return params
+    from .shared_loadpoint import resolve_shared_loadpoint_command
+
+    resolved = resolve_shared_loadpoint_command(
+        hass,
+        config_entry,
+        vehicle_vin or configured_vehicle_id,
+        params,
+    )
+    return resolved or {}
 
 
 def _build_dynamic_stop_params(
@@ -9134,7 +9142,15 @@ def _build_dynamic_stop_params(
     )
     params["vehicle_id"] = loadpoint_id
     params["vehicle_vin"] = loadpoint_id
-    return params
+    from .shared_loadpoint import resolve_shared_loadpoint_command
+
+    resolved = resolve_shared_loadpoint_command(
+        hass,
+        config_entry,
+        vehicle_vin or configured_vehicle_id,
+        params,
+    )
+    return resolved or {}
 
 
 async def _resolve_unspecified_tesla_start_vin(
@@ -9261,6 +9277,12 @@ async def _start_coordinated_charging(
         no_grid_import=no_grid_import,
         allow_ownership_takeover=allow_ownership_takeover,
     )
+    if not params:
+        _LOGGER.info(
+            "%s start blocked: no selected shared logical EV profile",
+            log_prefix,
+        )
+        return False
     charger_type = params.get("charger_type", _configured_charger_type(opts))
     confirm_tesla_start = (
         require_physical_start_confirmation and charger_type == "tesla"
@@ -9417,6 +9439,12 @@ async def _stop_coordinated_charging(
         stop_untracked=stop_untracked,
         reason=reason,
     )
+    if not params:
+        _LOGGER.info(
+            "%s stop blocked: no selected shared logical EV profile",
+            log_prefix,
+        )
+        return False
     params["owner_mode"] = expected_owner_mode
     charger_type = params.get("charger_type", _configured_charger_type(opts))
     loadpoint_id = params.get("vehicle_id") or params.get("vehicle_vin")

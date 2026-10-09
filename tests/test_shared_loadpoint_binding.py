@@ -56,6 +56,15 @@ class FakeStore:
         self.saves += 1
 
 
+class FakeHass:
+    def __init__(self, state):
+        self.states = SimpleNamespace(
+            get=lambda entity_id: SimpleNamespace(state=state)
+            if entity_id == "sensor.connected_vehicle"
+            else None
+        )
+
+
 def _entry(**options):
     return SimpleNamespace(data={}, options=options)
 
@@ -104,6 +113,42 @@ def test_profile_configs_are_named_and_share_one_physical_backend():
     ]
     assert {item["charger_type"] for item in configs} == {"generic"}
     assert all(item["shared_loadpoint"] for item in configs)
+
+
+def test_two_physical_backends_do_not_create_a_shared_binding():
+    configs = shared_profile_configs(
+        _entry(**_options(
+            sigenergy_charger_enabled=True,
+            sigenergy_charger_type="evac",
+        ))
+    )
+    assert configs == []
+
+
+def test_selected_profile_resolves_to_one_physical_generic_command_target():
+    resolver = getattr(shared_loadpoint, "resolve_shared_loadpoint_command", None)
+    assert resolver is not None
+
+    resolved = resolver(
+        FakeHass("tank"),
+        _entry(**_options()),
+        PROFILE_A_ID,
+        {"charger_type": "generic", "max_charge_amps": 20},
+    )
+
+    assert resolved["vehicle_id"] == "generic_ev"
+    assert resolved["vehicle_vin"] == "generic_ev"
+    assert resolved["active_logical_vehicle_id"] == PROFILE_A_ID
+    assert resolved["max_charge_amps"] == 20
+
+
+def test_inactive_or_unknown_profile_cannot_resolve_a_shared_command():
+    resolver = getattr(shared_loadpoint, "resolve_shared_loadpoint_command", None)
+    assert resolver is not None
+
+    entry = _entry(**_options())
+    assert resolver(FakeHass("tank"), entry, PROFILE_B_ID, {"charger_type": "generic"}) is None
+    assert resolver(FakeHass("unknown"), entry, PROFILE_A_ID, {"charger_type": "generic"}) is None
 
 
 def test_ensure_profiles_preserves_app_owned_config_and_updates_name():
