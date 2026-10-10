@@ -166,6 +166,40 @@ def test_selected_logical_generic_id_reaches_canonical_direct_start_command(monk
     assert seen[0]["logical_vehicle_id"] == "shared_ev_profile_a"
 
 
+def test_direct_shared_start_claims_physical_lease_before_competing_profile_can_start(monkeypatch):
+    """Sequential selector changes cannot let lease-free profiles race the shared switch."""
+    hass = _Hass()
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_start_generic_charger_switch", start)
+
+    assert asyncio.run(
+        actions._action_start_ev_charging(
+            hass,
+            _Entry(),
+            {**_generic_params(), "vehicle_id": "shared_ev_profile_a"},
+        )
+    ) is True
+
+    hass.states = SimpleNamespace(
+        get=lambda entity_id: {
+            "sensor.connected_vehicle": _State("tesla"),
+            "switch.shared_ev": _State("on"),
+        }.get(entity_id)
+    )
+    assert asyncio.run(
+        actions._action_start_ev_charging(
+            hass,
+            _Entry(),
+            {**_generic_params(), "vehicle_id": "shared_ev_profile_b"},
+        )
+    ) is False
+
+    _lease_id, lease = ownership.get_ev_ownership(hass, _Entry(), "generic_ev")
+    assert lease is not None
+    assert lease["active_profile_id"] == "shared_ev_profile_a"
+    start.assert_awaited_once()
+
+
 def test_direct_shared_start_is_blocked_when_physical_lease_belongs_to_other_profile(monkeypatch):
     hass = _Hass(selector_state="tesla")
     _claim_shared_loadpoint(hass, profile_id="shared_ev_profile_a")
@@ -282,6 +316,61 @@ def test_selected_logical_generic_id_reaches_canonical_current_command(monkeypat
     assert result is True
     assert seen[0]["vehicle_id"] == "generic_ev"
     assert seen[0]["logical_vehicle_id"] == "shared_ev_profile_a"
+
+
+def test_direct_shared_current_write_claims_lease_for_selected_profile(monkeypatch):
+    hass = _Hass()
+    set_amps = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_set_generic_charger_amps_entity", set_amps)
+
+    assert asyncio.run(
+        actions._action_set_ev_charging_amps(
+            hass,
+            _Entry(),
+            {
+                **_generic_params(),
+                "vehicle_id": "shared_ev_profile_a",
+                "charger_amps_entity": "number.shared_ev_amps",
+                "amps": 8,
+            },
+        )
+    ) is True
+
+    _lease_id, lease = ownership.get_ev_ownership(hass, _Entry(), "generic_ev")
+    assert lease is not None
+    assert lease["active_profile_id"] == "shared_ev_profile_a"
+    set_amps.assert_awaited_once()
+
+
+def test_set_vehicle_amps_claims_shared_lease_before_competing_profile_can_write(monkeypatch):
+    hass = _Hass()
+    set_amps = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_set_generic_charger_amps_entity", set_amps)
+
+    params = {**_generic_params(), "charger_amps_entity": "number.shared_ev_amps"}
+
+    assert asyncio.run(
+        actions._set_vehicle_amps(
+            hass, _Entry(), "shared_ev_profile_a", 8, params
+        )
+    ) is True
+
+    hass.states = SimpleNamespace(
+        get=lambda entity_id: {
+            "sensor.connected_vehicle": _State("tesla"),
+            "switch.shared_ev": _State("on"),
+        }.get(entity_id)
+    )
+    assert asyncio.run(
+        actions._set_vehicle_amps(
+            hass, _Entry(), "shared_ev_profile_b", 8, _generic_params()
+        )
+    ) is False
+
+    _lease_id, lease = ownership.get_ev_ownership(hass, _Entry(), "generic_ev")
+    assert lease is not None
+    assert lease["active_profile_id"] == "shared_ev_profile_a"
+    set_amps.assert_awaited_once()
 
 
 def test_direct_shared_current_write_reaches_current_physical_lease_owner(monkeypatch):

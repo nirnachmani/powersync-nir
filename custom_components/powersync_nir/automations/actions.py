@@ -5117,6 +5117,7 @@ async def _action_start_ev_charging(
             config_entry,
             requested_vehicle_id,
             params,
+            acquire_shared_lease=True,
         )
         if resolved_command is None:
             return False
@@ -5793,6 +5794,7 @@ async def _action_set_ev_charging_amps(
             config_entry,
             requested_vehicle_id,
             params,
+            acquire_shared_lease=True,
         )
         if resolved_command is None:
             return False
@@ -7410,6 +7412,7 @@ def _resolve_shared_loadpoint_direct_command(
     params: Mapping[str, Any],
     *,
     allow_shared_handoff_stop: bool = False,
+    acquire_shared_lease: bool = False,
 ) -> tuple[str, dict[str, Any]] | None:
     """Authorise direct Generic/EVAC writes through the logical profile gate."""
     charger_type = str(params.get("charger_type") or "tesla").strip().lower()
@@ -7502,28 +7505,48 @@ def _resolve_shared_loadpoint_direct_command(
         return None
 
     # A logical selector proves which profile is active, but direct hardware
-    # commands must also respect the single physical lease.  Do not claim or
-    # replace that lease here: this guard only authorizes its current holder.
+    # commands must also respect the single physical lease. Starts and current
+    # writes acquire that canonical lease synchronously, so a selector change
+    # cannot let a second lease-free profile write before the first command
+    # reaches hardware.
     if resolved_params.get("shared_loadpoint_binding"):
-        from .ev_ownership import get_ev_ownership, owner_family
-
         physical_vehicle_id = str(resolved_params["vehicle_id"])
-        _lease_id, lease = get_ev_ownership(
-            hass,
-            config_entry,
-            physical_vehicle_id,
+        selected_profile_id = str(
+            resolved_params.get("active_logical_vehicle_id")
+            or resolved_params.get("logical_vehicle_id")
+            or ""
         )
+        requested_owner_mode = (
+            resolved_params.get("owner_mode")
+            or resolved_params.get("dynamic_mode")
+        )
+        if acquire_shared_lease:
+            from .ev_ownership import acquire_shared_loadpoint_ownership
+
+            lease = acquire_shared_loadpoint_ownership(
+                hass,
+                config_entry,
+                physical_vehicle_id,
+                active_profile_id=selected_profile_id,
+                owner_mode=requested_owner_mode,
+            )
+            if lease is None:
+                _LOGGER.info(
+                    "Shared loadpoint command blocked: physical lease belongs to another owner or profile"
+                )
+                return None
+        else:
+            from .ev_ownership import get_ev_ownership
+
+            _lease_id, lease = get_ev_ownership(
+                hass,
+                config_entry,
+                physical_vehicle_id,
+            )
         if lease is not None:
-            selected_profile_id = str(
-                resolved_params.get("active_logical_vehicle_id")
-                or resolved_params.get("logical_vehicle_id")
-                or ""
-            )
+            from .ev_ownership import owner_family
+
             lease_profile_id = str(lease.get("active_profile_id") or "")
-            requested_owner_mode = (
-                resolved_params.get("owner_mode")
-                or resolved_params.get("dynamic_mode")
-            )
             lease_owner_mode = lease.get("owner_mode")
             owner_matches = (
                 lease.get("owner") == "powersync"
@@ -7557,7 +7580,7 @@ async def _set_vehicle_amps(
 ) -> bool:
     """Apply the final per-phase clamp to an owned rate command."""
     resolved_command = _resolve_shared_loadpoint_direct_command(
-        hass, config_entry, vehicle_id, params
+        hass, config_entry, vehicle_id, params, acquire_shared_lease=True
     )
     if resolved_command is None:
         return False

@@ -938,6 +938,42 @@ def claim_ev_ownership(
     return lease
 
 
+def acquire_shared_loadpoint_ownership(
+    hass: Any,
+    config_entry: Any,
+    vehicle_id: Any,
+    *,
+    active_profile_id: Any,
+    owner_mode: Any = None,
+) -> dict[str, Any] | None:
+    """Atomically acquire or renew a physical shared-loadpoint lease.
+
+    This synchronous check-and-claim runs without an await between inspecting
+    and updating the existing PowerSync ownership record.  A shared physical
+    loadpoint may only be renewed by the logical profile already recorded on
+    its lease; ownership policy takeover rules never substitute for that
+    profile identity check.
+    """
+    profile_id = str(active_profile_id or "")
+    if not profile_id:
+        return None
+
+    _lease_id, lease = get_ev_ownership(hass, config_entry, vehicle_id)
+    if lease is not None and (
+        lease.get("owner") != "powersync"
+        or str(lease.get("active_profile_id") or "") != profile_id
+    ):
+        return None
+
+    return claim_ev_ownership(
+        hass,
+        config_entry,
+        vehicle_id,
+        owner_mode=str(owner_mode or (lease or {}).get("owner_mode") or "dynamic"),
+        extra={"active_profile_id": profile_id},
+    )
+
+
 def release_ev_ownership(
     hass: Any,
     config_entry: Any,
