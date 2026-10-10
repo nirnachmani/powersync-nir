@@ -678,6 +678,12 @@ def test_end_of_cycle_yield_claims_only_an_unowned_external_shared_session() -> 
             active_profile_id="shared_ev_profile_a",
             selected_params={"charger_type": "generic"},
             state=state,
+            cycle_context={
+                "binding_id": "generic_ev", "active_profile_id": "shared_ev_profile_a",
+                "origin": "external", "physical_active": True,
+                "observed_at": NOW, "evidence": "fresh_power",
+            },
+            now=NOW,
             external_control_policy="yield",
             cycle_ledger={},
             get_lease=lambda: None,
@@ -705,6 +711,12 @@ def test_end_of_cycle_override_stops_once_only_without_an_allowed_cycle_decision
             active_profile_id="shared_ev_profile_b",
             selected_params={"charger_type": "sigenergy"},
             state=state,
+            cycle_context={
+                "binding_id": "sigenergy_charger", "active_profile_id": "shared_ev_profile_b",
+                "origin": "external", "physical_active": True,
+                "observed_at": NOW, "evidence": "fresh_evac_state",
+            },
+            now=NOW,
             external_control_policy="override",
             cycle_ledger={"sigenergy_charger": {"shared_ev_profile_b": {"allowed": False}}},
             get_lease=lambda: {"owner": "external"},
@@ -720,6 +732,135 @@ def test_end_of_cycle_override_stops_once_only_without_an_allowed_cycle_decision
         "selected_params": {"charger_type": "sigenergy"},
         "state": state,
     }]
+
+
+@pytest.mark.parametrize(
+    ("binding_id", "charger_type"),
+    [("generic_ev", "generic"), ("sigenergy_charger", "sigenergy")],
+)
+def test_end_of_cycle_override_claims_unowned_fresh_external_session_before_guarded_stop(
+    binding_id: str, charger_type: str
+) -> None:
+    """A fresh external session receives the guarded stop only after an external lease."""
+    state = module.ReconciliationState(origin="external", physical_active=True)
+    lease = None
+    claimed = []
+    stopped = []
+    context = {
+        "binding_id": binding_id,
+        "active_profile_id": "shared_ev_profile_a",
+        "origin": "external",
+        "physical_active": True,
+        "observed_at": NOW,
+        "evidence": "fresh_power" if binding_id == "generic_ev" else "fresh_evac_state",
+    }
+
+    async def claim_external(profile_id):
+        nonlocal lease
+        claimed.append(profile_id)
+        lease = {"owner": "external", "active_profile_id": profile_id}
+        return True
+
+    async def stop_and_confirm(**kwargs):
+        stopped.append(kwargs)
+        return True
+
+    assert asyncio.run(
+        module.resolve_end_of_cycle_external_shared_session(
+            binding_id=binding_id,
+            active_profile_id="shared_ev_profile_a",
+            selected_params={"charger_type": charger_type},
+            state=state,
+            cycle_context=context,
+            now=NOW,
+            external_control_policy="override",
+            cycle_ledger={},
+            get_lease=lambda: lease,
+            ensure_external_ownership=claim_external,
+            stop_and_confirm=stop_and_confirm,
+        )
+    )
+
+    assert claimed == ["shared_ev_profile_a"]
+    assert len(stopped) == 1
+    assert stopped[0]["binding_id"] == binding_id
+
+
+def test_end_of_cycle_override_never_replaces_conflicting_powersync_lease() -> None:
+    state = module.ReconciliationState(origin="external", physical_active=True)
+    claimed = []
+    stopped = []
+    context = {
+        "binding_id": "generic_ev", "active_profile_id": "shared_ev_profile_a",
+        "origin": "external", "physical_active": True, "observed_at": NOW,
+        "evidence": "fresh_power",
+    }
+
+    async def claim_external(profile_id):
+        claimed.append(profile_id)
+        return True
+
+    async def stop_and_confirm(**_kwargs):
+        stopped.append(True)
+        return True
+
+    assert not asyncio.run(
+        module.resolve_end_of_cycle_external_shared_session(
+            binding_id="generic_ev", active_profile_id="shared_ev_profile_a",
+            selected_params={"charger_type": "generic"}, state=state,
+            cycle_context=context, now=NOW, external_control_policy="override",
+            cycle_ledger={},
+            get_lease=lambda: {"owner": "powersync", "active_profile_id": "other"},
+            ensure_external_ownership=claim_external, stop_and_confirm=stop_and_confirm,
+        )
+    )
+    assert claimed == []
+    assert stopped == []
+
+
+def test_end_of_cycle_does_not_authorize_persisted_external_state_without_current_context() -> None:
+    stopped = []
+
+    async def stop_and_confirm(**_kwargs):
+        stopped.append(True)
+        return True
+
+    assert not asyncio.run(
+        module.resolve_end_of_cycle_external_shared_session(
+            binding_id="generic_ev", active_profile_id="shared_ev_profile_a",
+            selected_params={"charger_type": "generic"},
+            state=module.ReconciliationState(origin="external", physical_active=True),
+            cycle_context=None, now=NOW, external_control_policy="override", cycle_ledger={},
+            get_lease=lambda: {"owner": "external"},
+            ensure_external_ownership=lambda _profile: None, stop_and_confirm=stop_and_confirm,
+        )
+    )
+    assert stopped == []
+
+
+def test_end_of_cycle_does_not_stop_after_selector_changes_from_reconciled_context() -> None:
+    stopped = []
+
+    async def stop_and_confirm(**_kwargs):
+        stopped.append(True)
+        return True
+
+    assert not asyncio.run(
+        module.resolve_end_of_cycle_external_shared_session(
+            binding_id="generic_ev", active_profile_id="shared_ev_profile_b",
+            selected_params={"charger_type": "generic"},
+            state=module.ReconciliationState(origin="external", physical_active=True),
+            cycle_context={
+                "binding_id": "generic_ev", "active_profile_id": "shared_ev_profile_a",
+                "origin": "external", "physical_active": True, "observed_at": NOW,
+                "evidence": "fresh_power",
+            },
+            now=NOW, external_control_policy="override", cycle_ledger={},
+            get_lease=lambda: {"owner": "external"},
+            ensure_external_ownership=lambda _profile: None, stop_and_confirm=stop_and_confirm,
+        )
+    )
+    assert stopped == []
 
 
 def test_end_of_cycle_does_not_stop_when_allowed_or_already_resolved() -> None:
@@ -738,6 +879,12 @@ def test_end_of_cycle_does_not_stop_when_allowed_or_already_resolved() -> None:
             module.resolve_end_of_cycle_external_shared_session(
                 binding_id="generic_ev", active_profile_id="a",
                 selected_params={"charger_type": "generic"}, state=state,
+                cycle_context={
+                    "binding_id": "generic_ev", "active_profile_id": "a",
+                    "origin": "external", "physical_active": True,
+                    "observed_at": NOW, "evidence": "fresh_power",
+                },
+                now=NOW,
                 external_control_policy="override", cycle_ledger=ledger,
                 get_lease=lambda: None, ensure_external_ownership=lambda _profile: None,
                 stop_and_confirm=stop_and_confirm,
@@ -745,3 +892,10 @@ def test_end_of_cycle_does_not_stop_when_allowed_or_already_resolved() -> None:
         )
 
     assert stopped == []
+
+
+def test_cycle_reconciliation_clears_previous_context_before_attempting_a_new_read() -> None:
+    source = MODULE_PATH.read_text()
+    function = source[source.index("async def reconcile_selected_shared_loadpoint_cycle("):]
+
+    assert "    clear_cycle_context()\n\n    from .shared_loadpoint import" in function

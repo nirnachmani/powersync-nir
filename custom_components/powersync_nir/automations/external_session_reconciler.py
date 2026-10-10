@@ -417,6 +417,8 @@ async def reconcile_selected_shared_loadpoint_cycle(
         if isinstance(entry_data, dict):
             entry_data.pop("_shared_loadpoint_cycle_context", None)
 
+    clear_cycle_context()
+
     from .shared_loadpoint import (
         canonical_shared_loadpoint_id,
         binding_for_entry,
@@ -577,6 +579,8 @@ async def resolve_end_of_cycle_external_shared_session(
     active_profile_id: str | None,
     selected_params: Mapping[str, Any] | None,
     state: ReconciliationState,
+    cycle_context: Mapping[str, Any] | None,
+    now: datetime | None,
     external_control_policy: str,
     cycle_ledger: Mapping[str, Any] | None,
     get_lease: Callable[[], Mapping[str, Any] | None],
@@ -588,12 +592,32 @@ async def resolve_end_of_cycle_external_shared_session(
     Physical I/O and ownership mechanics are injected so this policy boundary
     stays independent from action dispatch and runtime/session state.
     """
+    current = _as_utc(now) or datetime.now(timezone.utc)
+    observed_at = (
+        _as_utc(cycle_context.get("observed_at"))
+        if isinstance(cycle_context, Mapping)
+        and isinstance(cycle_context.get("observed_at"), datetime)
+        else None
+    )
+    expected_evidence = (
+        "fresh_power" if binding_id == "generic_ev" else "fresh_evac_state"
+    )
+    context_is_current_fresh_external_session = (
+        isinstance(cycle_context, Mapping)
+        and cycle_context.get("binding_id") == binding_id
+        and cycle_context.get("active_profile_id") == active_profile_id
+        and cycle_context.get("origin") == "external"
+        and cycle_context.get("physical_active") is True
+        and cycle_context.get("evidence") == expected_evidence
+        and observed_at is not None
+        and 0 <= (current - observed_at).total_seconds() <= DEFAULT_FRESHNESS_SECONDS
+    )
     if (
         binding_id not in {"generic_ev", "sigenergy_charger"}
         or not active_profile_id
         or not isinstance(selected_params, Mapping)
+        or not context_is_current_fresh_external_session
         or state.origin != "external"
-        or state.physical_active is not True
         or state.stop_outcome is not None
     ):
         return False
@@ -609,6 +633,15 @@ async def resolve_end_of_cycle_external_shared_session(
         isinstance(record, Mapping) and record.get("allowed") is True
         for record in records.values()
     ):
+        return False
+
+    # The private guarded stop accepts only the external owner.  Fresh physical
+    # observation never displaces a PowerSync lease: when unowned, create the
+    # temporary external lease through the ownership API, then read it back.
+    if lease is None:
+        await ensure_external_ownership(active_profile_id)
+        lease = get_lease()
+    if not isinstance(lease, Mapping) or lease.get("owner") != "external":
         return False
 
     return await stop_and_confirm(

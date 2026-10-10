@@ -43348,6 +43348,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     claim_ev_ownership,
                     get_ev_ownership,
                     get_external_control_policy,
+                    release_ev_ownership,
                 )
                 from .automations.external_session_reconciler import (
                     load_reconciliation_state,
@@ -43384,6 +43385,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
 
                 async def ensure_external_ownership(profile_id):
+                    if binding_id is None:
+                        return False
+                    _lease_id, existing_lease = get_ev_ownership(hass, entry, binding_id)
+                    if existing_lease is not None:
+                        return existing_lease.get("owner") == "external"
                     claim_ev_ownership(
                         hass,
                         entry,
@@ -43393,6 +43399,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         reason="Observed external selected shared charging",
                         extra={"active_profile_id": profile_id, "observed": True},
                     )
+                    return True
 
                 async def stop_and_confirm(**kwargs):
                     async def stop():
@@ -43411,7 +43418,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         )
 
                     async def finalize():
-                        return None
+                        _lease_id, lease = get_ev_ownership(
+                            hass, entry, kwargs["binding_id"]
+                        )
+                        if isinstance(lease, dict) and lease.get("owner") == "external":
+                            release_ev_ownership(
+                                hass,
+                                entry,
+                                kwargs["binding_id"],
+                                reason="Confirmed external shared-session stop",
+                                command="external_stop_confirmed",
+                            )
 
                     return await stop_and_confirm_shared_handoff(
                         kwargs["state"],
@@ -43429,6 +43446,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         active_profile_id=active_profile_id,
                         selected_params=selected_params,
                         state=load_reconciliation_state(hass, entry, binding_id or ""),
+                        cycle_context=(
+                            entry_data.get("_shared_loadpoint_cycle_context")
+                            if isinstance(entry_data, dict)
+                            else None
+                        ),
+                        now=now,
                         external_control_policy=(
                             get_external_control_policy(hass, entry, active_profile_id)
                             if active_profile_id is not None
