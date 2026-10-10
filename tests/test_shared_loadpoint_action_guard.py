@@ -109,6 +109,110 @@ def _generic_params() -> dict:
     }
 
 
+def test_cycle_decision_ledger_records_selected_shared_generic_schedule_decision():
+    hass = _Hass()
+
+    actions._begin_automated_shared_loadpoint_cycle(hass, _Entry())
+    actions._record_automated_shared_loadpoint_decision(
+        hass,
+        _Entry(),
+        allowed=True,
+        responsible_mode="scheduled",
+        reason="Scheduled window",
+        source="scheduled",
+    )
+
+    assert hass.data["powersync_nir"]["entry-1"][
+        "_automated_shared_loadpoint_decision_ledger"
+    ] == {
+        "generic_ev": {
+            "shared_ev_profile_a": {
+                "allowed": True,
+                "responsible_mode": "scheduled",
+                "reason": "Scheduled window",
+                "source": "scheduled",
+            }
+        }
+    }
+
+
+def test_cycle_decision_ledger_records_selected_shared_evac_schedule_decision():
+    hass = _Hass()
+    entry = _Entry()
+    entry.options = {
+        **entry.options,
+        "generic_charger_enabled": False,
+        "sigenergy_charger_enabled": True,
+        "sigenergy_charger_type": "evac",
+    }
+
+    actions._begin_automated_shared_loadpoint_cycle(hass, entry)
+    actions._record_automated_shared_loadpoint_decision(
+        hass,
+        entry,
+        allowed=False,
+        responsible_mode="scheduled",
+        reason="Outside schedule",
+        source="",
+    )
+
+    assert hass.data["powersync_nir"]["entry-1"][
+        "_automated_shared_loadpoint_decision_ledger"
+    ]["sigenergy_charger"]["shared_ev_profile_a"] == {
+        "allowed": False,
+        "responsible_mode": "scheduled",
+        "reason": "Outside schedule",
+        "source": "",
+    }
+
+
+def test_cycle_decision_ledger_omits_unselected_and_non_shared_backends():
+    hass = _Hass(selector_state="unmapped")
+
+    actions._begin_automated_shared_loadpoint_cycle(hass, _Entry())
+    actions._record_automated_shared_loadpoint_decision(
+        hass, _Entry(), allowed=False, responsible_mode="scheduled", reason="No", source=""
+    )
+
+    entry = _Entry()
+    entry.options = {"shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle"}
+    actions._record_automated_shared_loadpoint_decision(
+        hass, entry, allowed=True, responsible_mode="scheduled", reason="No", source="scheduled"
+    )
+
+    tesla_hass = _Hass()
+    actions._begin_automated_shared_loadpoint_cycle(tesla_hass, _Entry())
+    tesla_entry = _Entry()
+    tesla_entry.options = {**tesla_entry.options, "generic_charger_enabled": False}
+    actions._record_automated_shared_loadpoint_decision(
+        tesla_hass,
+        tesla_entry,
+        allowed=True,
+        responsible_mode="scheduled",
+        reason="No",
+        source="scheduled",
+    )
+
+    assert hass.data["powersync_nir"]["entry-1"][
+        "_automated_shared_loadpoint_decision_ledger"
+    ] == {}
+    assert tesla_hass.data["powersync_nir"]["entry-1"][
+        "_automated_shared_loadpoint_decision_ledger"
+    ] == {}
+
+
+def test_cycle_decision_ledger_is_cleared_with_sequence_cycle():
+    hass = _Hass()
+    actions._begin_automated_shared_loadpoint_cycle(hass, _Entry())
+    actions._record_automated_shared_loadpoint_decision(
+        hass, _Entry(), allowed=True, responsible_mode="scheduled", reason="Yes", source="scheduled"
+    )
+
+    actions._clear_automated_shared_loadpoint_cycle(hass, _Entry())
+
+    assert "_automated_shared_loadpoint_decision_ledger" not in hass.data["powersync_nir"]["entry-1"]
+
+
 def _claim_shared_loadpoint(
     hass, *, profile_id: str, owner_mode: str = "scheduled", owner: str = "powersync"
 ) -> None:

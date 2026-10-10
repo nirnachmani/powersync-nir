@@ -11957,6 +11957,19 @@ class EVChargingModeCoordinator:
         scheduled_reason = ""
         if scheduled_exec:
             wants_charge, reason, _source = await scheduled_exec.get_charging_decision(current_price_cents)
+            try:
+                from .actions import _record_automated_shared_loadpoint_decision
+
+                _record_automated_shared_loadpoint_decision(
+                    self.hass,
+                    self.config_entry,
+                    allowed=wants_charge,
+                    responsible_mode="scheduled",
+                    reason=reason,
+                    source=_source,
+                )
+            except Exception as err:
+                _LOGGER.debug("Scheduled shared decision ledger record failed: %s", err)
             had_scheduled_control = (
                 scheduled_exec._state.is_charging or "Scheduled" in self._active_modes
                 or scheduled_exec._pending_stops or scheduled_exec._has_scheduled_tesla_sessions()

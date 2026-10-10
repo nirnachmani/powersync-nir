@@ -2172,6 +2172,56 @@ def _set_external_policy(hass, *vehicle_ids: str, policy: str = "yield") -> None
     ]
 
 
+def test_scheduled_shared_decision_is_logged_before_existing_start_behavior(monkeypatch):
+    hass = _FakeHass(states={"sensor.connected_vehicle": "tank"})
+    entry = _FakeConfigEntry()
+    entry.options = {
+        "generic_charger_enabled": True,
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Tesla",
+        "shared_loadpoint_profile_b_state": "tesla",
+    }
+    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+        "scheduled_charging"
+    ] = {"enabled": True, "start_time": "11:00", "end_time": "14:00", "max_price_cents": 30}
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        ev_planner.dt_util, "now", lambda: datetime(2026, 5, 27, 12, tzinfo=timezone.utc)
+    )
+
+    scheduled = ev_planner.ScheduledChargingExecutor(hass, entry)
+    scheduled.get_charging_decision = AsyncMock(
+        return_value=(True, "Scheduled: test window", "scheduled")
+    )
+    scheduled._start_charging = AsyncMock(return_value=True)
+    coordinator = ev_planner.EVChargingModeCoordinator(hass, entry)
+    actions = importlib.import_module("powersync_nir.automations.actions")
+    actions._begin_automated_shared_loadpoint_cycle(hass, entry)
+    previous_scheduled = ev_planner.get_scheduled_charging_executor()
+    previous_price = ev_planner.get_price_level_executor()
+    try:
+        ev_planner.set_scheduled_charging_executor(scheduled)
+        ev_planner.set_price_level_executor(None)
+        asyncio.run(coordinator.evaluate({}, 10))
+    finally:
+        ev_planner.set_scheduled_charging_executor(previous_scheduled)
+        ev_planner.set_price_level_executor(previous_price)
+
+    scheduled._start_charging.assert_awaited_once_with("Scheduled: test window")
+    assert coordinator.get_state()["active_modes"] == ["Scheduled"]
+    assert hass.data["powersync_nir"]["entry-1"][
+        "_automated_shared_loadpoint_decision_ledger"
+    ]["generic_ev"]["shared_ev_profile_a"] == {
+        "allowed": True,
+        "responsible_mode": "scheduled",
+        "reason": "Scheduled: test window",
+        "source": "scheduled",
+    }
+
+
 def _scheduled_price_hass(schedule: dict | None) -> _FakeHass:
     hass = _FakeHass()
     hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[

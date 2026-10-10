@@ -6094,6 +6094,7 @@ _phase_load_management_locks: Dict[str, asyncio.Lock] = {}
 _phase_load_management_targets: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
 _AUTOMATED_SHARED_SEQUENCE_BUDGET_KEY = "_automated_shared_loadpoint_sequence_budget"
+_AUTOMATED_SHARED_DECISION_LEDGER_KEY = "_automated_shared_loadpoint_decision_ledger"
 _AUTOMATED_SHARED_SEQUENCE_TOKEN_KEY = "_automated_shared_sequence_token"
 
 
@@ -6117,6 +6118,7 @@ def _begin_automated_shared_loadpoint_cycle(
             "generation": object(),
             "reservations": {},
         }
+        entry_data[_AUTOMATED_SHARED_DECISION_LEDGER_KEY] = {}
 
 
 def _clear_automated_shared_loadpoint_cycle(
@@ -6126,6 +6128,43 @@ def _clear_automated_shared_loadpoint_cycle(
     entry_data = _automated_shared_sequence_entry_data(hass, config_entry)
     if entry_data is not None:
         entry_data.pop(_AUTOMATED_SHARED_SEQUENCE_BUDGET_KEY, None)
+        entry_data.pop(_AUTOMATED_SHARED_DECISION_LEDGER_KEY, None)
+
+
+def _record_automated_shared_loadpoint_decision(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry | None,
+    *,
+    allowed: bool,
+    responsible_mode: str,
+    reason: str,
+    source: str,
+) -> None:
+    """Record a policy decision for the selected shared loadpoint in this cycle."""
+    entry_data = _automated_shared_sequence_entry_data(hass, config_entry)
+    if entry_data is None:
+        return
+    ledger = entry_data.get(_AUTOMATED_SHARED_DECISION_LEDGER_KEY)
+    if not isinstance(ledger, dict):
+        return
+
+    from .shared_loadpoint import (
+        canonical_shared_loadpoint_id,
+        resolve_active_shared_profile,
+    )
+
+    active_profile_id = resolve_active_shared_profile(hass, config_entry)
+    if active_profile_id is None:
+        return
+    loadpoint_id = canonical_shared_loadpoint_id(config_entry, active_profile_id)
+    if loadpoint_id not in ("generic_ev", "sigenergy_charger"):
+        return
+    ledger.setdefault(loadpoint_id, {})[active_profile_id] = {
+        "allowed": bool(allowed),
+        "responsible_mode": responsible_mode,
+        "reason": reason,
+        "source": source,
+    }
 
 
 def _reserve_automated_shared_loadpoint_sequence(
