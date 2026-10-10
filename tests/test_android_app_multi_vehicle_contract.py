@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests/contracts/android_app/fixtures/android-1.0.7-336-two-logical-vehicles.json"
-SOURCE = ROOT / "custom_components/powersync_nir/__init__.py"
+SOURCE = ROOT / "custom_components/power_sync/__init__.py"
 
 
 def test_two_anonymous_logical_profiles_fit_the_released_app_vehicle_contract():

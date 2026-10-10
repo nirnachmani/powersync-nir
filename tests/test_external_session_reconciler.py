@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = (
     ROOT
     / "custom_components"
-    / "powersync_nir"
+    / "power_sync"
     / "automations"
     / "external_session_reconciler.py"
 )
@@ -42,7 +42,7 @@ def test_reconciliation_state_round_trips_through_private_binding_record() -> No
 
     class Hass:
         def __init__(self, store: Store) -> None:
-            self.data = {"powersync_nir": {"entry-1": {"automation_store": store}}}
+            self.data = {"power_sync": {"entry-1": {"automation_store": store}}}
 
     store = Store()
     hass = Hass(store)
@@ -1350,7 +1350,7 @@ def test_confirmed_stop_keeps_its_fresh_observation_boundary_across_persistence(
             return None
 
     class Hass:
-        data = {"powersync_nir": {"entry-1": {"automation_store": Store()}}}
+        data = {"power_sync": {"entry-1": {"automation_store": Store()}}}
 
     state = module.ReconciliationState(
         stop_outcome={"status": "confirmed"}, observed_session_token="session-a", observed_at=NOW,
@@ -1409,7 +1409,7 @@ def test_restart_with_persisted_external_activity_requires_a_fresh_cycle_observa
 
     class Hass:
         def __init__(self, store) -> None:
-            self.data = {"powersync_nir": {"entry-1": {"automation_store": store}}}
+            self.data = {"power_sync": {"entry-1": {"automation_store": store}}}
 
     store = Store()
     before_restart = Hass(store)
@@ -1466,7 +1466,7 @@ def test_restart_with_persisted_stop_pending_needs_fresh_idle_readback() -> None
 
     class Hass:
         def __init__(self, store) -> None:
-            self.data = {"powersync_nir": {"entry-1": {"automation_store": store}}}
+            self.data = {"power_sync": {"entry-1": {"automation_store": store}}}
 
     store = Store()
     before_restart = Hass(store)

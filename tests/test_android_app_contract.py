@@ -17,8 +17,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests/contracts/android_app/fixtures/android-1.0.7-336-static-routes.json"
 SOURCES = (
-    ROOT / "custom_components/powersync_nir/__init__.py",
-    ROOT / "custom_components/powersync_nir/powerwall_local/views.py",
+    ROOT / "custom_components/power_sync/__init__.py",
+    ROOT / "custom_components/power_sync/powerwall_local/views.py",
 )
 
 
