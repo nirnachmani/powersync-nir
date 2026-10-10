@@ -43344,6 +43344,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _observe_shared_loadpoint_for_direct_lease,
                     _stop_external_shared_session_guarded,
                     _adopt_observed_solar_surplus_shared_session,
+                    _adopt_observed_scheduled_shared_session,
                 )
                 from .automations.ev_ownership import (
                     claim_ev_ownership,
@@ -43468,6 +43469,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         observed_at=kwargs["observed_at"],
                     )
 
+                async def adopt_scheduled_session(**kwargs):
+                    adopted = await _adopt_observed_scheduled_shared_session(
+                        hass,
+                        entry,
+                        binding_id=kwargs["binding_id"],
+                        active_profile_id=kwargs["active_profile_id"],
+                        selected_params=kwargs["selected_params"],
+                        observed_at=kwargs["observed_at"],
+                    )
+                    if adopted:
+                        from .automations.ev_charging_planner import (
+                            get_scheduled_charging_executor,
+                        )
+
+                        scheduled = get_scheduled_charging_executor()
+                        if (
+                            scheduled is not None
+                            and scheduled.config_entry.entry_id == entry.entry_id
+                        ):
+                            scheduled.update_charging_state(
+                                True,
+                                "Adopted observed external Scheduled Charging session",
+                            )
+                    return adopted
+
                 try:
                     reconciliation_state = load_reconciliation_state(hass, entry, binding_id or "")
                     await resolve_end_of_cycle_external_shared_session(
@@ -43498,6 +43524,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         stop_and_confirm=stop_and_confirm,
                         release_temporary_external_ownership=release_temporary_external_ownership,
                         adopt_solar_session=adopt_solar_session,
+                        adopt_scheduled_session=adopt_scheduled_session,
                     )
                     await persist_reconciliation_state(
                         hass, entry, binding_id or "", reconciliation_state

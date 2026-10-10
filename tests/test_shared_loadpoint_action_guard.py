@@ -238,6 +238,60 @@ def test_observed_solar_adoption_creates_one_seeded_runtime_without_hardware_or_
     assert lease["active_profile_id"] == "shared_ev_profile_a"
 
 
+@pytest.mark.parametrize(
+    ("charger_type", "binding_id"),
+    [("generic", "generic_ev"), ("sigenergy", "sigenergy_charger")],
+)
+def test_observed_scheduled_adoption_creates_one_runtime_without_hardware_or_timer(
+    monkeypatch, charger_type, binding_id
+):
+    hass, entry = _shared_solar_preflight_setup(
+        charger_type=charger_type, physical_id=binding_id
+    )
+    actions._dynamic_ev_state.clear()
+    timer_spy = MagicMock()
+    monkeypatch.setattr(actions, "async_track_time_interval", timer_spy)
+    monkeypatch.setattr(actions, "async_track_point_in_time", timer_spy)
+
+    class Session:
+        id = "adopted-scheduled-session"
+
+    manager = SimpleNamespace(start_session=AsyncMock(return_value=Session()))
+    sessions = types.ModuleType("powersync_nir.automations.ev_charging_session")
+    sessions.get_session_manager = lambda: manager
+    monkeypatch.setitem(sys.modules, sessions.__name__, sessions)
+
+    adopt = getattr(actions, "_adopt_observed_scheduled_shared_session", None)
+    assert adopt is not None
+    for _ in range(2):
+        assert asyncio.run(
+            adopt(
+                hass,
+                entry,
+                binding_id=binding_id,
+                active_profile_id="shared_ev_profile_a",
+                selected_params={"charger_type": charger_type},
+                observed_at=datetime(2026, 10, 10, tzinfo=timezone.utc),
+            )
+        )
+
+    state = actions._dynamic_ev_state["entry-1"][binding_id]
+    assert state["active"] is True
+    assert state["active_profile_id"] == "shared_ev_profile_a"
+    assert state["charging_started"] is True
+    assert state["session_id"] == "adopted-scheduled-session"
+    assert state["params"]["dynamic_mode"] == "scheduled"
+    assert state["params"]["owner_mode"] == "scheduled"
+    assert state["params"]["adoption_provenance"] == "observed_external_session"
+    assert manager.start_session.await_count == 1
+    hass.services.async_call.assert_not_awaited()
+    timer_spy.assert_not_called()
+    lease = ownership.get_ev_ownership(hass, entry, binding_id)[1]
+    assert lease["owner"] == "powersync"
+    assert lease["owner_mode"] == "scheduled"
+    assert lease["active_profile_id"] == "shared_ev_profile_a"
+
+
 def test_shared_solar_preflight_excludes_tesla_and_sigenergy_evdc(monkeypatch):
     hass, entry = _shared_solar_preflight_setup()
     entry.options = {**entry.options, "generic_charger_enabled": False}

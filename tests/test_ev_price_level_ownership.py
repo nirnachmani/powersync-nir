@@ -3613,6 +3613,109 @@ def test_scheduled_sigenergy_start_uses_sigenergy_charger_loadpoint(fake_actions
     assert params["allow_ownership_takeover"] is True
 
 
+@pytest.mark.parametrize(
+    ("charger_type", "loadpoint_id", "options"),
+    [
+        (
+            "generic",
+            "generic_ev",
+            {
+                "generic_charger_enabled": True,
+                "generic_charger_switch_entity": "switch.garage_ev",
+            },
+        ),
+        (
+            "sigenergy",
+            "sigenergy_charger",
+            {
+                "sigenergy_charger_enabled": True,
+                "sigenergy_charger_host": "192.0.2.10",
+                "sigenergy_charger_port": 502,
+                "sigenergy_charger_slave_id": 1,
+                "sigenergy_charger_type": "evac",
+            },
+        ),
+    ],
+)
+def test_scheduled_adopted_shared_session_uses_normal_stop_when_denied(
+    fake_actions, monkeypatch, charger_type, loadpoint_id, options
+):
+    """An adopted session must use Scheduled's ordinary denied-stop path."""
+    fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    class Entry(_FakeConfigEntry):
+        pass
+
+    Entry.options = options
+    hass = _FakeHass()
+    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+        "scheduled_charging"
+    ] = {
+        "enabled": True,
+        "start_time": "12:00",
+        "end_time": "14:00",
+        "max_price_cents": 10,
+    }
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: datetime(2026, 9, 17, 12, tzinfo=timezone.utc))
+    executor = ev_planner.ScheduledChargingExecutor(hass, Entry())
+    executor.update_charging_state(True, "Adopted observed external Scheduled Charging session")
+
+    asyncio.run(executor.evaluate(99))
+
+    fake_actions._action_stop_ev_charging_dynamic.assert_awaited_once()
+    _hass, _entry, params = fake_actions._action_stop_ev_charging_dynamic.await_args.args
+    assert params["vehicle_id"] == loadpoint_id
+    assert params["charger_type"] == charger_type
+    assert executor.get_state()["is_charging"] is False
+    assert executor.get_state()["last_decision"] == "stopped"
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"generic_charger_enabled": True},
+        {
+            "sigenergy_charger_enabled": True,
+            "sigenergy_charger_host": "192.0.2.10",
+            "sigenergy_charger_port": 502,
+            "sigenergy_charger_slave_id": 1,
+            "sigenergy_charger_type": "evac",
+        },
+    ],
+)
+def test_scheduled_adopted_shared_session_does_not_duplicate_allowed_start(
+    fake_actions, monkeypatch, options
+):
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    class Entry(_FakeConfigEntry):
+        pass
+
+    Entry.options = options
+    hass = _FakeHass()
+    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+        "scheduled_charging"
+    ] = {
+        "enabled": True,
+        "start_time": "12:00",
+        "end_time": "14:00",
+        "max_price_cents": 10,
+    }
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: datetime(2026, 9, 17, 12, tzinfo=timezone.utc))
+    executor = ev_planner.ScheduledChargingExecutor(hass, Entry())
+    executor.update_charging_state(True, "Adopted observed external Scheduled Charging session")
+
+    asyncio.run(executor.evaluate(5))
+
+    fake_actions._action_start_ev_charging_dynamic.assert_not_awaited()
+    assert executor.get_state()["is_charging"] is True
+    assert executor.get_state()["last_decision"] == "charging"
+
+
 def test_solar_surplus_config_falls_back_to_sigenergy_entry_charger():
     class SigenergyEntry(_FakeConfigEntry):
         options = {

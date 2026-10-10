@@ -6377,6 +6377,109 @@ async def _adopt_observed_solar_surplus_shared_session(
     return True
 
 
+async def _adopt_observed_scheduled_shared_session(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    *,
+    binding_id: str,
+    active_profile_id: str,
+    selected_params: Mapping[str, Any],
+    observed_at: datetime | None,
+) -> bool:
+    """Attach Scheduled runtime state to a proven active shared loadpoint.
+
+    Adoption emits neither a hardware start/current write nor a timer. The next
+    Scheduled evaluation owns normal rate and stop behavior.
+    """
+    expected_charger = "generic" if binding_id == "generic_ev" else "sigenergy"
+    if (
+        binding_id not in {"generic_ev", "sigenergy_charger"}
+        or not active_profile_id
+        or str(selected_params.get("charger_type") or "").lower() != expected_charger
+    ):
+        return False
+    entry_id = config_entry.entry_id
+    existing = _dynamic_ev_state.get(entry_id, {}).get(binding_id)
+    if isinstance(existing, dict) and existing.get("active"):
+        return existing.get("active_profile_id") == active_profile_id
+
+    from .ev_ownership import claim_ev_ownership, get_ev_ownership
+
+    _lease_id, lease = get_ev_ownership(hass, config_entry, binding_id)
+    if isinstance(lease, Mapping) and lease.get("owner") == "powersync":
+        return False
+
+    entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry_id, {})
+    params = {
+        **dict(selected_params),
+        "vehicle_id": binding_id,
+        "vehicle_vin": binding_id,
+        "active_logical_vehicle_id": active_profile_id,
+        "dynamic_mode": "scheduled",
+        "owner_mode": "scheduled",
+        "charger_type": expected_charger,
+        "min_charge_amps": selected_params.get("min_amps", selected_params.get("min_charge_amps", 5)),
+        "max_charge_amps": selected_params.get("max_amps", selected_params.get("max_charge_amps", 32)),
+        "voltage": selected_params.get("voltage", 240),
+        "phases": selected_params.get("phases", 1),
+        "adoption_provenance": "observed_external_session",
+        "adopted_at": (observed_at or dt_util.now()).isoformat(),
+    }
+    _dynamic_ev_state.setdefault(entry_id, {})[binding_id] = {
+        "active": True,
+        "active_profile_id": active_profile_id,
+        "params": params,
+        "current_amps": 0,
+        "target_amps": 0,
+        "cancel_timer": None,
+        "priority": selected_params.get("priority", 1),
+        "paused": False,
+        "paused_reason": None,
+        "charging_started": True,
+        "reason": "Adopted observed external Scheduled Charging session",
+        "vehicle_name": selected_params.get("display_name"),
+        "session_id": None,
+    }
+    try:
+        from .ev_charging_session import get_session_manager
+
+        manager = get_session_manager()
+        if manager is not None:
+            existing_session = getattr(manager, "active_sessions", {}).get(binding_id)
+            if existing_session is not None and not getattr(existing_session, "completed", False):
+                if getattr(existing_session, "vehicle_id", None) != active_profile_id:
+                    _dynamic_ev_state[entry_id].pop(binding_id, None)
+                    return False
+                session = existing_session
+            else:
+                session = await manager.start_session(
+                    vehicle_id=active_profile_id,
+                    loadpoint_id=binding_id,
+                    mode="scheduled",
+                    start_time=observed_at or dt_util.now(),
+                )
+            _dynamic_ev_state[entry_id][binding_id]["session_id"] = session.id
+    except Exception as err:
+        _LOGGER.debug("Scheduled observed-session tracking failed: %s", err)
+
+    state = _dynamic_ev_state[entry_id][binding_id]
+    state["ownership"] = claim_ev_ownership(
+        hass,
+        config_entry,
+        binding_id,
+        owner_mode="scheduled",
+        session_id=state.get("session_id"),
+        reason=state["reason"],
+        extra={
+            "active_profile_id": active_profile_id,
+            "charger_type": expected_charger,
+            "adoption_provenance": "observed_external_session",
+        },
+    )
+    entry_data["dynamic_ev_state"] = _dynamic_ev_state[entry_id]
+    return True
+
+
 def _reserve_automated_shared_loadpoint_sequence(
     hass: HomeAssistant, config_entry: ConfigEntry | None, params: dict[str, Any]
 ) -> bool:
