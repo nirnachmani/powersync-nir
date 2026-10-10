@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable, Mapping
 
 
 GENERIC_ACTIVE_POWER_EPSILON_KW = 0.05
 DEFAULT_FRESHNESS_SECONDS = 90
+DEFAULT_COMMAND_FRESHNESS_SECONDS = 90
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,76 @@ def generic_observation_from_hass(
         observed_at=observed_at,
         now=now,
         freshness_seconds=freshness_seconds,
+    )
+
+
+def _recent_successful_powersync_command(
+    commands: Mapping[str, Mapping[str, Any]],
+    *,
+    loadpoint_id: str,
+    now: datetime,
+    freshness_seconds: int,
+) -> bool:
+    """Return whether the canonical loadpoint has recent successful command evidence."""
+    command = commands.get(loadpoint_id)
+    if not isinstance(command, Mapping):
+        return False
+    command_at = command.get("at")
+    if isinstance(command_at, str):
+        try:
+            command_at = datetime.fromisoformat(command_at)
+        except ValueError:
+            return False
+    timestamp = _as_utc(command_at) if isinstance(command_at, datetime) else None
+    if timestamp is None:
+        return False
+    current = _as_utc(now)
+    assert current is not None
+    age_seconds = (current - timestamp).total_seconds()
+    return bool(
+        command.get("source") == "powersync"
+        and command.get("success")
+        and 0 <= age_seconds <= freshness_seconds
+    )
+
+
+def reconcile_generic_session_from_hass(
+    hass: Any,
+    config_entry: Any,
+    loadpoint_id: str,
+    params: dict[str, Any],
+    *,
+    previous: ReconciliationState | None = None,
+    active_profile_id: str | None = None,
+    now: datetime | None = None,
+    freshness_seconds: int = DEFAULT_FRESHNESS_SECONDS,
+    command_freshness_seconds: int = DEFAULT_COMMAND_FRESHNESS_SECONDS,
+    get_last_commands: Callable[[Any, Any], Mapping[str, Mapping[str, Any]]] | None = None,
+) -> ReconciliationState:
+    """Reconcile Generic telemetry with the canonical PowerSync command ledger."""
+    current = _as_utc(now) or datetime.now(timezone.utc)
+    observation = generic_observation_from_hass(
+        hass,
+        binding_id=loadpoint_id,
+        params=params,
+        now=current,
+        freshness_seconds=freshness_seconds,
+    )
+    if get_last_commands is None:
+        from .ev_ownership import get_ev_last_commands
+
+        get_last_commands = get_ev_last_commands
+    powersync_command_observed = _recent_successful_powersync_command(
+        get_last_commands(hass, config_entry),
+        loadpoint_id=loadpoint_id,
+        now=current,
+        freshness_seconds=command_freshness_seconds,
+    )
+    return reconcile_shared_external_session(
+        observation,
+        previous=previous,
+        powersync_command_observed=powersync_command_observed,
+        active_profile_id=active_profile_id,
     )
 
 
