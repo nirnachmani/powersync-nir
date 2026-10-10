@@ -448,3 +448,74 @@ def test_active_shared_handoff_fences_interleaved_old_periodic_write(monkeypatch
     assert old_state["params"] is old_params
     assert hass.data["powersync_nir"][entry.entry_id]["dynamic_ev_state"]["generic_ev"] is old_state
     set_amps.assert_not_awaited()
+
+
+def test_shared_dynamic_session_keeps_logical_identity_for_periodic_rate_and_stop(monkeypatch):
+    """A shared runtime carries its selected profile through later physical writes."""
+    hass = _Hass()
+    entry = _Entry()
+    actions._dynamic_ev_state.clear()
+
+    start_set_amps = AsyncMock(return_value=True)
+    original_set_amps = actions._set_vehicle_amps
+    monkeypatch.setattr(actions, "_set_vehicle_amps", start_set_amps)
+    monkeypatch.setattr(actions, "_resolve_teslemetry_bt_prefix", lambda _hass: None)
+
+    assert asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            entry,
+            {
+                **_generic_params(),
+                "vehicle_id": "shared_ev_profile_a",
+                "dynamic_mode": "battery_target",
+                "fixed_charge_amps": 8,
+                "max_charge_amps": 8,
+            },
+        )
+    ) is True
+
+    state = actions._dynamic_ev_state[entry.entry_id]["generic_ev"]
+    runtime_params = state["params"]
+    assert runtime_params["logical_vehicle_id"] == "shared_ev_profile_a"
+    assert runtime_params["active_logical_vehicle_id"] == "shared_ev_profile_a"
+    assert runtime_params["shared_loadpoint_binding"] is True
+
+    # Simulate the later controller tick using the persisted runtime params.
+    monkeypatch.setattr(actions, "_set_vehicle_amps", original_set_amps)
+    state["current_amps"] = 0
+    monkeypatch.setattr(
+        actions, "_generic_charger_ready_for_start", lambda _hass, _params: (True, None)
+    )
+    monkeypatch.setattr(
+        actions, "_clear_ble_dynamic_session_if_unplugged", AsyncMock(return_value=False)
+    )
+    monkeypatch.setattr(
+        actions, "_release_dynamic_tesla_if_away", AsyncMock(return_value=False)
+    )
+    periodic_set_amps = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", periodic_set_amps)
+    assert asyncio.run(
+        actions._dynamic_ev_update(hass, entry, entry.entry_id, "generic_ev")
+    ) is None
+    periodic_set_amps.assert_awaited_once_with(
+        hass, entry, "generic_ev", 8, runtime_params
+    )
+
+    # Its dynamic stop uses the same persisted identity to reach the physical key.
+    monkeypatch.setattr(actions, "_set_vehicle_amps", original_set_amps)
+    assert asyncio.run(
+        actions._action_stop_ev_charging_dynamic(
+            hass,
+            entry,
+            {"vehicle_id": "generic_ev", "stop_charging": True},
+        )
+    ) is True
+    assert hass.services.async_call.await_args_list[-1].args == (
+        "switch", "turn_off", {"entity_id": "switch.shared_ev"}
+    )
+
+    # The physical pseudo-ID is still not a substitute for a logical profile.
+    assert asyncio.run(
+        actions._set_vehicle_amps(hass, entry, "generic_ev", 8, _generic_params())
+    ) is False

@@ -13898,6 +13898,11 @@ async def _action_start_ev_charging_dynamic_locked(
         "owner_mode": owner_mode,
         "vehicle_vin": params.get("vehicle_vin"),
         "vehicle_name": params.get("vehicle_name"),
+        # Preserve the selected shared-profile identity for periodic rate and
+        # teardown commands, which are keyed by the physical loadpoint.
+        "logical_vehicle_id": params.get("logical_vehicle_id"),
+        "active_logical_vehicle_id": params.get("active_logical_vehicle_id"),
+        "shared_loadpoint_binding": bool(params.get("shared_loadpoint_binding")),
         "min_charge_amps": min_charge_amps,
         "configured_max_charge_amps": params.get(
             "configured_max_charge_amps",
