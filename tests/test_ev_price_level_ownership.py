@@ -2172,6 +2172,79 @@ def _set_external_policy(hass, *vehicle_ids: str, policy: str = "yield") -> None
     ]
 
 
+@pytest.mark.parametrize(
+    ("selector_state", "selected_profile"),
+    (
+        ("tank", "shared_ev_profile_a"),
+        ("tesla", "shared_ev_profile_b"),
+        ("unknown", None),
+        ("unavailable", None),
+    ),
+)
+def test_shared_schedule_keeps_only_the_selected_profile_plan(
+    monkeypatch, selector_state, selected_profile
+):
+    """A selector handoff cannot leave a sibling Smart Schedule reservation."""
+    hass = _FakeHass(states={"sensor.connected_vehicle": selector_state})
+    entry = _FakeConfigEntry()
+    entry.options = {
+        "generic_charger_enabled": True,
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Tesla",
+        "shared_loadpoint_profile_b_state": "tesla",
+    }
+    now = datetime(2026, 10, 11, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+
+    class _Planner:
+        def _is_grid_charging_blocked_at(self, _when):
+            return False
+
+        async def should_charge_now(self, **_kwargs):
+            return False, "not this window", "waiting"
+
+    executor = ev_planner.AutoScheduleExecutor(hass, entry, planner=_Planner())
+    executor._get_vehicle_soc = AsyncMock(return_value=50)
+    executor._resolve_effective_charger_capability = AsyncMock(return_value=None)
+    plan = ev_planner.ChargingPlan(
+        vehicle_id="shared",
+        current_soc=50,
+        target_soc=80,
+        target_time=None,
+        energy_needed_kwh=8.0,
+        windows=[],
+    )
+    for vehicle_id in ("shared_ev_profile_a", "shared_ev_profile_b"):
+        state = executor.get_state(vehicle_id)
+        state.current_plan = plan
+        state.current_window = SimpleNamespace()
+        state.last_plan_update = now.replace(tzinfo=None)
+        executor._settings[vehicle_id] = ev_planner.AutoScheduleSettings(
+            enabled=True, vehicle_id=vehicle_id, target_soc=80
+        )
+
+    asyncio.run(
+        executor._evaluate_vehicle(
+            "shared_ev_profile_a",
+            executor._settings["shared_ev_profile_a"],
+            {"battery_soc": 100, "solar_power": 0, "load_power": 1000, "grid_power": 0},
+            current_price_cents=20,
+        )
+    )
+
+    for vehicle_id, state in executor._state.items():
+        if vehicle_id in ("shared_ev_profile_a", "shared_ev_profile_b"):
+            if vehicle_id == selected_profile:
+                assert state.current_plan is not None
+            else:
+                assert state.current_plan is None
+                assert state.current_window is None
+
+
 def test_scheduled_shared_decision_is_logged_before_existing_start_behavior(monkeypatch):
     hass = _FakeHass(states={"sensor.connected_vehicle": "tank"})
     entry = _FakeConfigEntry()

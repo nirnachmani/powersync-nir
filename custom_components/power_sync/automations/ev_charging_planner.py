@@ -6170,6 +6170,44 @@ class AutoScheduleExecutor:
         settings.battery_capacity_source = resolved.battery_capacity_source
         return resolved
 
+    def _reconcile_shared_profile_plan_eligibility(self, vehicle_id: str) -> bool:
+        """Keep forecast authority with the selector's one shared profile.
+
+        Logical profiles retain their own settings and SoC cache, but only the
+        selected profile can reserve the sole physical Generic/EVAC loadpoint.
+        Clearing stale runtime plans here also makes selector changes and a
+        restored executor fail closed before the optimizer refreshes them.
+        """
+        from .shared_loadpoint import (
+            PROFILE_A_ID,
+            PROFILE_B_ID,
+            binding_for_entry,
+            resolve_active_shared_profile,
+        )
+
+        if vehicle_id not in (PROFILE_A_ID, PROFILE_B_ID):
+            return True
+        if binding_for_entry(self.config_entry) is None:
+            return True
+
+        selected_profile = resolve_active_shared_profile(
+            self.hass, self.config_entry
+        )
+        for profile_id in (PROFILE_A_ID, PROFILE_B_ID):
+            if profile_id == selected_profile:
+                continue
+            sibling_state = self._state.get(profile_id)
+            if sibling_state is None:
+                continue
+            sibling_state.current_plan = None
+            sibling_state.current_window = None
+            sibling_state.last_decision = "unselected_shared_profile"
+            sibling_state.last_decision_reason = (
+                "Shared loadpoint selector does not authorize this logical profile"
+            )
+
+        return selected_profile == vehicle_id
+
     async def _evaluate_vehicle(
         self,
         vehicle_id: str,
@@ -6182,6 +6220,8 @@ class AutoScheduleExecutor:
         self._sync_charger_params_from_vehicle_configs(vehicle_id, settings)
 
         state = self.get_state(vehicle_id)
+        if not self._reconcile_shared_profile_plan_eligibility(vehicle_id):
+            return
         now = datetime.now()
         ha_now = dt_util.now()
         weekday = ha_now.weekday() if hasattr(ha_now, "weekday") else now.weekday()

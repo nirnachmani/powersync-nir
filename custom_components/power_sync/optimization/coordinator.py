@@ -8181,6 +8181,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 get_auto_schedule_executor,
                 is_smart_schedule_grid_price_allowed,
             )
+            from ..automations.shared_loadpoint import (
+                PROFILE_A_ID,
+                PROFILE_B_ID,
+                binding_for_entry,
+                canonical_shared_loadpoint_id,
+                resolve_active_shared_profile,
+            )
             from ..const import DOMAIN
             from ..solar_surplus_config import get_stored_solar_surplus_config
             from .ev_load_plan import ev_plan_from_demand
@@ -8199,7 +8206,37 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             now = dt_util.now()
             plans = []
             policy_diagnostics: dict[str, dict[str, Any]] = {}
+            shared_binding = binding_for_entry(executor.config_entry)
+            selected_shared_profile = (
+                resolve_active_shared_profile(
+                    getattr(self, "hass", None), executor.config_entry
+                )
+                if shared_binding is not None
+                else None
+            )
+            shared_physical_loadpoint = (
+                canonical_shared_loadpoint_id(
+                    executor.config_entry, PROFILE_A_ID
+                )
+                if shared_binding is not None
+                else None
+            )
             for vehicle_id, state in (getattr(executor, "_state", {}) or {}).items():
+                if (
+                    shared_binding is not None
+                    and (
+                        vehicle_id == shared_physical_loadpoint
+                        or (
+                            vehicle_id in (PROFILE_A_ID, PROFILE_B_ID)
+                            and vehicle_id != selected_shared_profile
+                        )
+                    )
+                ):
+                    # The planner normally clears this at its availability
+                    # boundary. Keep this narrow read-side guard for restored
+                    # or selector-race state so two logical profiles cannot
+                    # reach the LP as one physical Generic/EVAC loadpoint.
+                    continue
                 charging_plan = getattr(state, "current_plan", None)
                 if charging_plan is None:
                     continue

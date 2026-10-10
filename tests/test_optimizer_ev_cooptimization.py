@@ -608,6 +608,7 @@ def build_ev_charge_plan():
     names = _STUBS + (
         "power_sync.automations",
         "power_sync.automations.ev_charging_planner",
+        "power_sync.automations.shared_loadpoint",
         "power_sync.const",
         "power_sync.solar_surplus_config",
         "power_sync.optimization._ev_plan_probe",
@@ -636,6 +637,7 @@ def build_ev_charge_plan():
     optimization.__path__ = [str(COMPONENT_ROOT / "optimization")]
     automations = types.ModuleType("power_sync.automations")
     planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+    shared_loadpoint = types.ModuleType("power_sync.automations.shared_loadpoint")
     holder: dict = {
         "executor": None,
         "solar_config": {
@@ -654,6 +656,23 @@ def build_ev_charge_plan():
             or float(price_cents) <= float(max_grid_price_cents)
         )
     )
+    setattr(shared_loadpoint, "PROFILE_A_ID", "shared_ev_profile_a")
+    setattr(shared_loadpoint, "PROFILE_B_ID", "shared_ev_profile_b")
+    setattr(shared_loadpoint, "binding_for_entry", lambda _entry: object())
+    setattr(
+        shared_loadpoint,
+        "canonical_shared_loadpoint_id",
+        lambda _entry, vehicle_id, _charger_type=None: (
+            "generic_ev"
+            if vehicle_id in ("shared_ev_profile_a", "shared_ev_profile_b")
+            else None
+        ),
+    )
+    setattr(
+        shared_loadpoint,
+        "resolve_active_shared_profile",
+        lambda _hass, _entry: holder.get("selected_profile"),
+    )
     const = types.ModuleType("power_sync.const")
     const.DOMAIN = "power_sync"
     solar_config = types.ModuleType("power_sync.solar_surplus_config")
@@ -666,6 +685,7 @@ def build_ev_charge_plan():
             "power_sync.optimization": optimization,
             "power_sync.automations": automations,
             "power_sync.automations.ev_charging_planner": planner,
+            "power_sync.automations.shared_loadpoint": shared_loadpoint,
             "power_sync.const": const,
             "power_sync.solar_surplus_config": solar_config,
         }
@@ -778,6 +798,46 @@ def test_a_deadline_already_past_is_still_skipped(build_ev_charge_plan):
         method(types.SimpleNamespace(config_entry=_ENTRY), _solve_timestamps())
         == []
     )
+
+
+@pytest.mark.parametrize("selected_profile", ("shared_ev_profile_a", "shared_ev_profile_b"))
+def test_shared_loadpoint_optimizer_accepts_only_the_selected_logical_plan(
+    build_ev_charge_plan, selected_profile
+):
+    """A stale sibling plan cannot become a second demand envelope after restart."""
+    method, holder, warnings = build_ev_charge_plan
+    shared_plan = types.SimpleNamespace(target_time=None, energy_needed_kwh=13.75)
+    settings = types.SimpleNamespace(
+        enabled=True,
+        max_charge_amps=46,
+        voltage=240,
+        phases=1,
+        min_charge_amps=6,
+    )
+    holder["selected_profile"] = selected_profile
+    holder["executor"] = types.SimpleNamespace(
+        config_entry=_ENTRY,
+        _state={
+            "shared_ev_profile_a": types.SimpleNamespace(current_plan=shared_plan),
+            "shared_ev_profile_b": types.SimpleNamespace(current_plan=shared_plan),
+            "generic_ev": types.SimpleNamespace(current_plan=shared_plan),
+        },
+        _settings={
+            "shared_ev_profile_a": settings,
+            "shared_ev_profile_b": settings,
+            "generic_ev": settings,
+        },
+    )
+
+    plans = method(
+        types.SimpleNamespace(config_entry=_ENTRY, hass=types.SimpleNamespace()),
+        _solve_timestamps(),
+    )
+
+    assert warnings == []
+    assert len(plans) == 1
+    assert plans[0].vehicle_id == selected_profile
+    assert plans[0].energy_needed_kwh == pytest.approx(13.75)
 
 
 def test_optimizer_plan_uses_smart_schedule_windows_and_policy(
