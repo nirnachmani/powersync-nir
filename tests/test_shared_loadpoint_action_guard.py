@@ -1,0 +1,210 @@
+"""Behavioral guards for direct shared Generic and EVAC commands."""
+
+from __future__ import annotations
+
+import asyncio
+import importlib
+import sys
+import types
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+
+ROOT = Path(__file__).resolve().parents[1]
+COMPONENT_ROOT = ROOT / "custom_components" / "powersync_nir"
+
+
+def _install_ha_stubs() -> None:
+    ha = sys.modules.setdefault("homeassistant", types.ModuleType("homeassistant"))
+    core = sys.modules.setdefault("homeassistant.core", types.ModuleType("homeassistant.core"))
+    config_entries = sys.modules.setdefault(
+        "homeassistant.config_entries", types.ModuleType("homeassistant.config_entries")
+    )
+    helpers = sys.modules.setdefault("homeassistant.helpers", types.ModuleType("homeassistant.helpers"))
+    event = sys.modules.setdefault("homeassistant.helpers.event", types.ModuleType("homeassistant.helpers.event"))
+    entity_registry = sys.modules.setdefault(
+        "homeassistant.helpers.entity_registry",
+        types.ModuleType("homeassistant.helpers.entity_registry"),
+    )
+    device_registry = sys.modules.setdefault(
+        "homeassistant.helpers.device_registry",
+        types.ModuleType("homeassistant.helpers.device_registry"),
+    )
+    util = sys.modules.setdefault("homeassistant.util", types.ModuleType("homeassistant.util"))
+    util_dt = sys.modules.setdefault("homeassistant.util.dt", types.ModuleType("homeassistant.util.dt"))
+
+    core.HomeAssistant = type("HomeAssistant", (), {})
+    config_entries.ConfigEntry = type("ConfigEntry", (), {})
+    event.async_track_time_interval = lambda *args, **kwargs: lambda: None
+    event.async_track_point_in_time = lambda *args, **kwargs: lambda: None
+    entity_registry.async_get = lambda hass: SimpleNamespace(entities={})
+    device_registry.async_get = lambda hass: SimpleNamespace(devices={})
+    helpers.event = event
+    helpers.entity_registry = entity_registry
+    helpers.device_registry = device_registry
+    util.dt = util_dt
+    ha.helpers = helpers
+    ha.util = util
+
+
+_install_ha_stubs()
+sys.modules.setdefault("aiohttp", types.ModuleType("aiohttp"))
+
+package = types.ModuleType("powersync_nir")
+package.__path__ = [str(COMPONENT_ROOT)]
+sys.modules["powersync_nir"] = package
+automations = types.ModuleType("powersync_nir.automations")
+automations.__path__ = [str(COMPONENT_ROOT / "automations")]
+sys.modules["powersync_nir.automations"] = automations
+for module_name in (
+    "powersync_nir.const",
+    "powersync_nir.automations.actions",
+    "powersync_nir.automations.shared_loadpoint",
+):
+    sys.modules.pop(module_name, None)
+actions = importlib.import_module("powersync_nir.automations.actions")
+
+
+class _State:
+    def __init__(self, state: str) -> None:
+        self.state = state
+        self.attributes = {}
+
+
+class _Hass:
+    def __init__(self, selector_state: str = "tank") -> None:
+        self.states = SimpleNamespace(
+            get=lambda entity_id: {
+                "sensor.connected_vehicle": _State(selector_state),
+                "switch.shared_ev": _State("on"),
+            }.get(entity_id)
+        )
+        self.services = SimpleNamespace(async_call=AsyncMock())
+        self.data = {"powersync_nir": {"entry-1": {}}}
+
+
+class _Entry:
+    entry_id = "entry-1"
+    data = {}
+    options = {
+        "generic_charger_enabled": True,
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Tesla",
+        "shared_loadpoint_profile_b_state": "tesla",
+    }
+
+
+def _generic_params() -> dict:
+    return {
+        "charger_type": "generic",
+        "charger_switch_entity": "switch.shared_ev",
+    }
+
+
+def test_physical_generic_id_cannot_bypass_selected_profile_for_direct_stop():
+    hass = _Hass()
+
+    result = asyncio.run(
+        actions._action_stop_ev_charging(
+            hass, _Entry(), {**_generic_params(), "vehicle_id": "generic_ev"}
+        )
+    )
+
+    assert result is False
+    hass.services.async_call.assert_not_awaited()
+
+
+def test_selected_logical_generic_id_reaches_canonical_direct_stop_command():
+    hass = _Hass()
+
+    result = asyncio.run(
+        actions._action_stop_ev_charging(
+            hass, _Entry(), {**_generic_params(), "vehicle_id": "shared_ev_profile_a"}
+        )
+    )
+
+    assert result is True
+    hass.services.async_call.assert_awaited_once_with(
+        "switch", "turn_off", {"entity_id": "switch.shared_ev"}, blocking=True
+    )
+
+
+def test_physical_generic_id_cannot_bypass_selected_profile_for_current_write():
+    hass = _Hass()
+
+    result = asyncio.run(
+        actions._set_vehicle_amps(hass, _Entry(), "generic_ev", 0, _generic_params())
+    )
+
+    assert result is False
+    hass.services.async_call.assert_not_awaited()
+
+
+def test_selected_logical_generic_id_reaches_canonical_current_command(monkeypatch):
+    hass = _Hass()
+    seen = []
+
+    def ready(_hass, params):
+        seen.append(params)
+        return True, None
+
+    monkeypatch.setattr(actions, "_generic_charger_ready_for_start", ready)
+    monkeypatch.setattr(actions, "_start_generic_charger_switch", AsyncMock(return_value=True))
+
+    result = asyncio.run(
+        actions._set_vehicle_amps(hass, _Entry(), "shared_ev_profile_a", 8, _generic_params())
+    )
+
+    assert result is True
+    assert seen[0]["vehicle_id"] == "generic_ev"
+    assert seen[0]["logical_vehicle_id"] == "shared_ev_profile_a"
+
+
+def test_physical_evac_id_cannot_bypass_selected_profile_for_direct_stop(monkeypatch):
+    hass = _Hass()
+    entry = _Entry()
+    entry.options = {
+        **entry.options,
+        "generic_charger_enabled": False,
+        "sigenergy_charger_enabled": True,
+        "sigenergy_charger_type": "evac",
+    }
+    stop = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_stop_sigenergy_charger", stop)
+
+    result = asyncio.run(
+        actions._action_stop_ev_charging(
+            hass, entry, {"charger_type": "sigenergy", "vehicle_id": "sigenergy_charger"}
+        )
+    )
+
+    assert result is False
+    stop.assert_not_awaited()
+
+
+def test_selected_logical_evac_id_reaches_canonical_current_command(monkeypatch):
+    hass = _Hass()
+    entry = _Entry()
+    entry.options = {
+        **entry.options,
+        "generic_charger_enabled": False,
+        "sigenergy_charger_enabled": True,
+        "sigenergy_charger_type": "evac",
+    }
+    set_amps = AsyncMock(return_value=True)
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_set_sigenergy_charger_amps", set_amps)
+    monkeypatch.setattr(actions, "_start_sigenergy_charger", start)
+
+    result = asyncio.run(
+        actions._set_vehicle_amps(
+            hass, entry, "shared_ev_profile_a", 8, {"charger_type": "sigenergy"}
+        )
+    )
+
+    assert result is True
+    assert set_amps.await_args.args[2]["vehicle_id"] == "sigenergy_charger"
+    assert set_amps.await_args.args[2]["logical_vehicle_id"] == "shared_ev_profile_a"

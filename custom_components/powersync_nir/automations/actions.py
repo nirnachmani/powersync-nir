@@ -5443,6 +5443,23 @@ async def _action_stop_ev_charging(
         and params.get("_force_tesla_stop_request")
     )
 
+    if str(charger_type).strip().lower() in ("generic", "sigenergy"):
+        requested_vehicle_id = (
+            params.get("active_logical_vehicle_id")
+            or params.get("logical_vehicle_id")
+            or params.get("vehicle_vin")
+            or params.get("vehicle_id")
+        )
+        resolved_command = _resolve_shared_loadpoint_direct_command(
+            hass,
+            config_entry,
+            requested_vehicle_id,
+            params,
+        )
+        if resolved_command is None:
+            return False
+        _physical_vehicle_id, params = resolved_command
+
     # Cancel any scheduled stop
     if not force_tesla_stop_request and entry_id in _ev_scheduled_stop:
         cancel_func = _ev_scheduled_stop[entry_id].get("cancel")
@@ -7293,6 +7310,42 @@ async def _solar_surplus_switch_to_next_vehicle(
     _LOGGER.info(f"⚡ Solar surplus EV: No other vehicles available for charging")
 
 
+
+def _resolve_shared_loadpoint_direct_command(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry | None,
+    vehicle_id: Any,
+    params: Mapping[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    """Authorise direct Generic/EVAC writes through the logical profile gate."""
+    charger_type = str(params.get("charger_type") or "tesla").strip().lower()
+    if charger_type not in ("generic", "sigenergy"):
+        return str(vehicle_id), dict(params)
+    if config_entry is None:
+        _LOGGER.error("Shared loadpoint command blocked: no config entry")
+        return None
+
+    from .shared_loadpoint import resolve_shared_loadpoint_command
+
+    requested_profile_id = (
+        params.get("active_logical_vehicle_id")
+        or params.get("logical_vehicle_id")
+        or vehicle_id
+    )
+    resolved_params = resolve_shared_loadpoint_command(
+        hass,
+        config_entry,
+        requested_profile_id,
+        params,
+    )
+    if resolved_params is None:
+        _LOGGER.info(
+            "Shared loadpoint command blocked: no selected shared logical EV profile"
+        )
+        return None
+    return str(resolved_params["vehicle_id"]), resolved_params
+
+
 async def _set_vehicle_amps(
     hass: HomeAssistant,
     config_entry: ConfigEntry | None,
@@ -7301,6 +7354,12 @@ async def _set_vehicle_amps(
     params: dict,
 ) -> bool:
     """Apply the final per-phase clamp to an owned rate command."""
+    resolved_command = _resolve_shared_loadpoint_direct_command(
+        hass, config_entry, vehicle_id, params
+    )
+    if resolved_command is None:
+        return False
+    vehicle_id, params = resolved_command
     if not _phase_load_management_applies(hass, config_entry, params):
         return await _set_vehicle_amps_unchecked(
             hass, config_entry, vehicle_id, amps, params
@@ -7367,6 +7426,12 @@ async def _set_vehicle_amps_unchecked(
     Returns:
         True if successful
     """
+    resolved_command = _resolve_shared_loadpoint_direct_command(
+        hass, config_entry, vehicle_id, params
+    )
+    if resolved_command is None:
+        return False
+    vehicle_id, params = resolved_command
     charger_type = params.get("charger_type", "tesla")
 
     if charger_type == "tesla":
