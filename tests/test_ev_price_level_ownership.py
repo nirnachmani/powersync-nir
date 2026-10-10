@@ -3347,7 +3347,11 @@ def test_shared_logical_profile_uses_physical_runtime_loadpoint(
 
     assert ev_planner._canonical_auto_schedule_vehicle_id(
         _FakeHass(), entry, profile_id
-    ) == expected_loadpoint
+    ) == profile_id
+    assert ev_planner._effective_auto_schedule_charger_type(
+        ev_planner.AutoScheduleSettings(vehicle_id=profile_id),
+        entry.options,
+    ) == charger_type
     assert ev_planner._resolve_dynamic_loadpoint_id(
         charger_type,
         profile_id,

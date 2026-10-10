@@ -123,6 +123,9 @@ EXTERNAL_SCHEDULED_STOP_SUPPRESS_SECONDS = 15 * 60
 EXTERNAL_SMART_SCHEDULE_STOP_SUPPRESS_SECONDS = 15 * 60
 AUTO_SCHEDULE_START_RETRY_BASE_SECONDS = 30
 AUTO_SCHEDULE_START_RETRY_MAX_SECONDS = 15 * 60
+# Logical profile telemetry is only a forecast input while it is recent enough
+# to remain attributable to that same vehicle. It never authorizes control.
+SHARED_PROFILE_SOC_CACHE_MAX_AGE = timedelta(hours=24)
 PRICE_LEVEL_START_RETRY_BASE_SECONDS = 30
 PRICE_LEVEL_START_RETRY_MAX_SECONDS = 15 * 60
 FREE_GRID_PRICE_EPSILON_CENTS = 0.001
@@ -5448,6 +5451,12 @@ class AutoScheduleExecutor:
 
     def _get_cached_soc(self, vehicle_id: str) -> Optional[int]:
         """Get cached SoC for a vehicle, or None if not cached or stale."""
+        from .shared_loadpoint import PROFILE_A_ID, PROFILE_B_ID, binding_for_entry
+
+        is_shared_profile = (
+            vehicle_id in (PROFILE_A_ID, PROFILE_B_ID)
+            and binding_for_entry(self.config_entry) is not None
+        )
         vehicle_id = _canonical_auto_schedule_vehicle_id(
             self.hass,
             self.config_entry,
@@ -5455,6 +5464,36 @@ class AutoScheduleExecutor:
             getattr(self, "_fleet_vins", ()),
             getattr(self, "_resolved_ble_prefixes", ()),
         )
+        if is_shared_profile:
+            cache_entry = self._cached_soc.get(vehicle_id)
+            if not isinstance(cache_entry, Mapping):
+                return None
+            try:
+                updated = datetime.fromisoformat(str(cache_entry["updated"]))
+                now = datetime.now(tz=updated.tzinfo) if updated.tzinfo else datetime.now()
+                cache_age = now - updated
+                soc = float(cache_entry["soc"])
+            except (KeyError, TypeError, ValueError):
+                return None
+            if (
+                cache_age < timedelta(0)
+                or cache_age > SHARED_PROFILE_SOC_CACHE_MAX_AGE
+                or not math.isfinite(soc)
+                or not 0 <= soc <= 100
+            ):
+                return None
+            metadata = getattr(self, "_shared_profile_soc_metadata", None)
+            if metadata is None:
+                metadata = {}
+                self._shared_profile_soc_metadata = metadata
+            metadata[vehicle_id] = {
+                "source": "cache",
+                "updated": updated.isoformat(),
+                "cache_age_seconds": cache_age.total_seconds(),
+                "stale": True,
+            }
+            return int(soc)
+
         # Check state first (in-memory)
         if vehicle_id in self._state and self._state[vehicle_id].last_known_soc is not None:
             return self._state[vehicle_id].last_known_soc
@@ -5501,7 +5540,7 @@ class AutoScheduleExecutor:
 
         await self._force_save_cached_soc()
 
-    async def _get_vehicle_soc(self, vehicle_id: str) -> int:
+    async def _get_vehicle_soc(self, vehicle_id: str) -> Optional[int]:
         """Get current SoC for a vehicle from Home Assistant entities.
 
         Uses the same approach as EVVehiclesView to find Tesla vehicles.
@@ -5514,6 +5553,40 @@ class AutoScheduleExecutor:
             Current battery level (0-100). Uses cached value if vehicle is asleep,
             or defaults to 50 if no cached value exists.
         """
+        from .shared_loadpoint import (
+            PROFILE_A_ID,
+            PROFILE_B_ID,
+            resolve_shared_profile_soc,
+        )
+
+        if vehicle_id in (PROFILE_A_ID, PROFILE_B_ID):
+            sample = resolve_shared_profile_soc(
+                self.hass,
+                self.config_entry,
+                vehicle_id,
+            )
+            if sample is not None:
+                live_soc = int(sample.value)
+                await self._cache_vehicle_soc(vehicle_id, live_soc)
+                return live_soc
+
+            cached_soc = self._get_cached_soc(vehicle_id)
+            if cached_soc is not None:
+                _LOGGER.info(
+                    "Shared logical profile %s has no live SoC; using its bounded "
+                    "cached SoC: %s%%",
+                    vehicle_id,
+                    cached_soc,
+                )
+                return cached_soc
+
+            _LOGGER.warning(
+                "Shared logical profile %s has no valid live or fresh cached SoC; "
+                "skipping Smart Schedule",
+                vehicle_id,
+            )
+            return None
+
         from ..const import (
             DOMAIN,
             CONF_GENERIC_CHARGER_ENABLED,
@@ -6139,6 +6212,20 @@ class AutoScheduleExecutor:
 
         # Keep the plan fresh before checking availability.
         ev_soc = await self._get_vehicle_soc(vehicle_id)
+        if ev_soc is None:
+            state.current_plan = None
+            state.current_window = None
+            state.last_decision = "no_soc"
+            state.last_decision_reason = (
+                "No valid live or fresh profile-scoped SoC available"
+            )
+            self._sync_active_charging_preserve_intent(
+                vehicle_id,
+                effective_preserve_home_battery,
+                state,
+                state.last_decision_reason,
+            )
+            return
         if ev_soc >= settings.target_soc:
             # A previously generated plan is no longer needed. Clear it before
             # any availability gate returns, otherwise the optimiser may keep
@@ -7024,6 +7111,14 @@ class AutoScheduleExecutor:
                 vehicle_vin = self._resolve_vehicle_vin(vehicle_id)
 
                 ev_soc = await self._get_vehicle_soc(vehicle_id)
+                if ev_soc is None:
+                    state.current_plan = None
+                    state.current_window = None
+                    state.last_decision = "no_soc"
+                    state.last_decision_reason = (
+                        "No valid live or fresh profile-scoped SoC available"
+                    )
+                    continue
                 if ev_soc >= settings.target_soc:
                     state.current_plan = None
                     state.current_window = None
@@ -8438,7 +8533,7 @@ def _canonical_auto_schedule_vehicle_id(
     fleet_vins: Sequence[str] = (),
     resolved_prefixes: Sequence[str] | None = None,
 ) -> str:
-    """Map a stored/runtime ID onto its physical auto-schedule loadpoint."""
+    """Normalize a stored/runtime ID without collapsing logical profiles."""
     normalized = str(vehicle_id or "_default")
 
     opts = {
@@ -8446,11 +8541,13 @@ def _canonical_auto_schedule_vehicle_id(
         **getattr(config_entry, "options", {}),
     }
     if config_entry is not None:
-        from .shared_loadpoint import canonical_shared_loadpoint_id
+        from .shared_loadpoint import PROFILE_A_ID, PROFILE_B_ID, binding_for_entry
 
-        shared_physical_id = canonical_shared_loadpoint_id(config_entry, normalized)
-        if shared_physical_id is not None:
-            return shared_physical_id
+        if (
+            normalized in (PROFILE_A_ID, PROFILE_B_ID)
+            and binding_for_entry(config_entry) is not None
+        ):
+            return normalized
     if normalized.startswith("ble_"):
         return canonical_tesla_vehicle_id(
             opts,

@@ -6,7 +6,9 @@ import asyncio
 import importlib
 import sys
 import types
+from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
@@ -1041,6 +1043,144 @@ def test_missing_vehicle_id_updates_canonical_generic_settings():
 
     assert settings.vehicle_id == "generic_ev"
     assert set(executor._settings) == {"generic_ev"}
+
+
+def test_shared_logical_profiles_keep_schedule_identity():
+    """Shared profiles own their Smart Schedule settings, not the loadpoint."""
+    entry = types.SimpleNamespace(
+        data={},
+        options={
+            "generic_charger_enabled": True,
+            "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+            "shared_loadpoint_profile_a_name": "Tank",
+            "shared_loadpoint_profile_a_state": "tank",
+            "shared_loadpoint_profile_b_name": "Tesla",
+            "shared_loadpoint_profile_b_state": "tesla",
+        },
+    )
+
+    assert ev_planner._canonical_auto_schedule_vehicle_id(
+        None, entry, "shared_ev_profile_a"
+    ) == "shared_ev_profile_a"
+    assert ev_planner._canonical_auto_schedule_vehicle_id(
+        None, entry, "shared_ev_profile_b"
+    ) == "shared_ev_profile_b"
+
+
+def test_shared_logical_profile_reads_only_its_own_live_soc(monkeypatch):
+    """Logical profiles bypass anonymous Generic/Tesla SoC discovery."""
+    entry = types.SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "generic_charger_enabled": True,
+            "generic_charger_soc_entity": "sensor.legacy_soc",
+            "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+            "shared_loadpoint_profile_a_name": "Tank",
+            "shared_loadpoint_profile_a_state": "tank",
+            "shared_loadpoint_profile_a_soc_entity": "sensor.tank_soc",
+            "shared_loadpoint_profile_b_name": "Tesla",
+            "shared_loadpoint_profile_b_state": "tesla",
+            "shared_loadpoint_profile_b_soc_entity": "sensor.tesla_soc",
+        },
+    )
+    states = {
+        "sensor.tank_soc": types.SimpleNamespace(state="31", last_updated=None),
+        "sensor.tesla_soc": types.SimpleNamespace(state="66", last_updated=None),
+        "sensor.legacy_soc": types.SimpleNamespace(state="99", last_updated=None),
+    }
+    hass = types.SimpleNamespace(
+        data={ev_planner.DOMAIN: {"entry-1": {}}},
+        states=types.SimpleNamespace(get=states.get),
+        config_entries=types.SimpleNamespace(async_entries=lambda _domain: [entry]),
+    )
+    entity_registry = types.ModuleType("homeassistant.helpers.entity_registry")
+    setattr(entity_registry, "async_get", lambda _hass: types.SimpleNamespace(entities={}))
+    device_registry = types.ModuleType("homeassistant.helpers.device_registry")
+    setattr(device_registry, "async_get", lambda _hass: types.SimpleNamespace(devices={}))
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.entity_registry", entity_registry)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.device_registry", device_registry)
+
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor.hass = hass
+    executor.config_entry = entry
+    executor._cached_soc = {}
+    executor._state = {}
+    executor._store = None
+
+    assert asyncio.run(executor._get_vehicle_soc("shared_ev_profile_a")) == 31
+    assert asyncio.run(executor._get_vehicle_soc("shared_ev_profile_b")) == 66
+
+
+def test_shared_logical_profile_cache_is_same_profile_and_fresh_only():
+    entry = types.SimpleNamespace(
+        data={},
+        options={
+            "generic_charger_enabled": True,
+            "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+            "shared_loadpoint_profile_a_name": "Tank",
+            "shared_loadpoint_profile_a_state": "tank",
+            "shared_loadpoint_profile_b_name": "Tesla",
+            "shared_loadpoint_profile_b_state": "tesla",
+        },
+    )
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor.hass = None
+    executor.config_entry = entry
+    executor._state = {}
+    executor._cached_soc = {
+        "shared_ev_profile_a": {
+            "soc": 31,
+            "updated": (
+                datetime.now() - ev_planner.SHARED_PROFILE_SOC_CACHE_MAX_AGE
+                - timedelta(seconds=1)
+            ).isoformat(),
+        },
+        "_default": {"soc": 99, "updated": datetime.now().isoformat()},
+    }
+
+    assert executor._get_cached_soc("shared_ev_profile_a") is None
+    assert executor._get_cached_soc("shared_ev_profile_b") is None
+
+
+def test_shared_profile_without_soc_clears_existing_forecast_plan():
+    entry = types.SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "generic_charger_enabled": True,
+            "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+            "shared_loadpoint_profile_a_name": "Tank",
+            "shared_loadpoint_profile_a_state": "tank",
+            "shared_loadpoint_profile_b_name": "Tesla",
+            "shared_loadpoint_profile_b_state": "tesla",
+        },
+    )
+    profile_id = "shared_ev_profile_a"
+    state = ev_planner.AutoScheduleState(
+        vehicle_id=profile_id,
+        current_plan=object(),
+        current_window=object(),
+    )
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor.hass = types.SimpleNamespace(data={})
+    executor.config_entry = entry
+    executor._settings = {
+        profile_id: ev_planner.AutoScheduleSettings(
+            vehicle_id=profile_id, enabled=True, target_soc=80
+        )
+    }
+    executor._state = {profile_id: state}
+    executor._sync_charger_params_from_vehicle_configs = lambda *_args: None
+    executor._resolve_vehicle_vin = lambda _vehicle_id: None
+    executor._get_vehicle_soc = AsyncMock(return_value=None)
+    executor._sync_inactive_smart_schedule_preserve_intent = lambda: None
+
+    asyncio.run(executor.refresh_optimizer_forecast_plans())
+
+    assert state.current_plan is None
+    assert state.current_window is None
+    assert state.last_decision == "no_soc"
 
 
 def test_generic_charger_load_provisions_disabled_runtime_schedule_candidate(monkeypatch):
