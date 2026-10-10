@@ -348,9 +348,15 @@ def test_inactive_logical_generic_id_cannot_issue_direct_start():
     hass.services.async_call.assert_not_awaited()
 
 
-def test_selected_logical_generic_id_reaches_canonical_direct_stop_command():
+def test_selected_logical_generic_id_claims_physical_lease_before_direct_stop_write():
     hass = _Hass()
+    leases_at_write = []
 
+    async def capture_lease_at_write(*_args, **_kwargs):
+        _lease_id, lease = ownership.get_ev_ownership(hass, _Entry(), "generic_ev")
+        leases_at_write.append(lease)
+
+    hass.services.async_call.side_effect = capture_lease_at_write
     result = asyncio.run(
         actions._action_stop_ev_charging(
             hass, _Entry(), {**_generic_params(), "vehicle_id": "shared_ev_profile_a"}
@@ -361,6 +367,10 @@ def test_selected_logical_generic_id_reaches_canonical_direct_stop_command():
     hass.services.async_call.assert_awaited_once_with(
         "switch", "turn_off", {"entity_id": "switch.shared_ev"}, blocking=True
     )
+    assert len(leases_at_write) == 1
+    assert leases_at_write[0] is not None
+    assert leases_at_write[0]["owner"] == "powersync"
+    assert leases_at_write[0]["active_profile_id"] == "shared_ev_profile_a"
 
 
 def test_shared_runtime_metadata_canonicalizes_action_loadpoint_identity():
@@ -595,6 +605,39 @@ def test_physical_evac_id_cannot_bypass_selected_profile_for_direct_stop(monkeyp
 
     assert result is False
     stop.assert_not_awaited()
+
+
+def test_selected_logical_evac_stop_claims_physical_lease_before_write(monkeypatch):
+    hass = _Hass()
+    entry = _Entry()
+    entry.options = {
+        **entry.options,
+        "generic_charger_enabled": False,
+        "sigenergy_charger_enabled": True,
+        "sigenergy_charger_type": "evac",
+    }
+    leases_at_write = []
+
+    async def capture_lease_at_write(*_args, **_kwargs):
+        _lease_id, lease = ownership.get_ev_ownership(hass, entry, "sigenergy_charger")
+        leases_at_write.append(lease)
+        return True
+
+    stop = AsyncMock(side_effect=capture_lease_at_write)
+    monkeypatch.setattr(actions, "_stop_sigenergy_charger", stop)
+
+    assert asyncio.run(
+        actions._action_stop_ev_charging(
+            hass, entry, {"charger_type": "sigenergy", "vehicle_id": "shared_ev_profile_a"}
+        )
+    ) is True
+
+    assert len(leases_at_write) == 1
+    assert leases_at_write[0] is not None
+    assert leases_at_write[0]["owner"] == "powersync"
+    assert leases_at_write[0]["active_profile_id"] == "shared_ev_profile_a"
+    assert stop.await_args is not None
+    assert stop.await_args.args[2]["vehicle_id"] == "sigenergy_charger"
 
 
 def test_physical_evac_id_cannot_bypass_selected_profile_for_direct_current_write(monkeypatch):

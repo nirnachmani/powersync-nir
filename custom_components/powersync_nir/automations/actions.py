@@ -5493,6 +5493,7 @@ async def _action_stop_ev_charging(
                 params.get("_shared_handoff_stop_authorization")
                 is _SHARED_HANDOFF_STOP_AUTHORIZATION
             ),
+            acquire_shared_lease=True,
         )
         if resolved_command is None:
             return False
