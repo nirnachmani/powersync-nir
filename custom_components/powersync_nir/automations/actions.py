@@ -5112,7 +5112,7 @@ async def _action_start_ev_charging(
             or params.get("vehicle_vin")
             or params.get("vehicle_id")
         )
-        resolved_command = _resolve_shared_loadpoint_direct_command(
+        resolved_command = await _resolve_shared_loadpoint_direct_command(
             hass,
             config_entry,
             requested_vehicle_id,
@@ -5484,7 +5484,7 @@ async def _action_stop_ev_charging(
             or params.get("vehicle_vin")
             or params.get("vehicle_id")
         )
-        resolved_command = _resolve_shared_loadpoint_direct_command(
+        resolved_command = await _resolve_shared_loadpoint_direct_command(
             hass,
             config_entry,
             requested_vehicle_id,
@@ -5789,7 +5789,7 @@ async def _action_set_ev_charging_amps(
             or params.get("vehicle_vin")
             or params.get("vehicle_id")
         )
-        resolved_command = _resolve_shared_loadpoint_direct_command(
+        resolved_command = await _resolve_shared_loadpoint_direct_command(
             hass,
             config_entry,
             requested_vehicle_id,
@@ -7405,7 +7405,39 @@ async def _solar_surplus_switch_to_next_vehicle(
 
 
 
-def _resolve_shared_loadpoint_direct_command(
+async def _observe_shared_loadpoint_for_direct_lease(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    physical_vehicle_id: str,
+    params: Mapping[str, Any],
+):
+    """Return a fresh physical observation for a direct idle-lease handoff."""
+    from .external_session_reconciler import (
+        evac_observation_from_state,
+        generic_observation_from_hass,
+    )
+
+    charger_type = str(params.get("charger_type") or "").strip().lower()
+    if charger_type == "generic":
+        return generic_observation_from_hass(
+            hass, binding_id=physical_vehicle_id, params=dict(params)
+        )
+    if charger_type != "sigenergy":
+        return None
+    config = _sigenergy_charger_config(config_entry, dict(params))
+    if not config.get("host"):
+        return evac_observation_from_state(binding_id=physical_vehicle_id, state=None)
+    controller = _new_sigenergy_charger(config)
+    try:
+        state = await controller.read_state()
+    except Exception:
+        state = None
+    finally:
+        await controller.disconnect()
+    return evac_observation_from_state(binding_id=physical_vehicle_id, state=state)
+
+
+async def _resolve_shared_loadpoint_direct_command(
     hass: HomeAssistant,
     config_entry: ConfigEntry | None,
     vehicle_id: Any,
@@ -7521,8 +7553,30 @@ def _resolve_shared_loadpoint_direct_command(
             or resolved_params.get("dynamic_mode")
         )
         if acquire_shared_lease:
-            from .ev_ownership import acquire_shared_loadpoint_ownership
+            from .ev_ownership import (
+                acquire_shared_loadpoint_ownership,
+                get_ev_ownership,
+                transfer_idle_shared_loadpoint_ownership,
+            )
 
+            _lease_id, existing_lease = get_ev_ownership(
+                hass, config_entry, physical_vehicle_id
+            )
+            if (
+                isinstance(existing_lease, dict)
+                and existing_lease.get("owner") == "powersync"
+                and str(existing_lease.get("active_profile_id") or "") != selected_profile_id
+            ):
+                observation = await _observe_shared_loadpoint_for_direct_lease(
+                    hass, config_entry, physical_vehicle_id, resolved_params
+                )
+                transfer_idle_shared_loadpoint_ownership(
+                    hass,
+                    config_entry,
+                    physical_vehicle_id,
+                    active_profile_id=selected_profile_id,
+                    observation=observation,
+                )
             lease = acquire_shared_loadpoint_ownership(
                 hass,
                 config_entry,
@@ -7579,7 +7633,7 @@ async def _set_vehicle_amps(
     params: dict,
 ) -> bool:
     """Apply the final per-phase clamp to an owned rate command."""
-    resolved_command = _resolve_shared_loadpoint_direct_command(
+    resolved_command = await _resolve_shared_loadpoint_direct_command(
         hass, config_entry, vehicle_id, params, acquire_shared_lease=True
     )
     if resolved_command is None:
@@ -7651,7 +7705,7 @@ async def _set_vehicle_amps_unchecked(
     Returns:
         True if successful
     """
-    resolved_command = _resolve_shared_loadpoint_direct_command(
+    resolved_command = await _resolve_shared_loadpoint_direct_command(
         hass, config_entry, vehicle_id, params
     )
     if resolved_command is None:

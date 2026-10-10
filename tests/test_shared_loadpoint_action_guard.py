@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import sys
 import types
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -71,6 +72,7 @@ class _State:
     def __init__(self, state: str) -> None:
         self.state = state
         self.attributes = {}
+        self.last_updated = datetime.now(timezone.utc)
 
 
 class _Hass:
@@ -220,6 +222,117 @@ def test_direct_shared_start_is_blocked_when_physical_lease_belongs_to_other_pro
 
     assert result is False
     start.assert_not_awaited()
+
+
+def test_fresh_idle_direct_lease_transfers_to_newly_selected_profile_without_dynamic_runtime(monkeypatch):
+    """A failed direct A command cannot strand an idle physical lease from B."""
+    hass = _Hass()
+    start = AsyncMock(side_effect=[False, True])
+    monkeypatch.setattr(actions, "_start_generic_charger_switch", start)
+    idle_power = _State("0")
+    idle_power.attributes = {"unit_of_measurement": "W"}
+    idle_power.last_updated = datetime.now(timezone.utc)
+
+    assert asyncio.run(
+        actions._action_start_ev_charging(
+            hass,
+            _Entry(),
+            {
+                **_generic_params(),
+                "vehicle_id": "shared_ev_profile_a",
+                "charger_power_entity": "sensor.shared_ev_power",
+            },
+        )
+    ) is False
+    hass.states = SimpleNamespace(
+        get=lambda entity_id: {
+            "sensor.connected_vehicle": _State("tesla"),
+            "switch.shared_ev": _State("on"),
+            "sensor.shared_ev_power": idle_power,
+        }.get(entity_id)
+    )
+
+    assert asyncio.run(
+        actions._action_start_ev_charging(
+            hass,
+            _Entry(),
+            {
+                **_generic_params(),
+                "vehicle_id": "shared_ev_profile_b",
+                "charger_power_entity": "sensor.shared_ev_power",
+            },
+        )
+    ) is True
+
+    _lease_id, lease = ownership.get_ev_ownership(hass, _Entry(), "generic_ev")
+    assert lease is not None
+    assert lease["active_profile_id"] == "shared_ev_profile_b"
+    assert start.await_count == 2
+
+
+def test_non_idle_direct_observation_cannot_transfer_lease_without_dynamic_runtime(monkeypatch):
+    hass = _Hass(selector_state="tesla")
+    _claim_shared_loadpoint(hass, profile_id="shared_ev_profile_a")
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_start_generic_charger_switch", start)
+
+    for observation in (
+        SimpleNamespace(fresh=True, charging=True),
+        SimpleNamespace(fresh=True, charging=None),
+        SimpleNamespace(fresh=False, charging=False),
+    ):
+        monkeypatch.setattr(
+            actions,
+            "_observe_shared_loadpoint_for_direct_lease",
+            AsyncMock(return_value=observation),
+        )
+
+        assert asyncio.run(
+            actions._action_start_ev_charging(
+                hass, _Entry(), {**_generic_params(), "vehicle_id": "shared_ev_profile_b"}
+            )
+        ) is False
+        _lease_id, lease = ownership.get_ev_ownership(hass, _Entry(), "generic_ev")
+        assert lease is not None
+        assert lease["active_profile_id"] == "shared_ev_profile_a"
+
+    start.assert_not_awaited()
+
+
+def test_fresh_idle_direct_evac_lease_transfers_to_newly_selected_profile(monkeypatch):
+    hass = _Hass(selector_state="tesla")
+    entry = _Entry()
+    entry.options = {
+        **entry.options,
+        "generic_charger_enabled": False,
+        "sigenergy_charger_enabled": True,
+        "sigenergy_charger_type": "evac",
+    }
+    ownership.claim_ev_ownership(
+        hass,
+        entry,
+        "sigenergy_charger",
+        owner="powersync",
+        owner_mode="scheduled",
+        extra={"active_profile_id": "shared_ev_profile_a"},
+    )
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_start_sigenergy_charger", start)
+    monkeypatch.setattr(
+        actions,
+        "_observe_shared_loadpoint_for_direct_lease",
+        AsyncMock(return_value=SimpleNamespace(fresh=True, charging=False)),
+    )
+
+    assert asyncio.run(
+        actions._action_start_ev_charging(
+            hass, entry, {"charger_type": "sigenergy", "vehicle_id": "shared_ev_profile_b"}
+        )
+    ) is True
+    _lease_id, lease = ownership.get_ev_ownership(hass, entry, "sigenergy_charger")
+    assert lease is not None
+    assert lease["active_profile_id"] == "shared_ev_profile_b"
+    start.assert_awaited_once()
 
 
 def test_inactive_logical_generic_id_cannot_issue_direct_start():

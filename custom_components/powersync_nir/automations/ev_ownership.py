@@ -974,6 +974,46 @@ def acquire_shared_loadpoint_ownership(
     )
 
 
+def transfer_idle_shared_loadpoint_ownership(
+    hass: Any,
+    config_entry: Any,
+    vehicle_id: Any,
+    *,
+    active_profile_id: Any,
+    observation: Any,
+) -> dict[str, Any] | None:
+    """Move a PowerSync shared lease only after fresh physical idle proof.
+
+    Direct commands have no dynamic runtime record to hand off, but can still
+    leave a physical lease after a failed hardware write.  This narrow path is
+    intentionally metadata-only: it neither releases the lease nor controls
+    hardware, and refuses external, active, stale, or unknown observations.
+    """
+    profile_id = str(active_profile_id or "")
+    _lease_id, lease = get_ev_ownership(hass, config_entry, vehicle_id)
+    if (
+        not profile_id
+        or not isinstance(lease, dict)
+        or lease.get("owner") != "powersync"
+        or not lease.get("active_profile_id")
+        or str(lease.get("active_profile_id")) == profile_id
+        or not bool(getattr(observation, "fresh", False))
+        or getattr(observation, "charging", None) is not False
+    ):
+        return None
+
+    return claim_ev_ownership(
+        hass,
+        config_entry,
+        vehicle_id,
+        owner_mode=str(lease.get("owner_mode") or "dynamic"),
+        owner="powersync",
+        session_id=lease.get("session_id"),
+        reason=lease.get("reason"),
+        extra={"active_profile_id": profile_id},
+    )
+
+
 def release_ev_ownership(
     hass: Any,
     config_entry: Any,
