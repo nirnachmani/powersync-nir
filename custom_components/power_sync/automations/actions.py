@@ -8193,6 +8193,9 @@ async def _resolve_shared_loadpoint_direct_command(
         )
         return None
 
+    if not resolved_params.get("shared_loadpoint_binding"):
+        return str(vehicle_id), resolved_params
+
     # A logical selector proves which profile is active, but direct hardware
     # commands must also respect the single physical lease. Starts and current
     # writes acquire that canonical lease synchronously, so a selector change

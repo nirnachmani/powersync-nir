@@ -222,6 +222,26 @@ def test_phase_management_does_not_persist_explicit_command_marker(monkeypatch):
     assert "_user_initiated" not in cached_params
 
 
+def test_non_shared_generic_command_resolution_preserves_original_params():
+    hass, _now = _phase_managed_hass()
+    params = {
+        "owner_mode": "boost",
+        "charger_type": "generic",
+        "phases": 3,
+        "min_charge_amps": 6,
+        "max_charge_amps": 32,
+    }
+
+    resolved = asyncio.run(
+        actions._resolve_shared_loadpoint_direct_command(
+            hass, _Entry(), "boost-car", params, acquire_shared_lease=True
+        )
+    )
+
+    assert resolved == ("boost-car", params)
+    assert "vehicle_id" not in resolved[1]
+
+
 def test_phase_management_stale_data_stops_active_owned_charging(monkeypatch):
     hass, now = _phase_managed_hass(age_seconds=120)
     monkeypatch.setattr(actions.dt_util, "utcnow", lambda: now)
