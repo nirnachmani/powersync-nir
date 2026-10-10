@@ -13,6 +13,26 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
 
+_MISSING = object()
+_STUBBED_MODULES = (
+    "homeassistant",
+    "homeassistant.components",
+    "homeassistant.components.update",
+    "homeassistant.config_entries",
+    "homeassistant.const",
+    "homeassistant.core",
+    "homeassistant.helpers",
+    "homeassistant.helpers.event",
+    "homeassistant.helpers.dispatcher",
+    "homeassistant.helpers.storage",
+    "homeassistant.util",
+    "homeassistant.util.dt",
+    "power_sync",
+    "power_sync.const",
+    "power_sync.auto_update",
+)
+_PREVIOUS_MODULES = {name: sys.modules.get(name, _MISSING) for name in _STUBBED_MODULES}
+
 _ha_root = sys.modules.setdefault("homeassistant", types.ModuleType("homeassistant"))
 _ha_components = sys.modules.setdefault(
     "homeassistant.components",
@@ -100,6 +120,12 @@ sys.modules["power_sync.const"] = _ps_const
 
 sys.modules.pop("power_sync.auto_update", None)
 auto_update = importlib.import_module("power_sync.auto_update")
+
+for _module_name, _module in _PREVIOUS_MODULES.items():
+    if _module is _MISSING:
+        sys.modules.pop(_module_name, None)
+    else:
+        sys.modules[_module_name] = _module  # type: ignore[assignment]
 
 
 class _State:

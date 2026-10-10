@@ -16,9 +16,9 @@ fi
 printf 'Installing pinned optimizer-gate test dependencies into the project virtual environment.\n'
 uv pip install --python "$PYTHON" -r requirements-test.txt
 
-if ! "$PYTHON" -c 'import aiohttp; import highspy' >/dev/null 2>&1; then
+if ! "$PYTHON" -c 'import aiohttp; import cryptography; import highspy; import tesla_protocol' >/dev/null 2>&1; then
     printf '%s\n' \
-        'Failed to import required optimizer-gate test dependencies (aiohttp or highspy).' \
+        'Failed to import required optimizer-gate test dependencies (aiohttp, cryptography, highspy, or tesla-protocol).' \
         "Verify the pinned requirements installed into: $PYTHON" >&2
     exit 1
 fi

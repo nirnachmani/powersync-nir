@@ -16,6 +16,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
 
+_MISSING = object()
+_STUBBED_MODULES = (
+    "power_sync",
+    "power_sync.const",
+    "power_sync.cloud_flow_reporter",
+)
+_PREVIOUS_MODULES = {name: sys.modules.get(name, _MISSING) for name in _STUBBED_MODULES}
+
 _ps = types.ModuleType("power_sync")
 _ps.__path__ = [str(ROOT)]
 sys.modules["power_sync"] = _ps
@@ -37,6 +45,12 @@ sys.modules.pop("power_sync.cloud_flow_reporter", None)
 cloud_flow_reporter = importlib.import_module("power_sync.cloud_flow_reporter")
 
 build_payload = cloud_flow_reporter.build_payload
+
+for _module_name, _module in _PREVIOUS_MODULES.items():
+    if _module is _MISSING:
+        sys.modules.pop(_module_name, None)
+    else:
+        sys.modules[_module_name] = _module  # type: ignore[assignment]
 
 GRID = "cloud_flow_grid_entity"
 SOLAR = "cloud_flow_solar_entity"
