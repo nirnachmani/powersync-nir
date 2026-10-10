@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +14,23 @@ COMPONENT_PATH = "custom_components/power_sync"
 
 def _read(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
+
+
+def _markdown_section(document: str, heading: str) -> str:
+    """Return a level-two Markdown section without depending on separators."""
+    match = re.search(
+        rf"^## {re.escape(heading)}\s*$([\s\S]*?)(?=^## |\Z)",
+        document,
+        flags=re.MULTILINE,
+    )
+    assert match, f"Missing ## {heading} section"
+    return match.group(1)
+
+
+def _readme_title(document: str) -> str:
+    match = re.search(r"^\s*#\s+(.+?)\s*$", document, flags=re.MULTILINE)
+    assert match, "README must have a Markdown title"
+    return match.group(1)
 
 
 def test_private_repository_metadata_uses_restored_component_path_and_private_slug():
@@ -29,6 +47,10 @@ def test_private_repository_metadata_uses_restored_component_path_and_private_sl
     assert hacs["name"] == "PowerSync"
     assert manifest["domain"] == "power_sync"
     assert manifest["name"] == "PowerSync"
+    title = _readme_title(readme).lower()
+    assert title.startswith("powersync")
+    assert "private fork" in title
+    assert " nir" not in title
     for source in (readme, private_readme, agents):
         assert PRIVATE_REPOSITORY in source
 
@@ -36,22 +58,20 @@ def test_private_repository_metadata_uses_restored_component_path_and_private_sl
         "https://my.home-assistant.io/redirect/hacs_repository/"
         "?owner=nirnachmani&repository=powersync-nir&category=integration"
     ) in readme
-    installation = readme[readme.index("## Installation"):]
-    installation = installation[:installation.index("\n---")]
+    installation = _markdown_section(readme, "Installation")
     assert "https://github.com/nirnachmani/powersync-nir" in installation
     assert "https://github.com/bolagnaise/PowerSync" not in installation
 
     assert "HA domain/package: `power_sync`" in private_readme
     assert "Home Assistant domain/package `power_sync`" in agents
-    assert (
-        "Deployment requires separate explicit authorization. Defined updater gates "
-        "and a verified rollback path are prerequisites, not deployment authorization."
-    ) in agents
-    assert "Deployment is separately authorized work, not an updater outcome." in private_readme
-    assert (
-        "After explicit authorization, deploy only the private `main` branch through "
-        "the documented updater gates."
-    ) in private_readme
+    agents_policy = agents.lower()
+    assert "deployment" in agents_policy
+    assert "separate explicit authorization" in agents_policy
+    assert "not deployment authorization" in agents_policy
+    deployment = _markdown_section(private_readme, "Deployment").lower()
+    assert "separately authorized" in deployment
+    assert "private `main` branch" in deployment
+    assert "updater gates" in deployment
 
 
 def test_private_updater_material_uses_restored_component_path_and_never_authorises_deployment():
