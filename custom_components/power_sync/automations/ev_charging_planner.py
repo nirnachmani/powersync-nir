@@ -6119,6 +6119,7 @@ class AutoScheduleExecutor:
         self._sync_charger_params_from_vehicle_configs(vehicle_id, settings)
 
         from ..const import CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH
+        from .shared_loadpoint import PROFILE_A_ID, PROFILE_B_ID, binding_for_entry
 
         config = {}
         config_entry = getattr(self, "config_entry", None)
@@ -6127,9 +6128,20 @@ class AutoScheduleExecutor:
                 **getattr(config_entry, "data", {}),
                 **getattr(config_entry, "options", {}),
             }
-        anonymous_loadpoint = self._is_anonymous_loadpoint(vehicle_id, settings)
-        charger_fallback = settings.charger_fallback_battery_capacity_kwh
-        if charger_fallback is None:
+        shared_logical_profile = (
+            vehicle_id in (PROFILE_A_ID, PROFILE_B_ID)
+            and binding_for_entry(config_entry) is not None
+        )
+        anonymous_loadpoint = (
+            self._is_anonymous_loadpoint(vehicle_id, settings)
+            and not shared_logical_profile
+        )
+        charger_fallback = (
+            None
+            if shared_logical_profile
+            else settings.charger_fallback_battery_capacity_kwh
+        )
+        if charger_fallback is None and not shared_logical_profile:
             charger_fallback = config.get(CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH)
         resolved = resolve_ev_battery_capacity(
             manual_capacity_kwh=(

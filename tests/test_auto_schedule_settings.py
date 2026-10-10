@@ -1183,6 +1183,36 @@ def test_shared_profile_without_soc_clears_existing_forecast_plan():
     assert state.last_decision == "no_soc"
 
 
+def test_shared_profile_capacity_is_its_own_manual_capacity():
+    entry = types.SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "generic_charger_enabled": True,
+            "generic_charger_battery_capacity_kwh": 55,
+            "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+            "shared_loadpoint_profile_a_name": "Tank",
+            "shared_loadpoint_profile_a_state": "tank",
+            "shared_loadpoint_profile_b_name": "Tesla",
+            "shared_loadpoint_profile_b_state": "tesla",
+        },
+    )
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor.hass = types.SimpleNamespace(data={})
+    executor.config_entry = entry
+    executor._sync_charger_params_from_vehicle_configs = lambda *_args: None
+    settings = ev_planner.AutoScheduleSettings(
+        vehicle_id="shared_ev_profile_a",
+        charger_type="generic",
+        battery_capacity_kwh=86,
+    )
+
+    resolved = executor.resolve_vehicle_capacity("shared_ev_profile_a", settings)
+
+    assert resolved.effective_battery_capacity_kwh == 86
+    assert resolved.battery_capacity_source == "manual"
+
+
 def test_generic_charger_load_provisions_disabled_runtime_schedule_candidate(monkeypatch):
     """A first Generic Charger schedule can be configured without a saved row."""
     class Store:
