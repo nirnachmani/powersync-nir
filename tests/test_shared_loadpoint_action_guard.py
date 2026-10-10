@@ -529,6 +529,72 @@ def test_active_shared_handoff_fences_interleaved_old_periodic_write(monkeypatch
     set_amps.assert_not_awaited()
 
 
+def test_active_shared_handoff_stops_outgoing_profile_before_incoming_profile_can_run(monkeypatch):
+    """A selector change authorizes A's physical stop, not B's policy."""
+    hass = _Hass(selector_state="tesla")
+    entry = _Entry()
+    old_params = {
+        **_generic_params(),
+        "vehicle_id": "generic_ev",
+        "vehicle_vin": "generic_ev",
+        "logical_vehicle_id": "shared_ev_profile_a",
+        "active_logical_vehicle_id": "shared_ev_profile_a",
+        "shared_loadpoint_binding": True,
+        "dynamic_mode": "battery_target",
+        "owner_mode": "scheduled",
+    }
+    old_state = {
+        "active": True,
+        "active_profile_id": "shared_ev_profile_a",
+        "params": old_params,
+        "current_amps": 8,
+    }
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state[entry.entry_id] = {"generic_ev": old_state}
+    _claim_shared_loadpoint(hass, profile_id="shared_ev_profile_a")
+
+    reconciler = importlib.import_module(
+        "powersync_nir.automations.external_session_reconciler"
+    )
+    monkeypatch.setattr(
+        reconciler,
+        "generic_observation_from_hass",
+        lambda *_args, **_kwargs: SimpleNamespace(fresh=True, charging=True),
+    )
+    monkeypatch.setattr(
+        reconciler,
+        "reconcile_shared_external_session",
+        lambda *_args, **_kwargs: SimpleNamespace(active_profile_id="shared_ev_profile_a"),
+    )
+
+    stop_results = []
+
+    async def stop_and_inspect(_reconciliation, *, stop, **_kwargs):
+        stop_results.append(await stop())
+        return False
+
+    monkeypatch.setattr(reconciler, "stop_and_confirm_shared_handoff", stop_and_inspect)
+
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            entry,
+            {
+                **_generic_params(),
+                "vehicle_id": "shared_ev_profile_b",
+                "dynamic_mode": "battery_target",
+                "owner_mode": "scheduled",
+            },
+        )
+    )
+
+    assert result is False
+    assert stop_results == [True]
+    hass.services.async_call.assert_awaited_once_with(
+        "switch", "turn_off", {"entity_id": "switch.shared_ev"}, blocking=True
+    )
+
+
 def test_shared_dynamic_session_keeps_logical_identity_for_periodic_rate_and_stop(monkeypatch):
     """A shared runtime carries its selected profile through later physical writes."""
     hass = _Hass()

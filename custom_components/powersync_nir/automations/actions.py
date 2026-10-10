@@ -90,6 +90,11 @@ from ..sensitive_logging import install_vin_log_filter
 _LOGGER = logging.getLogger(__name__)
 install_vin_log_filter(_LOGGER)
 
+# Identity-only capability for the one internal physical stop dispatched while
+# changing a selected shared EV profile. It is never serialisable or accepted
+# by public command entry points.
+_SHARED_HANDOFF_STOP_AUTHORIZATION = object()
+
 # Tesla integrations supported for EV control via Fleet API
 from ..const import TESLA_INTEGRATIONS
 TESLA_EV_INTEGRATIONS = TESLA_INTEGRATIONS
@@ -5483,6 +5488,10 @@ async def _action_stop_ev_charging(
             config_entry,
             requested_vehicle_id,
             params,
+            allow_shared_handoff_stop=(
+                params.get("_shared_handoff_stop_authorization")
+                is _SHARED_HANDOFF_STOP_AUTHORIZATION
+            ),
         )
         if resolved_command is None:
             return False
@@ -7399,6 +7408,8 @@ def _resolve_shared_loadpoint_direct_command(
     config_entry: ConfigEntry | None,
     vehicle_id: Any,
     params: Mapping[str, Any],
+    *,
+    allow_shared_handoff_stop: bool = False,
 ) -> tuple[str, dict[str, Any]] | None:
     """Authorise direct Generic/EVAC writes through the logical profile gate."""
     charger_type = str(params.get("charger_type") or "tesla").strip().lower()
@@ -7408,7 +7419,70 @@ def _resolve_shared_loadpoint_direct_command(
         _LOGGER.error("Shared loadpoint command blocked: no config entry")
         return None
 
-    from .shared_loadpoint import resolve_shared_loadpoint_command
+    from .shared_loadpoint import (
+        canonical_shared_loadpoint_id,
+        resolve_shared_loadpoint_command,
+    )
+
+    # During an active A -> B handoff the selector already names B, but the
+    # fenced outgoing A controller alone may issue its physical stop. The
+    # private identity capability prevents API payloads from forging this
+    # exception, and the outgoing logical profile must still own this exact
+    # canonical physical lease.
+    if (
+        allow_shared_handoff_stop
+        and params.get("_shared_handoff_stop_authorization")
+        is _SHARED_HANDOFF_STOP_AUTHORIZATION
+    ):
+        from .ev_ownership import get_ev_ownership, owner_family
+
+        outgoing_profile_id = str(
+            params.get("_shared_handoff_outgoing_profile_id") or ""
+        )
+        requested_profile_id = str(
+            params.get("active_logical_vehicle_id")
+            or params.get("logical_vehicle_id")
+            or vehicle_id
+            or ""
+        )
+        physical_vehicle_id = canonical_shared_loadpoint_id(
+            config_entry,
+            outgoing_profile_id,
+            charger_type,
+        )
+        _lease_id, lease = get_ev_ownership(
+            hass, config_entry, physical_vehicle_id
+        )
+        requested_owner_mode = params.get("owner_mode") or params.get("dynamic_mode")
+        lease_owner_mode = lease.get("owner_mode") if isinstance(lease, dict) else None
+        if (
+            outgoing_profile_id
+            and requested_profile_id == outgoing_profile_id
+            and physical_vehicle_id is not None
+            and isinstance(lease, dict)
+            and lease.get("owner") == "powersync"
+            and lease.get("active_profile_id") == outgoing_profile_id
+            and (
+                not requested_owner_mode
+                or (
+                    lease_owner_mode is not None
+                    and owner_family(requested_owner_mode)
+                    == owner_family(lease_owner_mode)
+                )
+            )
+        ):
+            return physical_vehicle_id, {
+                **params,
+                "vehicle_id": physical_vehicle_id,
+                "vehicle_vin": physical_vehicle_id,
+                "logical_vehicle_id": outgoing_profile_id,
+                "active_logical_vehicle_id": outgoing_profile_id,
+                "shared_loadpoint_binding": True,
+            }
+        _LOGGER.info(
+            "Shared handoff stop blocked: outgoing profile no longer owns the physical lease"
+        )
+        return None
 
     requested_profile_id = (
         params.get("active_logical_vehicle_id")
@@ -12921,10 +12995,12 @@ async def _action_start_ev_charging_dynamic_locked(
             )
             old_stop_params = {
                 **old_params,
-                # The current selector authorizes this one physical stop while
-                # the old transport configuration remains authoritative.
-                "active_logical_vehicle_id": requested_profile_id,
-                "logical_vehicle_id": requested_profile_id,
+                # Only the fenced outgoing controller may stop its own
+                # canonical lease after the selector has moved to B.
+                "_shared_handoff_stop_authorization": _SHARED_HANDOFF_STOP_AUTHORIZATION,
+                "_shared_handoff_outgoing_profile_id": existing_state.get(
+                    "active_profile_id"
+                ),
             }
 
             async def persist_handoff(updated_reconciliation):
