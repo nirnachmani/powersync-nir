@@ -1,0 +1,4 @@
+# Test-only dependencies for scripts/private-fork/run_optimizer_regression_tests.sh.
+# Keep Home Assistant integration runtime requirements in manifest.json.
+aiohttp>=3.9,<4
+highspy>=1.7.0

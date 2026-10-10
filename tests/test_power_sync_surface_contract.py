@@ -5,45 +5,65 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPONENT = ROOT / "custom_components" / "power_sync"
 BASELINE = "v2.12.1363"
+BASELINE_COMMIT = "85f99ea62a174cd9153d5ff2ce71023dda2c9a5c"
 OPTIMIZATION = Path("custom_components/power_sync/optimization")
+
+
+def _git(*args: str) -> str:
+    """Run git with a direct failure for a checkout missing the baseline tag."""
+    try:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        pytest.fail(
+            "optimizer continuity baseline requires a non-shallow checkout containing tag "
+            f"{BASELINE}",
+            pytrace=False,
+        )
+    if completed.returncode:
+        pytest.fail(
+            "optimizer continuity baseline requires a non-shallow checkout containing "
+            f"tag {BASELINE} at {BASELINE_COMMIT}; git {' '.join(args)!r} failed: "
+            f"{completed.stderr.strip() or completed.stdout.strip()}",
+            pytrace=False,
+        )
+    return completed.stdout.replace("\r\n", "\n")
 
 
 def _git_show(revision: str, relative_path: Path) -> str:
     """Read a tracked baseline source file with normalized newlines."""
-    completed = subprocess.run(
-        ["git", "show", f"{revision}:{relative_path.as_posix()}"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return completed.stdout.replace("\r\n", "\n")
+    return _git("show", f"{revision}:{relative_path.as_posix()}")
 
 
 def test_core_optimizer_sources_match_the_pre_rename_baseline():
     """Domain restoration must not alter grid/PV/battery optimizer behavior."""
-    baseline_files = subprocess.run(
-        ["git", "ls-tree", "-r", "--name-only", BASELINE, "--", OPTIMIZATION.as_posix()],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.splitlines()
+    assert _git("rev-parse", f"{BASELINE}^{{}}").strip() == BASELINE_COMMIT
+
+    baseline_files = sorted(
+        _git("ls-tree", "-r", "--name-only", BASELINE, "--", OPTIMIZATION.as_posix()).splitlines()
+    )
     restored_files = sorted(
         path.relative_to(ROOT).as_posix()
-        for path in (ROOT / OPTIMIZATION).glob("*.py")
+        for path in (ROOT / OPTIMIZATION).rglob("*.py")
     )
 
     assert restored_files == baseline_files
     for relative_name in baseline_files:
         relative_path = Path(relative_name)
-        assert (ROOT / relative_path).read_text().replace("\r\n", "\n") == _git_show(
-            BASELINE, relative_path
-        )
+        assert (ROOT / relative_path).read_text(encoding="utf-8").replace(
+            "\r\n", "\n"
+        ) == _git_show(BASELINE_COMMIT, relative_path)
 
 
 def test_dashboard_assets_are_served_from_restored_power_sync_namespace():

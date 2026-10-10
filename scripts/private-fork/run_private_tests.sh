@@ -5,7 +5,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+PYTHON="$ROOT/.venv/bin/python"
 cd "$ROOT"
+
+if [[ ! -x "$PYTHON" ]]; then
+    printf 'Missing project virtual environment: %s\n' "$PYTHON" >&2
+    exit 1
+fi
 
 if [[ "${1:-}" == "--broader" ]]; then
     if [[ "$#" -ne 1 ]]; then
@@ -20,7 +26,8 @@ else
     exit 2
 fi
 
-python3 scripts/private-fork/validate_local_architecture.py
+"$PYTHON" scripts/private-fork/validate_local_architecture.py
+scripts/private-fork/run_optimizer_regression_tests.sh
 
 focused_tests=(
     tests/test_private_architecture_validator.py
@@ -41,11 +48,11 @@ focused_tests=(
     tests/test_android_app_multi_vehicle_contract.py
 )
 
-pytest -q "${focused_tests[@]}"
+"$PYTHON" -m pytest -q "${focused_tests[@]}"
 
 if [[ "$broader" -eq 1 ]]; then
     printf '%s\n' \
         'Running the full suite without suppression.' \
         'Known baseline note: three unrelated Tesla/BLE failures may occur; this command reports and returns all failures.'
-    pytest -q tests
+    "$PYTHON" -m pytest -q tests
 fi
