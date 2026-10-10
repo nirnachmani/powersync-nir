@@ -9,7 +9,7 @@ import types
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -107,6 +107,149 @@ def _generic_params() -> dict:
         "charger_type": "generic",
         "charger_switch_entity": "switch.shared_ev",
     }
+
+
+def _shared_solar_preflight_setup(*, charger_type="generic", physical_id="generic_ev"):
+    hass = _Hass()
+    entry = _Entry()
+    if charger_type == "sigenergy":
+        entry.options = {
+            **entry.options,
+            "generic_charger_enabled": False,
+            "sigenergy_charger_enabled": True,
+            "sigenergy_charger_type": "evac",
+        }
+    hass.data["powersync_nir"]["entry-1"].update(
+        {
+            "automation_store": SimpleNamespace(
+                _data={
+                    "solar_surplus_config": {"enabled": True},
+                    "vehicle_charging_configs": [
+                        {
+                            "vehicle_id": "shared_ev_profile_a",
+                            "charger_type": charger_type,
+                            "solar_charging_enabled": True,
+                        }
+                    ],
+                }
+            ),
+            "_shared_loadpoint_cycle_context": {
+                "binding_id": physical_id,
+                "active_profile_id": "shared_ev_profile_a",
+                "physical_active": True,
+            },
+        }
+    )
+    return hass, entry
+
+
+def _install_preflight_plug_probe(monkeypatch, result=True):
+    plugged = AsyncMock(return_value=result)
+    planner = types.ModuleType("powersync_nir.automations.ev_charging_planner")
+    planner.is_ev_plugged_in = plugged
+    monkeypatch.setitem(sys.modules, planner.__name__, planner)
+    return plugged
+
+
+def test_shared_solar_preflight_allows_selected_generic_with_fresh_matched_context(monkeypatch):
+    hass, entry = _shared_solar_preflight_setup()
+    plugged = _install_preflight_plug_probe(monkeypatch)
+
+    timer_spy = MagicMock()
+    monkeypatch.setattr(actions, "async_track_time_interval", timer_spy)
+    monkeypatch.setattr(actions, "async_track_point_in_time", timer_spy)
+    dynamic_state_before = dict(actions._dynamic_ev_state)
+    preflight = getattr(actions, "_preflight_shared_solar_surplus_decision", None)
+    assert preflight is not None
+    result = asyncio.run(preflight(hass, entry))
+
+    assert result == {"allowed": True, "reason": "", "source": "solar_surplus"}
+    plugged.assert_awaited_once_with(hass, entry, vehicle_vin="shared_ev_profile_a")
+    hass.services.async_call.assert_not_awaited()
+    timer_spy.assert_not_called()
+    assert actions._dynamic_ev_state == dynamic_state_before
+    assert "_dynamic_ev_state" not in hass.data["powersync_nir"]["entry-1"]
+    assert "ev_ownership" not in hass.data["powersync_nir"]["entry-1"]
+    assert "ev_manual_stop_holds" not in hass.data["powersync_nir"]["entry-1"]
+
+
+def test_shared_solar_preflight_allows_selected_evac_with_fresh_matched_context(monkeypatch):
+    hass, entry = _shared_solar_preflight_setup(
+        charger_type="sigenergy", physical_id="sigenergy_charger"
+    )
+    plugged = _install_preflight_plug_probe(monkeypatch)
+
+    result = asyncio.run(actions._preflight_shared_solar_surplus_decision(hass, entry))
+
+    assert result == {"allowed": True, "reason": "", "source": "solar_surplus"}
+    plugged.assert_awaited_once_with(hass, entry, vehicle_vin="shared_ev_profile_a")
+    hass.services.async_call.assert_not_awaited()
+
+
+def test_shared_solar_preflight_excludes_tesla_and_sigenergy_evdc(monkeypatch):
+    hass, entry = _shared_solar_preflight_setup()
+    entry.options = {**entry.options, "generic_charger_enabled": False}
+    _install_preflight_plug_probe(monkeypatch)
+
+    assert asyncio.run(actions._preflight_shared_solar_surplus_decision(hass, entry)) is None
+
+    hass, entry = _shared_solar_preflight_setup()
+    entry.options = {
+        **entry.options,
+        "generic_charger_enabled": False,
+        "sigenergy_charger_enabled": True,
+        "sigenergy_charger_type": "evdc",
+    }
+    _install_preflight_plug_probe(monkeypatch)
+
+    assert asyncio.run(actions._preflight_shared_solar_surplus_decision(hass, entry)) is None
+
+
+@pytest.mark.parametrize(
+    ("context", "solar_enabled", "plugged_in", "reason"),
+    [
+        (None, True, True, "cycle context is unavailable"),
+        (
+            {"binding_id": "generic_ev", "active_profile_id": "shared_ev_profile_b", "physical_active": True},
+            True,
+            True,
+            "does not match",
+        ),
+        (
+            {"binding_id": "generic_ev", "active_profile_id": "shared_ev_profile_a", "physical_active": None},
+            True,
+            True,
+            "unknown or stale",
+        ),
+        (None, False, True, "Solar Surplus is disabled"),
+        (None, True, False, "vehicle is not plugged in"),
+    ],
+)
+def test_shared_solar_preflight_fails_closed_without_admission(
+    monkeypatch, context, solar_enabled, plugged_in, reason
+):
+    hass, entry = _shared_solar_preflight_setup()
+    entry_data = hass.data["powersync_nir"]["entry-1"]
+    if context is not None:
+        entry_data["_shared_loadpoint_cycle_context"] = context
+    elif solar_enabled is False:
+        entry_data["automation_store"]._data["solar_surplus_config"] = {"enabled": False}
+    elif plugged_in is False:
+        pass
+    else:
+        entry_data.pop("_shared_loadpoint_cycle_context")
+    plugged = _install_preflight_plug_probe(monkeypatch, plugged_in)
+
+    result = asyncio.run(actions._preflight_shared_solar_surplus_decision(hass, entry))
+
+    assert result["allowed"] is False
+    assert result["source"] == "solar_surplus"
+    assert reason in result["reason"]
+    hass.services.async_call.assert_not_awaited()
+    assert "_dynamic_ev_state" not in entry_data
+    assert "ev_ownership" not in entry_data
+    if reason != "vehicle is not plugged in":
+        plugged.assert_not_awaited()
 
 
 def test_cycle_decision_ledger_records_selected_shared_generic_schedule_decision():

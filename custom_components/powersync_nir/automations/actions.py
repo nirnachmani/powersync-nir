@@ -6131,6 +6131,80 @@ def _clear_automated_shared_loadpoint_cycle(
         entry_data.pop(_AUTOMATED_SHARED_DECISION_LEDGER_KEY, None)
 
 
+async def _preflight_shared_solar_surplus_decision(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+) -> dict[str, Any] | None:
+    """Return a command-neutral Solar Surplus admission for a shared loadpoint.
+
+    This bridge intentionally only reads the current selected binding, persisted
+    Solar Surplus policy, and cycle reconciliation.  It does not reserve a
+    command sequence, claim ownership, or create/update a dynamic session.
+    """
+    from .shared_loadpoint import (
+        canonical_shared_loadpoint_id,
+        resolve_active_shared_profile,
+    )
+
+    active_profile_id = resolve_active_shared_profile(hass, config_entry)
+    if active_profile_id is None:
+        return None
+    loadpoint_id = canonical_shared_loadpoint_id(config_entry, active_profile_id)
+    if loadpoint_id not in {"generic_ev", "sigenergy_charger"}:
+        return None
+
+    denied = lambda reason: {
+        "allowed": False,
+        "reason": reason,
+        "source": "solar_surplus",
+    }
+    entry_data = _automated_shared_sequence_entry_data(hass, config_entry)
+    if entry_data is None:
+        return denied("shared loadpoint cycle context is unavailable")
+    context = entry_data.get("_shared_loadpoint_cycle_context")
+    if not isinstance(context, Mapping):
+        return denied("shared loadpoint cycle context is unavailable")
+    if (
+        context.get("active_profile_id") != active_profile_id
+        or context.get("binding_id") != loadpoint_id
+    ):
+        return denied("shared loadpoint cycle context does not match the selected profile")
+    if context.get("physical_active") is None:
+        return denied("shared loadpoint cycle context is unknown or stale")
+
+    store = entry_data.get("automation_store")
+    stored_data = getattr(store, "_data", {}) or {}
+    solar_config = stored_data.get("solar_surplus_config")
+    if not isinstance(solar_config, Mapping) or not normalize_solar_surplus_config(
+        solar_config
+    ).get("enabled", False):
+        return denied("Solar Surplus is disabled")
+
+    vehicle_configs = stored_data.get("vehicle_charging_configs", [])
+    selected_config = next(
+        (
+            candidate
+            for candidate in vehicle_configs
+            if isinstance(candidate, Mapping)
+            and candidate.get("vehicle_id") == active_profile_id
+        ),
+        None,
+    )
+    if selected_config is None:
+        return denied("selected shared profile has no Solar Surplus configuration")
+    if selected_config.get("solar_charging_enabled", True) is False:
+        return denied("Solar Surplus is disabled for the selected shared profile")
+    expected_charger_type = "generic" if loadpoint_id == "generic_ev" else "sigenergy"
+    if str(selected_config.get("charger_type") or "").strip().lower() != expected_charger_type:
+        return denied("selected shared profile backend does not match its physical loadpoint")
+
+    from .ev_charging_planner import is_ev_plugged_in
+
+    if not await is_ev_plugged_in(hass, config_entry, vehicle_vin=active_profile_id):
+        return denied("vehicle is not plugged in")
+    return {"allowed": True, "reason": "", "source": "solar_surplus"}
+
+
 def _record_automated_shared_loadpoint_decision(
     hass: HomeAssistant,
     config_entry: ConfigEntry | None,
