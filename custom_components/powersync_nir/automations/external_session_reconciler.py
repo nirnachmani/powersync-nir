@@ -48,6 +48,7 @@ class ReconciliationState:
     active_profile_id: str | None = None
     stop_outcome: dict[str, Any] | None = None
     observed_session_token: str | None = None
+    temporary_external_lease_token: str | None = None
     observed_at: datetime | None = None
     evidence: str | None = None
 
@@ -162,6 +163,12 @@ async def persist_reconciliation_state(
         "stop_outcome": dict(state.stop_outcome) if state.stop_outcome is not None else None,
         "observed_session_token": state.observed_session_token,
     }
+    if state.temporary_external_lease_token is not None:
+        data[_RECONCILIATION_STATE_STORAGE_KEY]["temporary_external_lease_token"] = (
+            state.temporary_external_lease_token
+        )
+    if state.observed_at is not None:
+        data[_RECONCILIATION_STATE_STORAGE_KEY]["observed_at"] = state.observed_at.isoformat()
     save = getattr(store, "async_save", None)
     if save is None:
         return
@@ -184,6 +191,14 @@ def load_reconciliation_state(
     origin = record.get("origin")
     if not isinstance(origin, str):
         origin = "unknown"
+    observed_at = record.get("observed_at")
+    if isinstance(observed_at, str):
+        try:
+            observed_at = _as_utc(datetime.fromisoformat(observed_at))
+        except ValueError:
+            observed_at = None
+    elif not isinstance(observed_at, datetime):
+        observed_at = None
     return ReconciliationState(
         origin=origin,
         physical_active=(
@@ -206,6 +221,12 @@ def load_reconciliation_state(
             if isinstance(record.get("observed_session_token"), str)
             else None
         ),
+        temporary_external_lease_token=(
+            record.get("temporary_external_lease_token")
+            if isinstance(record.get("temporary_external_lease_token"), str)
+            else None
+        ),
+        observed_at=observed_at,
     )
 
 
@@ -545,6 +566,7 @@ def reconcile_shared_external_session(
 ) -> ReconciliationState:
     """Classify one observed physical state without deciding a charging policy."""
     state = previous or ReconciliationState()
+    previous_observed_at = state.observed_at
     state.observed_at = observation.observed_at
     state.evidence = observation.evidence
     if not observation.fresh:
@@ -569,6 +591,20 @@ def reconcile_shared_external_session(
     if state.stop_outcome and state.stop_outcome.get("status") == "pending":
         state.origin = "settling"
         return state
+    if (
+        state.stop_outcome == {"status": "confirmed"}
+        and not powersync_command_observed
+        and observation.observed_at is not None
+        and previous_observed_at is not None
+        and observation.observed_at > previous_observed_at
+    ):
+        # A confirmed stop fences its observed session only. A later fresh
+        # external observation is a new session; stale/unknown data returned
+        # above can never re-arm it.
+        state.stop_outcome = None
+        state.observed_session_token = observation.observed_at.isoformat()
+    elif state.observed_session_token is None and observation.observed_at is not None:
+        state.observed_session_token = observation.observed_at.isoformat()
     state.origin = "powersync" if powersync_command_observed else "external"
     return state
 
@@ -586,6 +622,7 @@ async def resolve_end_of_cycle_external_shared_session(
     get_lease: Callable[[], Mapping[str, Any] | None],
     ensure_external_ownership: Callable[[str], Awaitable[None]],
     stop_and_confirm: Callable[..., Awaitable[bool]],
+    release_temporary_external_ownership: Callable[[str], Awaitable[None]] | None = None,
 ) -> bool:
     """Resolve one proven external selected shared session after a cycle.
 
@@ -612,6 +649,29 @@ async def resolve_end_of_cycle_external_shared_session(
         and observed_at is not None
         and 0 <= (current - observed_at).total_seconds() <= DEFAULT_FRESHNESS_SECONDS
     )
+    context_is_current_fresh_idle = (
+        isinstance(cycle_context, Mapping)
+        and cycle_context.get("binding_id") == binding_id
+        and cycle_context.get("active_profile_id") == active_profile_id
+        and cycle_context.get("physical_active") is False
+        and cycle_context.get("evidence") == expected_evidence
+        and observed_at is not None
+        and 0 <= (current - observed_at).total_seconds() <= DEFAULT_FRESHNESS_SECONDS
+    )
+    temporary_lease_token = state.temporary_external_lease_token
+    lease = get_lease()
+    if (
+        state.stop_outcome == {"status": "confirmed"}
+        and temporary_lease_token is not None
+        and context_is_current_fresh_idle
+        and isinstance(lease, Mapping)
+        and lease.get("owner") == "external"
+        and lease.get("resolver_stop_lease_token") == temporary_lease_token
+        and release_temporary_external_ownership is not None
+    ):
+        await release_temporary_external_ownership(temporary_lease_token)
+        state.temporary_external_lease_token = None
+        return False
     if (
         binding_id not in {"generic_ev", "sigenergy_charger"}
         or not active_profile_id
@@ -638,11 +698,21 @@ async def resolve_end_of_cycle_external_shared_session(
     # The private guarded stop accepts only the external owner.  Fresh physical
     # observation never displaces a PowerSync lease: when unowned, create the
     # temporary external lease through the ownership API, then read it back.
-    if lease is None:
+    created_temporary_lease = lease is None
+    if created_temporary_lease:
         await ensure_external_ownership(active_profile_id)
         lease = get_lease()
     if not isinstance(lease, Mapping) or lease.get("owner") != "external":
         return False
+    if created_temporary_lease and isinstance(lease, dict):
+        lease_token = state.observed_session_token or (
+            observed_at.isoformat() if observed_at is not None else None
+        )
+        if lease_token is None:
+            return False
+        state.observed_session_token = lease_token
+        lease["resolver_stop_lease_token"] = lease_token
+        state.temporary_external_lease_token = lease_token
 
     return await stop_and_confirm(
         binding_id=binding_id,

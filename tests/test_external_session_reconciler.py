@@ -899,3 +899,186 @@ def test_cycle_reconciliation_clears_previous_context_before_attempting_a_new_re
     function = source[source.index("async def reconcile_selected_shared_loadpoint_cycle("):]
 
     assert "    clear_cycle_context()\n\n    from .shared_loadpoint import" in function
+
+
+def test_confirmed_stop_rearms_for_a_later_fresh_external_session() -> None:
+    """A confirmed stop fences A, but does not suppress a proven later session B."""
+    state = module.ReconciliationState(
+        origin="unknown",
+        physical_active=False,
+        stop_outcome={"status": "confirmed"},
+        observed_session_token=NOW.isoformat(),
+        observed_at=NOW,
+    )
+    observation = module.generic_power_observation(
+        binding_id="generic_ev", power_kw=7.2, observed_at=NOW + timedelta(seconds=1),
+        now=NOW + timedelta(seconds=1),
+    )
+    reconciled = module.reconcile_shared_external_session(observation, previous=state)
+    stopped = []
+
+    async def stop_and_confirm(**kwargs):
+        stopped.append(kwargs)
+        return True
+
+    assert reconciled.stop_outcome is None
+    assert reconciled.origin == "external"
+    assert reconciled.observed_session_token == (NOW + timedelta(seconds=1)).isoformat()
+    assert asyncio.run(
+        module.resolve_end_of_cycle_external_shared_session(
+            binding_id="generic_ev", active_profile_id="shared_ev_profile_a",
+            selected_params={"charger_type": "generic"}, state=reconciled,
+            cycle_context={
+                "binding_id": "generic_ev", "active_profile_id": "shared_ev_profile_a",
+                "origin": "external", "physical_active": True,
+                "observed_at": NOW + timedelta(seconds=1), "evidence": "fresh_power",
+            },
+            now=NOW + timedelta(seconds=1), external_control_policy="override",
+            cycle_ledger={}, get_lease=lambda: {"owner": "external"},
+            ensure_external_ownership=lambda _profile: None, stop_and_confirm=stop_and_confirm,
+        )
+    )
+    assert len(stopped) == 1
+
+
+@pytest.mark.parametrize("observation", [
+    module.generic_power_observation(
+        binding_id="generic_ev", power_kw=7.2, observed_at=NOW - timedelta(seconds=91), now=NOW,
+    ),
+    module.generic_power_observation(binding_id="generic_ev", power_kw=None, observed_at=NOW, now=NOW),
+])
+def test_stale_or_unknown_active_data_does_not_rearm_confirmed_stop(observation) -> None:
+    state = module.ReconciliationState(
+        stop_outcome={"status": "confirmed"}, observed_session_token=NOW.isoformat(), observed_at=NOW,
+    )
+
+    reconciled = module.reconcile_shared_external_session(observation, previous=state)
+
+    assert reconciled.stop_outcome == {"status": "confirmed"}
+    assert reconciled.observed_session_token == NOW.isoformat()
+
+
+@pytest.mark.parametrize("status", ["pending", "failed", "indeterminate"])
+def test_later_fresh_idle_releases_only_the_temporary_resolver_lease(status: str) -> None:
+    state = module.ReconciliationState(
+        stop_outcome={"status": status}, temporary_external_lease_token="resolver-lease-a",
+    )
+    idle = module.generic_power_observation(
+        binding_id="generic_ev", power_kw=0.0, observed_at=NOW, now=NOW,
+    )
+    reconciled = module.reconcile_shared_external_session(idle, previous=state)
+    released = []
+
+    async def release_temporary_external_ownership(token):
+        released.append(token)
+
+    assert not asyncio.run(
+        module.resolve_end_of_cycle_external_shared_session(
+            binding_id="generic_ev", active_profile_id="shared_ev_profile_a",
+            selected_params={"charger_type": "generic"}, state=reconciled,
+            cycle_context={
+                "binding_id": "generic_ev", "active_profile_id": "shared_ev_profile_a",
+                "origin": "unknown", "physical_active": False,
+                "observed_at": NOW, "evidence": "fresh_power",
+            },
+            now=NOW, external_control_policy="override", cycle_ledger={},
+            get_lease=lambda: {"owner": "external", "resolver_stop_lease_token": "resolver-lease-a"},
+            ensure_external_ownership=lambda _profile: None,
+            release_temporary_external_ownership=release_temporary_external_ownership,
+            stop_and_confirm=lambda **_kwargs: None,
+        )
+    )
+    assert released == ["resolver-lease-a"]
+    assert reconciled.temporary_external_lease_token is None
+
+
+@pytest.mark.parametrize("observation", [
+    module.generic_power_observation(
+        binding_id="generic_ev", power_kw=0.0, observed_at=NOW - timedelta(seconds=91), now=NOW,
+    ),
+    module.generic_power_observation(binding_id="generic_ev", power_kw=None, observed_at=NOW, now=NOW),
+    module.generic_power_observation(binding_id="generic_ev", power_kw=7.2, observed_at=NOW, now=NOW),
+])
+def test_stale_unknown_or_active_observation_never_releases_temporary_resolver_lease(observation) -> None:
+    state = module.ReconciliationState(
+        stop_outcome={"status": "pending"}, temporary_external_lease_token="resolver-lease-a",
+    )
+    reconciled = module.reconcile_shared_external_session(observation, previous=state)
+    released = []
+
+    async def release_temporary_external_ownership(token):
+        released.append(token)
+
+    assert not asyncio.run(
+        module.resolve_end_of_cycle_external_shared_session(
+            binding_id="generic_ev", active_profile_id="shared_ev_profile_a",
+            selected_params={"charger_type": "generic"}, state=reconciled,
+            cycle_context={
+                "binding_id": "generic_ev", "active_profile_id": "shared_ev_profile_a",
+                "origin": reconciled.origin, "physical_active": reconciled.physical_active,
+                "observed_at": NOW, "evidence": observation.evidence,
+            },
+            now=NOW, external_control_policy="override", cycle_ledger={},
+            get_lease=lambda: {"owner": "powersync"}, ensure_external_ownership=lambda _profile: None,
+            release_temporary_external_ownership=release_temporary_external_ownership,
+            stop_and_confirm=lambda **_kwargs: None,
+        )
+    )
+    assert released == []
+    assert reconciled.temporary_external_lease_token == "resolver-lease-a"
+
+
+def test_confirmed_stop_keeps_its_fresh_observation_boundary_across_persistence() -> None:
+    class Entry:
+        entry_id = "entry-1"
+
+    class Store:
+        _data = {}
+
+        async def async_save(self) -> None:
+            return None
+
+    class Hass:
+        data = {"powersync_nir": {"entry-1": {"automation_store": Store()}}}
+
+    state = module.ReconciliationState(
+        stop_outcome={"status": "confirmed"}, observed_session_token="session-a", observed_at=NOW,
+    )
+    hass = Hass()
+    asyncio.run(module.persist_reconciliation_state(hass, Entry(), "generic_ev", state))
+
+    loaded = module.load_reconciliation_state(hass, Entry(), "generic_ev")
+
+    assert loaded.observed_at == NOW
+
+
+@pytest.mark.parametrize("lease", [
+    {"owner": "powersync"},
+    {"owner": "external", "resolver_stop_lease_token": "resolver-lease-b"},
+])
+def test_fresh_idle_never_releases_a_conflicting_or_newer_lease(lease) -> None:
+    state = module.ReconciliationState(
+        stop_outcome={"status": "confirmed"}, temporary_external_lease_token="resolver-lease-a",
+    )
+    released = []
+
+    async def release_temporary_external_ownership(token):
+        released.append(token)
+
+    assert not asyncio.run(
+        module.resolve_end_of_cycle_external_shared_session(
+            binding_id="generic_ev", active_profile_id="shared_ev_profile_a",
+            selected_params={"charger_type": "generic"}, state=state,
+            cycle_context={
+                "binding_id": "generic_ev", "active_profile_id": "shared_ev_profile_a",
+                "origin": "unknown", "physical_active": False,
+                "observed_at": NOW, "evidence": "fresh_power",
+            },
+            now=NOW, external_control_policy="override", cycle_ledger={}, get_lease=lambda: lease,
+            ensure_external_ownership=lambda _profile: None,
+            release_temporary_external_ownership=release_temporary_external_ownership,
+            stop_and_confirm=lambda **_kwargs: None,
+        )
+    )
+    assert released == []
+    assert state.temporary_external_lease_token == "resolver-lease-a"

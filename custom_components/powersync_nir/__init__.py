@@ -43440,12 +43440,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         sleep=asyncio.sleep,
                     )
 
+                async def release_temporary_external_ownership(lease_token):
+                    lease_id, lease = get_ev_ownership(hass, entry, binding_id)
+                    if not (
+                        isinstance(lease, dict)
+                        and lease.get("owner") == "external"
+                        and lease.get("resolver_stop_lease_token") == lease_token
+                    ):
+                        return False
+                    release_ev_ownership(
+                        hass,
+                        entry,
+                        lease_id,
+                        reason="Confirmed temporary external shared-session stop",
+                        command="external_stop_confirmed",
+                    )
+                    return True
+
                 try:
+                    reconciliation_state = load_reconciliation_state(hass, entry, binding_id or "")
                     await resolve_end_of_cycle_external_shared_session(
                         binding_id=binding_id,
                         active_profile_id=active_profile_id,
                         selected_params=selected_params,
-                        state=load_reconciliation_state(hass, entry, binding_id or ""),
+                        state=reconciliation_state,
                         cycle_context=(
                             entry_data.get("_shared_loadpoint_cycle_context")
                             if isinstance(entry_data, dict)
@@ -43467,6 +43485,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         else None,
                         ensure_external_ownership=ensure_external_ownership,
                         stop_and_confirm=stop_and_confirm,
+                        release_temporary_external_ownership=release_temporary_external_ownership,
+                    )
+                    await persist_reconciliation_state(
+                        hass, entry, binding_id or "", reconciliation_state
                     )
                 finally:
                     _clear_automated_shared_loadpoint_cycle(hass, entry)
