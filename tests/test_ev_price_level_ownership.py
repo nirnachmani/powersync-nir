@@ -17,7 +17,7 @@ import pytest
 from conftest import pinned_sys_modules
 
 
-ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "powersync_nir"
+ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
 
 sys.modules.setdefault("aiohttp", types.ModuleType("aiohttp"))
 
@@ -83,22 +83,22 @@ _ha_root.helpers = _ha_helpers
 _ha_util.dt = _ha_dt
 _ha_root.util = _ha_util
 
-_ps = types.ModuleType("powersync_nir")
+_ps = types.ModuleType("power_sync")
 _ps.__path__ = [str(ROOT)]
-sys.modules["powersync_nir"] = _ps
+sys.modules["power_sync"] = _ps
 
-_optimization = types.ModuleType("powersync_nir.optimization")
+_optimization = types.ModuleType("power_sync.optimization")
 _optimization.__path__ = [str(ROOT / "optimization")]
-sys.modules["powersync_nir.optimization"] = _optimization
+sys.modules["power_sync.optimization"] = _optimization
 
-_automations = types.ModuleType("powersync_nir.automations")
+_automations = types.ModuleType("power_sync.automations")
 _automations.__path__ = [str(ROOT / "automations")]
-sys.modules["powersync_nir.automations"] = _automations
+sys.modules["power_sync.automations"] = _automations
 
-if not hasattr(sys.modules.get("powersync_nir.const"), "TESLA_INTEGRATIONS"):
-    sys.modules.pop("powersync_nir.const", None)
+if not hasattr(sys.modules.get("power_sync.const"), "TESLA_INTEGRATIONS"):
+    sys.modules.pop("power_sync.const", None)
 
-ev_planner = importlib.import_module("powersync_nir.automations.ev_charging_planner")
+ev_planner = importlib.import_module("power_sync.automations.ev_charging_planner")
 
 # Captured after this module's stub tree is live.  Product code imports some
 # helpers lazily inside a function, resolving sys.modules at call time, so a
@@ -115,8 +115,8 @@ _OWNED_STUB_MODULES = {
 def _pin_owned_stub_modules():
     with pinned_sys_modules(_OWNED_STUB_MODULES):
         yield
-ev_pricing = importlib.import_module("powersync_nir.automations.ev_pricing")
-ev_capacity = importlib.import_module("powersync_nir.automations.ev_vehicle_capacity")
+ev_pricing = importlib.import_module("power_sync.automations.ev_pricing")
+ev_capacity = importlib.import_module("power_sync.automations.ev_vehicle_capacity")
 
 
 VIN = "5YJTEST0000000001"
@@ -491,7 +491,7 @@ def test_solar_only_live_decision_blocks_high_value_export(monkeypatch):
         lambda: datetime(2026, 8, 18, 9, 0, tzinfo=brisbane_tz),
     )
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "solar_surplus_config"
     ] = {"max_export_price_cents": 15.0}
     planner = ev_planner.ChargingPlanner(hass, _FakeConfigEntry())
@@ -625,7 +625,7 @@ def test_amber_forecast_utc_start_times_normalize_to_ha_local(monkeypatch):
     )
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["amber_coordinator"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["amber_coordinator"] = SimpleNamespace(
         data={
             "forecast": [
                 {
@@ -694,7 +694,7 @@ def test_amber_forecast_drops_past_hours_before_horizon_limit(monkeypatch):
         )
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["amber_coordinator"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["amber_coordinator"] = SimpleNamespace(
         data={"forecast": forecast_rows}
     )
     config_entry = _FakeConfigEntry()
@@ -966,7 +966,7 @@ def test_no_departure_solar_preferred_uses_free_grid_after_battery_allocation(
             "power_w": 4000,
         },
     ]
-    hass.data["powersync_nir"]["entry-1"]["optimization_coordinator"] = (
+    hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = (
         SimpleNamespace(
             current_schedule=SimpleNamespace(
                 to_executor_schedule=lambda: battery_actions,
@@ -1079,7 +1079,7 @@ def test_cost_optimized_respects_max_grid_price_and_waits_for_free_window(
         raising=False,
     )
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "home_power_settings"
     ] = {
         "phase_type": "single",
@@ -1094,7 +1094,7 @@ def test_cost_optimized_respects_max_grid_price_and_waits_for_free_window(
         }
         for hour in range(10, 14)
     ]
-    hass.data["powersync_nir"]["entry-1"]["optimization_coordinator"] = (
+    hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = (
         SimpleNamespace(
             current_schedule=SimpleNamespace(
                 to_executor_schedule=lambda: battery_actions,
@@ -1188,7 +1188,7 @@ def test_cost_optimized_respects_max_grid_price_and_waits_for_free_window(
 
 def test_available_ev_power_uses_vehicle_minimum_and_other_ev_reservations():
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "home_power_settings"
     ] = {
         "phase_type": "single",
@@ -1279,14 +1279,14 @@ def test_cheapest_uses_home_site_limit_during_concurrent_free_battery_charge(
         raising=False,
     )
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "home_power_settings"
     ] = {
         "phase_type": "three",
         "max_grid_import_amps": 35,
         "default_voltage": 240,
     }
-    hass.data["powersync_nir"]["entry-1"]["optimization_coordinator"] = (
+    hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = (
         SimpleNamespace(_config=SimpleNamespace(max_grid_import_w=7400))
     )
     planner = ev_planner.ChargingPlanner(hass, _FakeConfigEntry())
@@ -1408,7 +1408,7 @@ def test_tariff_forecast_reads_nested_tesla_tou_periods(monkeypatch):
         lambda: datetime(2026, 7, 31, 12, 20, tzinfo=brisbane_tz),
     )
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["tariff_schedule"] = {
+    hass.data["power_sync"]["entry-1"]["tariff_schedule"] = {
         "buy_rates": {
             "ON_PEAK": 0.51,
             "PARTIAL_PEAK": 0.31,
@@ -1839,7 +1839,7 @@ def test_amber_forecast_preserves_repeated_dst_hours(monkeypatch):
         )
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["amber_coordinator"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["amber_coordinator"] = SimpleNamespace(
         data={"forecast": rows}
     )
     config_entry = _FakeConfigEntry()
@@ -2129,7 +2129,7 @@ class _FakeHass:
             settings.update(price_settings)
 
         self.data = {
-            "powersync_nir": {
+            "power_sync": {
                 "entry-1": {
                     "automation_store": SimpleNamespace(
                         _data={"price_level_charging": settings}
@@ -2165,7 +2165,7 @@ class _FakeStates:
 
 
 def _set_external_policy(hass, *vehicle_ids: str, policy: str = "yield") -> None:
-    store = hass.data["powersync_nir"]["entry-1"]["automation_store"]
+    store = hass.data["power_sync"]["entry-1"]["automation_store"]
     store._data["vehicle_charging_configs"] = [
         {"vehicle_id": vehicle_id, "external_control_policy": policy}
         for vehicle_id in vehicle_ids
@@ -2183,7 +2183,7 @@ def test_scheduled_shared_decision_is_logged_before_existing_start_behavior(monk
         "shared_loadpoint_profile_b_name": "Tesla",
         "shared_loadpoint_profile_b_state": "tesla",
     }
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "scheduled_charging"
     ] = {"enabled": True, "start_time": "11:00", "end_time": "14:00", "max_price_cents": 30}
     monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
@@ -2198,7 +2198,7 @@ def test_scheduled_shared_decision_is_logged_before_existing_start_behavior(monk
     )
     scheduled._start_charging = AsyncMock(return_value=True)
     coordinator = ev_planner.EVChargingModeCoordinator(hass, entry)
-    actions = importlib.import_module("powersync_nir.automations.actions")
+    actions = importlib.import_module("power_sync.automations.actions")
     actions._begin_automated_shared_loadpoint_cycle(hass, entry)
     previous_scheduled = ev_planner.get_scheduled_charging_executor()
     previous_price = ev_planner.get_price_level_executor()
@@ -2212,7 +2212,7 @@ def test_scheduled_shared_decision_is_logged_before_existing_start_behavior(monk
 
     scheduled._start_charging.assert_awaited_once_with("Scheduled: test window")
     assert coordinator.get_state()["active_modes"] == ["Scheduled"]
-    assert hass.data["powersync_nir"]["entry-1"][
+    assert hass.data["power_sync"]["entry-1"][
         "_automated_shared_loadpoint_decision_ledger"
     ]["generic_ev"]["shared_ev_profile_a"] == {
         "allowed": True,
@@ -2239,7 +2239,7 @@ def test_price_level_shared_generic_decision_is_logged_before_existing_start_beh
     )
 
     async def start_after_ledger(mode, reason, vehicle_vin=None):
-        assert hass.data["powersync_nir"]["entry-1"][
+        assert hass.data["power_sync"]["entry-1"][
             "_automated_shared_loadpoint_decision_ledger"
         ]["generic_ev"]["shared_ev_profile_a"] == {
             "allowed": True,
@@ -2250,7 +2250,7 @@ def test_price_level_shared_generic_decision_is_logged_before_existing_start_beh
         return True
 
     executor._start_charging = AsyncMock(side_effect=start_after_ledger)
-    actions = importlib.import_module("powersync_nir.automations.actions")
+    actions = importlib.import_module("power_sync.automations.actions")
     actions._begin_automated_shared_loadpoint_cycle(hass, entry)
 
     results = asyncio.run(executor.evaluate_all_vehicles(10))
@@ -2279,7 +2279,7 @@ def test_price_level_shared_evac_denial_is_logged(monkeypatch):
     executor.get_charging_decision = AsyncMock(
         return_value=(False, "Price-level: above threshold", "price_level_opportunity")
     )
-    actions = importlib.import_module("powersync_nir.automations.actions")
+    actions = importlib.import_module("power_sync.automations.actions")
     actions._begin_automated_shared_loadpoint_cycle(hass, entry)
 
     results = asyncio.run(executor.evaluate_all_vehicles(50))
@@ -2291,7 +2291,7 @@ def test_price_level_shared_evac_denial_is_logged(monkeypatch):
             "price_level_opportunity",
         )
     }
-    assert hass.data["powersync_nir"]["entry-1"][
+    assert hass.data["power_sync"]["entry-1"][
         "_automated_shared_loadpoint_decision_ledger"
     ]["sigenergy_charger"]["shared_ev_profile_a"] == {
         "allowed": False,
@@ -2351,11 +2351,11 @@ def test_smart_schedule_shared_generic_decision_is_logged_before_start(monkeypat
         charger_type="generic",
         decision=(True, reason, source),
     )
-    actions = importlib.import_module("powersync_nir.automations.actions")
+    actions = importlib.import_module("power_sync.automations.actions")
     actions._begin_automated_shared_loadpoint_cycle(hass, entry)
 
     async def start_after_ledger(*args, **kwargs):
-        assert hass.data["powersync_nir"]["entry-1"][
+        assert hass.data["power_sync"]["entry-1"][
             "_automated_shared_loadpoint_decision_ledger"
         ]["generic_ev"]["shared_ev_profile_a"] == {
             "allowed": True,
@@ -2389,7 +2389,7 @@ def test_smart_schedule_shared_evac_final_denial_is_logged(monkeypatch):
         charger_type="sigenergy",
         decision=(False, reason, source),
     )
-    actions = importlib.import_module("powersync_nir.automations.actions")
+    actions = importlib.import_module("power_sync.automations.actions")
     actions._begin_automated_shared_loadpoint_cycle(hass, entry)
     executor._start_charging = AsyncMock()
 
@@ -2403,7 +2403,7 @@ def test_smart_schedule_shared_evac_final_denial_is_logged(monkeypatch):
     )
 
     executor._start_charging.assert_not_awaited()
-    assert hass.data["powersync_nir"]["entry-1"][
+    assert hass.data["power_sync"]["entry-1"][
         "_automated_shared_loadpoint_decision_ledger"
     ]["sigenergy_charger"]["shared_ev_profile_a"] == {
         "allowed": False,
@@ -2429,7 +2429,7 @@ def test_smart_schedule_omits_tesla_and_non_evac_shared_decisions(
         charger_type=charger_type,
         decision=(False, "Smart Schedule: wait", "grid_offpeak"),
     )
-    actions = importlib.import_module("powersync_nir.automations.actions")
+    actions = importlib.import_module("power_sync.automations.actions")
     actions._begin_automated_shared_loadpoint_cycle(hass, entry)
 
     asyncio.run(
@@ -2441,14 +2441,14 @@ def test_smart_schedule_omits_tesla_and_non_evac_shared_decisions(
         )
     )
 
-    assert hass.data["powersync_nir"]["entry-1"][
+    assert hass.data["power_sync"]["entry-1"][
         "_automated_shared_loadpoint_decision_ledger"
     ] == {}
 
 
 def _scheduled_price_hass(schedule: dict | None) -> _FakeHass:
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "scheduled_charging"
     ] = {
         "enabled": True,
@@ -2457,7 +2457,7 @@ def _scheduled_price_hass(schedule: dict | None) -> _FakeHass:
         "max_price_cents": 20,
     }
     if schedule is not None:
-        hass.data["powersync_nir"]["entry-1"]["optimization_coordinator"] = (
+        hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = (
             SimpleNamespace(data={"schedule": schedule})
         )
     return hass
@@ -2553,7 +2553,7 @@ def test_scheduled_none_price_rejects_explicitly_stale_optimizer_plan(monkeypatc
             "import_price": [0.1111, 0.10, 0.3555],
         }
     )
-    hass.data["powersync_nir"]["entry-1"]["optimization_coordinator"].data[
+    hass.data["power_sync"]["entry-1"]["optimization_coordinator"].data[
         "optimization_status"
     ] = "stale"
     executor = ev_planner.ScheduledChargingExecutor(hass, _FakeConfigEntry())
@@ -2716,7 +2716,7 @@ class _FakeTeslaSession:
 
 @pytest.fixture
 def fake_actions(monkeypatch):
-    actions = types.ModuleType("powersync_nir.automations.actions")
+    actions = types.ModuleType("power_sync.automations.actions")
     actions.DEFAULT_VEHICLE_ID = "_default"
     actions._canonical_dynamic_tesla_vehicle_id = lambda h, e, vin: vin
     actions._dynamic_ev_state = {}
@@ -2727,7 +2727,7 @@ def fake_actions(monkeypatch):
         if explicit:
             return explicit
 
-        entry_data = hass.data["powersync_nir"][config_entry.entry_id]
+        entry_data = hass.data["power_sync"][config_entry.entry_id]
         coordinator = entry_data.get("tesla_coordinator")
         site_info = getattr(coordinator, "_site_info_cache", None) if coordinator else None
         if isinstance(site_info, dict) and site_info.get("max_site_meter_power_ac"):
@@ -2743,9 +2743,9 @@ def fake_actions(monkeypatch):
 
     actions._resolve_max_grid_import_kw = resolve_max_grid_import_kw
     actions._is_vehicle_charge_complete = AsyncMock(return_value=False)
-    monkeypatch.setitem(sys.modules, "powersync_nir.automations.actions", actions)
+    monkeypatch.setitem(sys.modules, "power_sync.automations.actions", actions)
     monkeypatch.setattr(
-        sys.modules["powersync_nir.automations"],
+        sys.modules["power_sync.automations"],
         "actions",
         actions,
         raising=False,
@@ -2762,7 +2762,7 @@ async def _no_vehicles(*args, **kwargs):
 
 
 def test_auto_schedule_tesla_helpers_use_powersync_proxy_base(monkeypatch):
-    const = importlib.import_module("powersync_nir.const")
+    const = importlib.import_module("power_sync.const")
     fake_session = _FakeTeslaSession()
     hass = _FakeHass()
     hass.session = fake_session
@@ -2774,7 +2774,7 @@ def test_auto_schedule_tesla_helpers_use_powersync_proxy_base(monkeypatch):
         }
 
     monkeypatch.setattr(
-        sys.modules["powersync_nir"],
+        sys.modules["power_sync"],
         "get_tesla_api_token",
         lambda hass, entry: ("psync_test", const.TESLA_PROVIDER_POWERSYNC),
         raising=False,
@@ -2857,7 +2857,7 @@ def test_price_level_leaves_solar_surplus_owned_session_alone(monkeypatch, fake_
 def _suspended_solar_surplus_hass(state: dict) -> "_FakeHass":
     """Return a hass whose lease and dynamic state match a live surplus session."""
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["ev_ownership"] = {
+    hass.data["power_sync"]["entry-1"]["ev_ownership"] = {
         VIN: {"owner": "powersync", "owner_mode": "solar_surplus"}
     }
     return hass
@@ -3055,7 +3055,7 @@ def test_price_level_leaves_manual_session_alone(monkeypatch, fake_actions):
 
 
 def test_stop_guard_blocks_other_owner_family():
-    ev_ownership = importlib.import_module("powersync_nir.automations.ev_ownership")
+    ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
     hass = _FakeHass()
     entry = _FakeConfigEntry()
     ev_ownership.claim_ev_ownership(hass, entry, VIN, owner_mode="manual")
@@ -3075,7 +3075,7 @@ def test_stop_guard_blocks_other_owner_family():
 
 
 def test_stop_guard_allows_same_owner_family():
-    ev_ownership = importlib.import_module("powersync_nir.automations.ev_ownership")
+    ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
     hass = _FakeHass()
     entry = _FakeConfigEntry()
     ev_ownership.claim_ev_ownership(hass, entry, VIN, owner_mode="price_level_recovery")
@@ -3109,7 +3109,7 @@ def test_price_level_start_uses_vehicle_charger_config(fake_actions):
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "vehicle_charging_configs"
     ] = [{
         "vehicle_id": "generic_ev",
@@ -3252,7 +3252,7 @@ def test_price_level_zaptec_cooldown_is_not_labeled_as_tesla_confirmation(
 
 def test_vehicle_charger_params_accept_app_charge_amp_aliases(fake_actions):
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "vehicle_charging_configs"
     ] = [{
         "vehicle_id": VIN,
@@ -3265,7 +3265,7 @@ def test_vehicle_charger_params_accept_app_charge_amp_aliases(fake_actions):
 
     params = ev_planner._get_vehicle_charger_params(
         hass,
-        "powersync_nir",
+        "power_sync",
         _FakeConfigEntry(),
         VIN,
     )
@@ -3286,7 +3286,7 @@ def test_ble_only_multi_bridge_charger_lookup_ignores_stale_vin_fallback(
         }
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "vehicle_charging_configs"
     ] = [{
         "vehicle_id": VIN,
@@ -3296,7 +3296,7 @@ def test_ble_only_multi_bridge_charger_lookup_ignores_stale_vin_fallback(
 
     params = ev_planner._get_vehicle_charger_params(
         hass,
-        "powersync_nir",
+        "power_sync",
         BleOnlyEntry(),
         "ble_tesla_yf88",
     )
@@ -3369,7 +3369,7 @@ def test_shared_profile_config_lookup_does_not_borrow_other_profile_settings():
         }
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "vehicle_charging_configs"
     ] = [{
         "vehicle_id": "shared_ev_profile_a",
@@ -3379,7 +3379,7 @@ def test_shared_profile_config_lookup_does_not_borrow_other_profile_settings():
 
     params = ev_planner._get_vehicle_charger_params(
         hass,
-        "powersync_nir",
+        "power_sync",
         SharedEntry(),
         "shared_ev_profile_b",
     )
@@ -3394,7 +3394,7 @@ def test_shared_profile_config_lookup_does_not_borrow_other_profile_settings():
 
 def test_non_shared_profile_lookup_keeps_legacy_first_config_fallback():
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "vehicle_charging_configs"
     ] = [{
         "vehicle_id": "other_vehicle",
@@ -3404,7 +3404,7 @@ def test_non_shared_profile_lookup_keeps_legacy_first_config_fallback():
 
     params = ev_planner._get_vehicle_charger_params(
         hass,
-        "powersync_nir",
+        "power_sync",
         _FakeConfigEntry(),
         "unknown_vehicle",
     )
@@ -3426,7 +3426,7 @@ def test_price_level_sigenergy_start_uses_zero_battery_target(fake_actions):
         }
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["optimization_coordinator"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = SimpleNamespace(
         _config=SimpleNamespace(max_charge_w=10500, max_discharge_w=9900)
     )
 
@@ -3472,7 +3472,7 @@ def test_generic_price_level_start_uses_generic_loadpoint_id(monkeypatch, fake_a
     )
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "vehicle_charging_configs"
     ] = [{
         "vehicle_id": VIN,
@@ -3507,7 +3507,7 @@ def test_price_level_generic_stop_ignores_stale_tesla_vehicle_config(fake_action
         }
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "vehicle_charging_configs"
     ] = [{
         "vehicle_id": VIN,
@@ -3638,7 +3638,7 @@ def test_scheduled_sigenergy_start_uses_sigenergy_charger_loadpoint(fake_actions
         }
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "vehicle_charging_configs"
     ] = [{
         "vehicle_id": "5YJTEST0000000001",
@@ -3698,7 +3698,7 @@ def test_scheduled_adopted_shared_session_uses_normal_stop_when_denied(
 
     Entry.options = options
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "scheduled_charging"
     ] = {
         "enabled": True,
@@ -3745,7 +3745,7 @@ def test_scheduled_adopted_shared_session_does_not_duplicate_allowed_start(
 
     Entry.options = options
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "scheduled_charging"
     ] = {
         "enabled": True,
@@ -3844,7 +3844,7 @@ def test_scheduled_preserve_home_battery_sets_optimizer_intent(fake_actions, mon
     fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "scheduled_charging"
     ] = {"preserve_home_battery": True}
 
@@ -3860,14 +3860,14 @@ def test_scheduled_preserve_home_battery_sets_optimizer_intent(fake_actions, mon
     result = asyncio.run(executor._start_charging("Scheduled window"))
 
     assert result is True
-    preserve_state = hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"]
+    preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
     assert preserve_state["active"] is True
     assert preserve_state["mode"] == "no_discharge_charge_allowed"
 
     result = asyncio.run(executor._stop_charging("Outside schedule"))
 
     assert result is True
-    preserve_state = hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"]
+    preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
     assert preserve_state["active"] is False
 
 
@@ -3875,7 +3875,7 @@ def test_scheduled_no_grid_import_passes_dynamic_start_param(fake_actions, monke
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "scheduled_charging"
     ] = {"no_grid_import": True}
 
@@ -3975,7 +3975,7 @@ def test_scheduled_coordinator_starts_second_tesla_when_first_already_charging(
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "scheduled_charging"
     ] = {
         "enabled": True,
@@ -4007,7 +4007,7 @@ def test_scheduled_coordinator_starts_second_tesla_when_first_already_charging(
     previous_price_executor = ev_planner.get_price_level_executor()
     scheduled = ev_planner.ScheduledChargingExecutor(hass, _FakeConfigEntry())
     coordinator = ev_planner.EVChargingModeCoordinator(hass, _FakeConfigEntry())
-    from powersync_nir.automations.ev_ownership import claim_ev_ownership
+    from power_sync.automations.ev_ownership import claim_ev_ownership
     claim_ev_ownership(hass, _FakeConfigEntry(), first_vin, owner_mode="scheduled")
     coordinator._is_charging = True
 
@@ -4031,7 +4031,7 @@ def test_coordinator_does_not_report_price_level_after_smart_schedule_rejects_st
     fake_actions,
 ):
     """A rejected Price-Level intent must not become coordinator ownership."""
-    ev_ownership = importlib.import_module("powersync_nir.automations.ev_ownership")
+    ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
     fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
 
@@ -4085,7 +4085,7 @@ def test_coordinator_does_not_stop_price_level_session_twice_after_release(
     fake_actions,
 ):
     """Price-Level owns its per-VIN stop; the coordinator must not stop again."""
-    ev_ownership = importlib.import_module("powersync_nir.automations.ev_ownership")
+    ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
     hass = _FakeHass(price_settings={"opportunity_price_cents": 10})
     entry = _FakeConfigEntry()
@@ -4161,7 +4161,7 @@ def test_price_level_preserve_home_battery_sets_optimizer_intent(fake_actions):
     )
 
     assert result is True
-    preserve_state = hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"]
+    preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
     assert preserve_state["active"] is True
     assert preserve_state["source"] == "price_level_charging"
     assert preserve_state["mode"] == "no_discharge_charge_allowed"
@@ -4169,7 +4169,7 @@ def test_price_level_preserve_home_battery_sets_optimizer_intent(fake_actions):
     result = asyncio.run(executor._stop_charging("Price above threshold", "generic_ev"))
 
     assert result is True
-    preserve_state = hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"]
+    preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
     assert preserve_state["active"] is False
     assert preserve_state["source"] == "price_level_charging"
 
@@ -4179,7 +4179,7 @@ def test_scheduled_does_not_yield_an_ambiguous_default_loadpoint(monkeypatch, fa
     fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "scheduled_charging"
     ] = {
         "enabled": True,
@@ -4221,7 +4221,7 @@ def test_scheduled_does_not_yield_an_ambiguous_default_loadpoint(monkeypatch, fa
         ev_planner.set_price_level_executor(previous_price_executor)
 
     fake_actions._action_stop_ev_charging_dynamic.assert_awaited_once()
-    ev_ownership = importlib.import_module("powersync_nir.automations.ev_ownership")
+    ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
     lease = ev_ownership.get_ev_ownership(
         hass,
         _FakeConfigEntry(),
@@ -4238,7 +4238,7 @@ def test_scheduled_yields_to_active_second_tesla_outside_window(monkeypatch, fak
 
     hass = _FakeHass()
     _set_external_policy(hass, first_vin, second_vin)
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "scheduled_charging"
     ] = {
         "enabled": True,
@@ -4285,7 +4285,7 @@ def test_scheduled_yields_to_active_second_tesla_outside_window(monkeypatch, fak
         ev_planner.set_price_level_executor(previous_price_executor)
 
     fake_actions._action_stop_ev_charging_dynamic.assert_not_awaited()
-    ev_ownership = importlib.import_module("powersync_nir.automations.ev_ownership")
+    ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
     assert ev_ownership.get_ev_ownership(
         hass,
         _FakeConfigEntry(),
@@ -4590,7 +4590,7 @@ def test_scheduled_external_owner_is_retained_while_tesla_state_is_stale(
 
     hass = _FakeHass()
     _set_external_policy(hass, second_vin)
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "scheduled_charging"
     ] = {
         "enabled": True,
@@ -4635,7 +4635,7 @@ def test_scheduled_external_owner_is_retained_while_tesla_state_is_stale(
         ev_planner.set_price_level_executor(previous_price_executor)
 
     fake_actions._action_stop_ev_charging_dynamic.assert_not_awaited()
-    ev_ownership = importlib.import_module("powersync_nir.automations.ev_ownership")
+    ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
     lease = ev_ownership.get_ev_ownership(
         hass,
         _FakeConfigEntry(),
@@ -4662,7 +4662,7 @@ def test_scheduled_leaves_solar_surplus_owned_session_alone(
     fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "scheduled_charging"
     ] = {
         "enabled": True,
@@ -4714,7 +4714,7 @@ def test_scheduled_does_not_stop_external_charging_when_vehicle_away(
     fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "scheduled_charging"
     ] = {
         "enabled": True,
@@ -5225,7 +5225,7 @@ def test_auto_schedule_keeps_future_plan_without_preserving_for_away_vehicle(
     assert plan_calls[0]["current_soc"] == 40
     fake_actions._action_start_ev_charging_dynamic.assert_not_awaited()
 
-    preserve_state = hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"]
+    preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
     assert preserve_state.get("active", False) is False
     assert preserve_state.get("source") in (None, "smart_schedule")
 
@@ -5242,7 +5242,7 @@ def test_auto_schedule_clears_legacy_future_preserve_while_vehicle_away(
         _FakeConfigEntry(),
         planner=SimpleNamespace(),
     )
-    hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"] = {
+    hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"] = {
         "active": True,
         "mode": "no_discharge_charge_allowed",
         "source": "smart_schedule",
@@ -5277,7 +5277,7 @@ def test_auto_schedule_clears_legacy_future_preserve_while_vehicle_away(
 
     executor._sync_inactive_smart_schedule_preserve_intent()
 
-    preserve_state = hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"]
+    preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
     assert preserve_state["active"] is False
     assert preserve_state["source"] == "smart_schedule"
     assert preserve_state["reason"] == "no active Smart Schedule charging"
@@ -5353,7 +5353,7 @@ def test_auto_schedule_yields_to_untracked_tesla_while_waiting(monkeypatch, fake
         executor.config_entry,
         vehicle_vin=VIN,
     )
-    ev_ownership = importlib.import_module("powersync_nir.automations.ev_ownership")
+    ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
     lease = ev_ownership.get_ev_ownership(hass, executor.config_entry, VIN)[1]
     assert lease["owner"] == "external"
 
@@ -5438,7 +5438,7 @@ def test_auto_schedule_external_stop_respects_owner_and_physical_state(
     expect_stop,
     expect_probe,
 ):
-    ev_ownership = importlib.import_module("powersync_nir.automations.ev_ownership")
+    ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
     hass = _FakeHass()
     entry = _FakeConfigEntry()
     if owner_mode == "external":
@@ -5575,7 +5575,7 @@ def test_auto_schedule_owned_stop_suppression_is_per_vehicle(
     hass = _FakeHass()
     entry = _FakeConfigEntry()
     executor = ev_planner.AutoScheduleExecutor(hass, entry, SimpleNamespace())
-    ev_ownership = importlib.import_module("powersync_nir.automations.ev_ownership")
+    ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
     for vehicle_id in (VIN, second_vin):
         ev_ownership.claim_ev_ownership(
             hass,
@@ -5616,7 +5616,7 @@ def test_auto_schedule_failed_owned_stop_is_not_suppressed(
     hass = _FakeHass()
     entry = _FakeConfigEntry()
     executor = ev_planner.AutoScheduleExecutor(hass, entry, SimpleNamespace())
-    ev_ownership = importlib.import_module("powersync_nir.automations.ev_ownership")
+    ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
     ev_ownership.claim_ev_ownership(
         hass,
         entry,
@@ -5660,7 +5660,7 @@ def test_auto_schedule_clears_stale_plan_when_away_vehicle_reaches_target(
     monkeypatch.setattr(ev_planner.dt_util, "now", lambda *args, **kwargs: now)
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"] = {
+    hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"] = {
         "active": True,
         "mode": "no_discharge_charge_allowed",
         "source": "smart_schedule",
@@ -5712,7 +5712,7 @@ def test_auto_schedule_clears_stale_plan_when_away_vehicle_reaches_target(
 
     assert state.last_decision == "away"
     assert state.current_plan is None
-    preserve_state = hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"]
+    preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
     assert preserve_state["active"] is False
     assert preserve_state["source"] == "smart_schedule"
 
@@ -5795,7 +5795,7 @@ def test_auto_schedule_preserve_does_not_overwrite_price_level_intent(
     monkeypatch.setattr(ev_planner.dt_util, "now", lambda *args, **kwargs: now)
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"] = {
+    hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"] = {
         "active": True,
         "mode": "no_discharge_charge_allowed",
         "source": "price_level_charging",
@@ -5828,14 +5828,14 @@ def test_auto_schedule_preserve_does_not_overwrite_price_level_intent(
     )
 
     executor._sync_inactive_smart_schedule_preserve_intent()
-    preserve_state = hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"]
+    preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
     assert preserve_state["active"] is True
     assert preserve_state["source"] == "price_level_charging"
     assert preserve_state["reason"] == "cheap price"
 
     state.current_plan = None
     executor._sync_inactive_smart_schedule_preserve_intent()
-    preserve_state = hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"]
+    preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
     assert preserve_state["active"] is True
     assert preserve_state["source"] == "price_level_charging"
 
@@ -5860,7 +5860,7 @@ def test_auto_schedule_active_preserve_sets_optimizer_intent():
         "Smart Schedule charging",
     )
 
-    preserve_state = hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"]
+    preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
     assert preserve_state["active"] is True
     assert preserve_state["source"] == "smart_schedule"
     assert preserve_state["mode"] == "no_discharge_charge_allowed"
@@ -5899,7 +5899,7 @@ def test_auto_schedule_active_preserve_waits_for_all_vehicles_before_clear():
         "first vehicle stopped",
     )
 
-    preserve_state = hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"]
+    preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
     assert preserve_state["active"] is True
     assert preserve_state["source"] == "smart_schedule"
     assert preserve_state["reason"] == "second vehicle charging"
@@ -5912,14 +5912,14 @@ def test_auto_schedule_active_preserve_waits_for_all_vehicles_before_clear():
         "all smart schedule charging stopped",
     )
 
-    preserve_state = hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"]
+    preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
     assert preserve_state["active"] is False
     assert preserve_state["source"] == "smart_schedule"
 
 
 def test_auto_schedule_active_preserve_does_not_overwrite_other_ev_mode():
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"] = {
+    hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"] = {
         "active": True,
         "mode": "no_discharge_charge_allowed",
         "source": "price_level_charging",
@@ -5940,7 +5940,7 @@ def test_auto_schedule_active_preserve_does_not_overwrite_other_ev_mode():
         "Smart Schedule charging",
     )
 
-    preserve_state = hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"]
+    preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
     assert preserve_state["active"] is True
     assert preserve_state["source"] == "price_level_charging"
     assert preserve_state["reason"] == "cheap price"
@@ -5955,12 +5955,12 @@ def test_auto_schedule_grid_start_uses_optimizer_battery_target(monkeypatch, fak
     )
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data["home_power_settings"] = {
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data["home_power_settings"] = {
         "phase_type": "single",
         "max_grid_import_amps": 80,
         "default_voltage": 240,
     }
-    hass.data["powersync_nir"]["entry-1"]["optimization_coordinator"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = SimpleNamespace(
         _config=SimpleNamespace(max_charge_w=14700, max_discharge_w=10000)
     )
     executor = ev_planner.AutoScheduleExecutor(
@@ -5994,12 +5994,12 @@ def test_auto_schedule_grid_start_prefers_tesla_site_meter_limit(monkeypatch, fa
     )
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data["home_power_settings"] = {
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data["home_power_settings"] = {
         "phase_type": "single",
         "max_grid_import_amps": 80,
         "default_voltage": 240,
     }
-    hass.data["powersync_nir"]["entry-1"]["optimization_coordinator"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = SimpleNamespace(
         _config=SimpleNamespace(max_charge_w=14700, max_discharge_w=10000)
     )
     executor = ev_planner.AutoScheduleExecutor(
@@ -6061,7 +6061,7 @@ def test_auto_schedule_solar_uses_smart_schedule_battery_floor(monkeypatch, fake
     )
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data["solar_surplus_config"] = {}
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data["solar_surplus_config"] = {}
     executor = ev_planner.AutoScheduleExecutor(
         hass,
         _FakeConfigEntry(),
@@ -6141,7 +6141,7 @@ def test_time_critical_solar_window_falls_back_to_grid_only_when_permitted(
     monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data["solar_surplus_config"] = {}
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data["solar_surplus_config"] = {}
     executor = ev_planner.AutoScheduleExecutor(
         hass, _FakeConfigEntry(), planner=DeadlineSolarPlanner()
     )
@@ -6210,7 +6210,7 @@ def test_auto_schedule_free_grid_overrides_priority_without_forcing_max_rate(
     demand_blocked,
     expected_start,
 ):
-    actions_module = importlib.import_module("powersync_nir.automations.actions")
+    actions_module = importlib.import_module("power_sync.automations.actions")
     actions_module._smart_schedule_effective_authorizations.clear()
     start_calls: list[tuple[str, bool]] = []
 
@@ -6338,7 +6338,7 @@ def test_auto_schedule_switches_active_controller_when_source_family_changes(
     )
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["ev_ownership"] = {
+    hass.data["power_sync"]["entry-1"]["ev_ownership"] = {
         VIN: {
             "owner": "powersync",
             "owner_mode": active_owner_mode,
@@ -6470,7 +6470,7 @@ def test_auto_schedule_reconciles_failed_source_family_switch(
             "owner_mode": active_owner_mode,
         }
     }
-    hass.data["powersync_nir"]["entry-1"]["ev_ownership"] = ownership
+    hass.data["power_sync"]["entry-1"]["ev_ownership"] = ownership
 
     async def fail_switch(*args, **kwargs):
         if release_previous_owner:
@@ -6559,7 +6559,7 @@ def test_auto_schedule_active_solar_session_delegates_low_surplus_stop(
 
     hass = _FakeHass()
     if owner_mode is not None:
-        hass.data["powersync_nir"]["entry-1"]["ev_ownership"] = {
+        hass.data["power_sync"]["entry-1"]["ev_ownership"] = {
             resolved_vehicle_id: {
                 "owner": "powersync",
                 "owner_mode": owner_mode,
@@ -6639,7 +6639,7 @@ def test_auto_schedule_solar_allows_strict_surplus_below_battery_floor(monkeypat
     )
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data["solar_surplus_config"] = {
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data["solar_surplus_config"] = {
         "allow_parallel_charging": True,
         "max_battery_charge_rate_kw": 3.0,
     }
@@ -6976,7 +6976,7 @@ def test_price_level_stop_uses_vehicle_charger_config(fake_actions):
     fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
         "vehicle_charging_configs"
     ] = [{
         "vehicle_id": "generic_ev",
@@ -7004,7 +7004,7 @@ def test_price_level_stop_uses_vehicle_charger_config(fake_actions):
 
 
 def test_price_level_stop_blocks_manual_owned_dynamic_stop(fake_actions):
-    ev_ownership = importlib.import_module("powersync_nir.automations.ev_ownership")
+    ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
     fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
 
     hass = _FakeHass()
@@ -7041,7 +7041,7 @@ def test_price_level_leaves_ownership_lease_session_alone(monkeypatch, fake_acti
     )
 
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["ev_ownership"] = {
+    hass.data["power_sync"]["entry-1"]["ev_ownership"] = {
         VIN: {"owner": "powersync", "owner_mode": "manual"}
     }
     executor = ev_planner.PriceLevelChargingExecutor(hass, _FakeConfigEntry())
@@ -7064,7 +7064,7 @@ def test_price_level_zaptec_start_is_blocked_by_manual_owner(fake_actions):
 
     client = SimpleNamespace(resume_charging=AsyncMock(return_value=True))
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"].update(
+    hass.data["power_sync"]["entry-1"].update(
         {
             "zaptec_client": client,
             "ev_ownership": {
@@ -7088,14 +7088,14 @@ def test_price_level_zaptec_start_is_blocked_by_manual_owner(fake_actions):
 
     assert result is False
     client.resume_charging.assert_not_awaited()
-    last_command = hass.data["powersync_nir"]["entry-1"]["ev_last_command"]["zaptec_standalone"]
+    last_command = hass.data["power_sync"]["entry-1"]["ev_last_command"]["zaptec_standalone"]
     assert last_command["command"] == "start_price_level_recovery"
     assert last_command["success"] is False
     assert "manual already owns" in last_command["reason"]
 
 
 def test_price_level_start_respects_manual_stop_hold(fake_actions):
-    ev_ownership = importlib.import_module("powersync_nir.automations.ev_ownership")
+    ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
 
     hass = _FakeHass()
@@ -7406,7 +7406,7 @@ def test_enabled_price_level_yields_to_external_high_price_charging(
     stop_charging.assert_not_awaited()
     state = executor._get_or_create_vehicle_state(VIN)
     assert state.last_decision == "external"
-    ev_ownership = importlib.import_module("powersync_nir.automations.ev_ownership")
+    ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
     assert ev_ownership.get_ev_ownership(hass, entry, VIN)[1]["owner"] == "external"
 
 
@@ -8456,7 +8456,7 @@ def test_price_forecast_uses_the_configured_tariff_for_custom_tou(monkeypatch):
         lambda: datetime(2026, 8, 20, 6, 25, tzinfo=perth_tz),
     )
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["tariff_schedule"] = {
+    hass.data["power_sync"]["entry-1"]["tariff_schedule"] = {
         # Synergy EV Add On shape: cheap 09:00-15:00, peak 15:00-21:00.
         "buy_rates": {
             "SUPER_OFF_PEAK": 0.085,
@@ -8505,7 +8505,7 @@ def test_epex_price_forecast_uses_real_optimizer_slots_not_generic_tou(monkeypat
     now = datetime(2026, 9, 16, 21, 11, tzinfo=timezone.utc)
     monkeypatch.setattr(ev_planner, "_ha_local_now_naive", lambda: now.replace(tzinfo=None))
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["optimization_coordinator"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = SimpleNamespace(
         data={
             "schedule": {
                 "timestamps": [
@@ -8541,7 +8541,7 @@ def test_epex_current_price_uses_the_active_optimizer_slot(monkeypatch):
     now = datetime(2026, 9, 16, 21, 11, tzinfo=timezone.utc)
     monkeypatch.setattr(ev_pricing.dt_util, "now", lambda: now)
     hass = _FakeHass()
-    hass.data["powersync_nir"]["entry-1"]["optimization_coordinator"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = SimpleNamespace(
         data={
             "schedule": {
                 "timestamps": [
@@ -8637,10 +8637,10 @@ def test_epex_cost_optimized_accumulates_distinct_final_slots(monkeypatch):
 
 @pytest.fixture
 def scheduled_reconciliation(monkeypatch, fake_actions):
-    from powersync_nir.automations import ev_ownership as ownership
+    from power_sync.automations import ev_ownership as ownership
     hass, entry = _FakeHass(), _FakeConfigEntry()
     vins = ["XP7YHCEL7TB811704", "LRWYHCEKXTC687964"]
-    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data["scheduled_charging"] = {
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data["scheduled_charging"] = {
         "enabled": True, "start_time": "12:00", "end_time": "14:00",
         "max_price_cents": 80, "preserve_home_battery": True,
     }
@@ -8699,7 +8699,7 @@ def test_scheduled_reconciliation_partial_failure_retries_only_failed_vehicle(sc
     assert f.scheduled.get_state()["is_charging"] is True
     assert f.scheduled.get_state()["last_decision"] == "partial"
     assert f.scheduled.get_state()["vehicle_results"][f.vins[1]]["active"] is False
-    assert f.hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"]["active"] is True
+    assert f.hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]["active"] is True
     f.failed.clear()
     asyncio.run(f.coordinator.evaluate({}, 0))
     assert f.actions._action_start_ev_charging_dynamic.await_count == 3
@@ -8713,7 +8713,7 @@ def test_scheduled_reconciliation_rejected_start_is_not_active_and_can_recover(s
     assert f.coordinator.get_state()["is_charging"] is False
     assert f.coordinator.get_state()["active_modes"] == []
     assert f.scheduled.get_state()["is_charging"] is False
-    assert f.hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"]["active"] is False
+    assert f.hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]["active"] is False
     f.failed.clear()
     asyncio.run(f.coordinator.evaluate({}, 0))
     assert f.coordinator.get_state()["active_modes"] == ["Scheduled"]
@@ -8732,7 +8732,7 @@ def test_scheduled_reconciliation_preserves_foreign_owner_and_exact_cleanup(monk
     asyncio.run(f.coordinator.evaluate({}, 0))
     assert [c.args[2]["vehicle_id"] for c in f.actions._action_stop_ev_charging_dynamic.await_args_list] == [f.vins[0]]
     assert f.ownership.get_ev_ownership(f.hass, f.entry, f.vins[1])[1]["owner_mode"] == foreign
-    assert f.hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"]["active"] is False
+    assert f.hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]["active"] is False
 
 
 def test_scheduled_reconciliation_mixed_price_level_does_not_mask_failed_start(monkeypatch, scheduled_reconciliation):
@@ -8750,7 +8750,7 @@ def test_scheduled_reconciliation_mixed_price_level_does_not_mask_failed_start(m
     asyncio.run(f.coordinator.evaluate({}, 0))
     assert set(f.coordinator.get_state()["active_modes"]) == {"Price-Level", "Scheduled"}
     # Price-Level on another vehicle must not leave Scheduled cars running after disable.
-    f.hass.data["powersync_nir"]["entry-1"]["automation_store"]._data["scheduled_charging"]["enabled"] = False
+    f.hass.data["power_sync"]["entry-1"]["automation_store"]._data["scheduled_charging"]["enabled"] = False
     asyncio.run(f.coordinator.evaluate({}, 0))
     assert {c.args[2]["vehicle_id"] for c in f.actions._action_stop_ev_charging_dynamic.await_args_list} == set(f.vins)
     assert f.coordinator.get_state()["active_modes"] == ["Price-Level"]
@@ -8776,7 +8776,7 @@ def test_scheduled_reconciliation_retains_cleanup_after_observation_loss(monkeyp
         ))
     asyncio.run(f.coordinator.evaluate({}, 0))
     assert f.scheduled.get_state()["is_charging"] is True
-    assert f.hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"]["active"] is True
+    assert f.hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]["active"] is True
     monkeypatch.setattr(ev_planner.dt_util, "now", lambda: datetime(2026, 9, 17, 14, tzinfo=timezone.utc))
     asyncio.run(f.coordinator.evaluate({}, 0))
     assert {c.args[2]["vehicle_id"] for c in f.actions._action_stop_ev_charging_dynamic.await_args_list} == set(f.vins)
@@ -8821,14 +8821,14 @@ def test_scheduled_reconciliation_failed_teardown_remains_unconfirmed(monkeypatc
         asyncio.run(f.coordinator.evaluate({}, 0))
         assert f.scheduled.get_state()["last_decision"] == "stop_failed"
         assert set(f.scheduled.get_state()["pending_stop_vehicle_ids"]) == set(f.vins)
-        assert f.hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"]["active"] is True
+        assert f.hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]["active"] is True
         assert f.coordinator.get_state()["is_charging"] is False
         assert not any(r["active"] for r in f.scheduled.get_state()["vehicle_results"].values())
     assert f.actions._action_stop_ev_charging_dynamic.await_count == 2
     observed.return_value = True
     asyncio.run(f.coordinator.evaluate({}, 0))
     assert f.scheduled.get_state()["pending_stop_vehicle_ids"] == []
-    assert f.hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"]["active"] is False
+    assert f.hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]["active"] is False
     assert f.actions._action_stop_ev_charging_dynamic.await_count == 2
 
 
@@ -8900,7 +8900,7 @@ def test_scheduled_reconciliation_takeover_during_eligibility_is_not_active(monk
     asyncio.run(f.coordinator.evaluate({}, 0))
     assert f.coordinator.get_state()["active_modes"] == []
     assert not any(r["active"] for r in f.scheduled.get_state()["vehicle_results"].values())
-    assert f.hass.data["powersync_nir"]["entry-1"]["scheduled_ev_preserve_state"]["active"] is False
+    assert f.hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]["active"] is False
     assert f.actions._action_start_ev_charging_dynamic.await_count == 2
 
 

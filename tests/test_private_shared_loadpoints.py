@@ -4,9 +4,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ACTIONS = ROOT / "custom_components/powersync_nir/automations/actions.py"
-PLANNER = ROOT / "custom_components/powersync_nir/automations/ev_charging_planner.py"
-SESSIONS = ROOT / "custom_components/powersync_nir/automations/ev_charging_session.py"
+ACTIONS = ROOT / "custom_components/power_sync/automations/actions.py"
+PLANNER = ROOT / "custom_components/power_sync/automations/ev_charging_planner.py"
+SESSIONS = ROOT / "custom_components/power_sync/automations/ev_charging_session.py"
 
 GENERIC_SHARED_LOADPOINT = {
     "binding_id": "generic_home",
@@ -60,7 +60,7 @@ def test_physical_session_key_is_separate_from_logical_vehicle_attribution():
 
 def test_manual_api_parameters_use_the_shared_loadpoint_guard():
     """The app cannot send a Generic/EVAC command around profile selection."""
-    source = (ROOT / "custom_components/powersync_nir/__init__.py").read_text()
+    source = (ROOT / "custom_components/power_sync/__init__.py").read_text()
 
     assert "resolve_shared_loadpoint_command" in source
 

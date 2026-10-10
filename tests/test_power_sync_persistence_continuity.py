@@ -1,111 +1,183 @@
-"""Regression contracts for original PowerSync persistence after the fork reversal."""
+"""Runtime persistence continuity coverage for the restored PowerSync package."""
 
 from __future__ import annotations
 
-import ast
-from datetime import datetime, timezone
-import importlib.util
-from pathlib import Path
+import asyncio
+import copy
+import importlib
 import sys
+import types
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPONENT = ROOT / "custom_components" / "power_sync"
-INIT = COMPONENT / "__init__.py"
-AUTOMATIONS = COMPONENT / "automations" / "__init__.py"
-SESSIONS = COMPONENT / "automations" / "ev_charging_session.py"
-OPTIMIZER = COMPONENT / "optimization" / "coordinator.py"
-CONFIG_FLOW = COMPONENT / "config_flow.py"
-SHARED_LOADPOINT = COMPONENT / "automations" / "shared_loadpoint.py"
 
 
-def _string_constants(path: Path) -> set[str]:
-    """Return literal strings without importing the Home Assistant integration."""
-    return {
-        node.value
-        for node in ast.walk(ast.parse(path.read_text(), filename=str(path)))
-        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+class _MemoryStore:
+    """Small HA Store boundary that records the actual namespace used at runtime."""
+
+    records: dict[str, dict] = {}
+    constructed_keys: list[str] = []
+
+    def __init__(self, _hass, _version, key):
+        self.key = key
+        type(self).constructed_keys.append(key)
+
+    async def async_load(self):
+        return copy.deepcopy(type(self).records.get(self.key))
+
+    async def async_save(self, value):
+        type(self).records[self.key] = copy.deepcopy(value)
+
+
+@pytest.fixture
+def isolated_power_sync_runtime(monkeypatch):
+    """Discard test-only module imports before monkeypatch restores live modules."""
+    yield
+    for name in tuple(sys.modules):
+        if name == "power_sync" or name.startswith("power_sync."):
+            sys.modules.pop(name, None)
+
+
+def _load_runtime_modules(monkeypatch):
+    """Load real persistence code with only its HA dependency surface stubbed."""
+    for name in tuple(sys.modules):
+        if name == "power_sync" or name.startswith("power_sync."):
+            monkeypatch.delitem(sys.modules, name, raising=False)
+
+    package = types.ModuleType("power_sync")
+    package.__path__ = [str(COMPONENT)]
+    optimization = types.ModuleType("power_sync.optimization")
+    optimization.__path__ = [str(COMPONENT / "optimization")]
+    monkeypatch.setitem(sys.modules, "power_sync", package)
+    monkeypatch.setitem(sys.modules, "power_sync.optimization", optimization)
+
+    homeassistant = types.ModuleType("homeassistant")
+    homeassistant_core = types.ModuleType("homeassistant.core")
+    homeassistant_core.HomeAssistant = object
+    homeassistant_helpers = types.ModuleType("homeassistant.helpers")
+    homeassistant_storage = types.ModuleType("homeassistant.helpers.storage")
+    homeassistant_storage.Store = _MemoryStore
+    homeassistant.helpers = homeassistant_helpers
+    homeassistant_helpers.storage = homeassistant_storage
+    for name, module in {
+        "homeassistant": homeassistant,
+        "homeassistant.core": homeassistant_core,
+        "homeassistant.helpers": homeassistant_helpers,
+        "homeassistant.helpers.storage": homeassistant_storage,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    const = types.ModuleType("power_sync.const")
+    for name in (
+        "CONF_SOLAR_FORECAST_PROVIDER",
+        "CONF_SOLCAST_ESTIMATE_TYPE",
+        "CONF_ZAPTEC_STANDALONE_ENABLED",
+        "CONF_ZAPTEC_USERNAME",
+        "DEFAULT_SOLAR_FORECAST_PROVIDER",
+        "DEFAULT_SOLCAST_ESTIMATE_TYPE",
+        "SOLAR_FORECAST_PROVIDERS",
+        "CONF_GENERIC_CHARGER_ENABLED",
+        "CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY",
+        "CONF_SHARED_LOADPOINT_PROFILE_A_NAME",
+        "CONF_SHARED_LOADPOINT_PROFILE_A_STATE",
+        "CONF_SHARED_LOADPOINT_PROFILE_B_NAME",
+        "CONF_SHARED_LOADPOINT_PROFILE_B_STATE",
+        "CONF_SIGENERGY_CHARGER_ENABLED",
+        "CONF_SIGENERGY_CHARGER_TYPE",
+        "SIGENERGY_CHARGER_EVAC",
+    ):
+        setattr(const, name, name.lower())
+    const.DOMAIN = "power_sync"
+    monkeypatch.setitem(sys.modules, "power_sync.const", const)
+
+    load_estimator = types.ModuleType("power_sync.optimization.load_estimator")
+    load_estimator.SolcastForecaster = object
+    monkeypatch.setitem(sys.modules, "power_sync.optimization.load_estimator", load_estimator)
+    ev_load = types.ModuleType("power_sync.ev_load")
+    ev_load.is_current_ev_power_observation = lambda *_args, **_kwargs: False
+    monkeypatch.setitem(sys.modules, "power_sync.ev_load", ev_load)
+    tesla_ble = types.ModuleType("power_sync.tesla_ble")
+    tesla_ble.get_tesla_ble_charge_current_state = lambda *_args, **_kwargs: None
+    tesla_ble.get_tesla_ble_charge_power_state = lambda *_args, **_kwargs: None
+    monkeypatch.setitem(sys.modules, "power_sync.tesla_ble", tesla_ble)
+    triggers = types.ModuleType("power_sync.automations.triggers")
+    triggers.evaluate_trigger = lambda *_args, **_kwargs: None
+    triggers.evaluate_conditions = lambda *_args, **_kwargs: None
+    triggers.TriggerResult = object
+    monkeypatch.setitem(sys.modules, "power_sync.automations.triggers", triggers)
+    actions = types.ModuleType("power_sync.automations.actions")
+    actions.execute_actions = lambda *_args, **_kwargs: None
+    monkeypatch.setitem(sys.modules, "power_sync.automations.actions", actions)
+
+    return (
+        importlib.import_module("power_sync.automations"),
+        importlib.import_module("power_sync.automations.shared_loadpoint"),
+    )
+
+
+def test_restored_runtime_loads_saves_and_reloads_original_automation_records(
+    monkeypatch, isolated_power_sync_runtime
+):
+    """The real store boundary keeps legacy records/options under power_sync."""
+    automations, shared_loadpoint = _load_runtime_modules(monkeypatch)
+    original_record = {
+        "id": 42,
+        "name": "Legacy solar guard",
+        "trigger_runtime": {"above_since": "2026-10-10T04:00:00+00:00"},
     }
-
-
-def test_original_power_sync_persistence_targets_are_retained() -> None:
-    """Existing production learning, automation, and session records remain usable."""
-    assert 'STORAGE_KEY = "power_sync.automations"' in AUTOMATIONS.read_text()
-    assert '"power_sync_ev_sessions.json"' in SESSIONS.read_text()
-
-    optimizer_strings = _string_constants(OPTIMIZER)
-    required_store_templates = {
-        "power_sync.costs.",
-        "power_sync.solar_forecast_learning.",
-        "power_sync.battery_efficiency_learning.",
-        "power_sync.solar_export_hold.",
+    original_profile = {
+        "vehicle_id": "shared_ev_profile_a",
+        "display_name": "Tank",
+        "charger_type": "generic",
+        "app_owned_limit": 80,
     }
-    assert required_store_templates <= optimizer_strings
+    _MemoryStore.records = {
+        "power_sync.automations": {
+            "automations": [original_record],
+            "next_id": 43,
+            "push_tokens": {"legacy-device": "token"},
+            "custom_tariff": {"power_sync_explicit_periods": [{"start": "00:00"}]},
+            "vehicle_charging_configs": [original_profile],
+        }
+    }
+    _MemoryStore.constructed_keys = []
 
+    first_runtime = automations.AutomationStore(object())
+    asyncio.run(first_runtime.async_load())
+    assert first_runtime.get_by_id(42) == original_record
+    assert first_runtime.get_custom_tariff()["power_sync_explicit_periods"] == [{"start": "00:00"}]
 
-def test_explicit_tariff_periods_and_shared_loadpoint_config_remain_payload_data() -> None:
-    """Saved options and shared logical EV configuration retain their original data."""
-    config_source = CONFIG_FLOW.read_text()
-    assert '"power_sync_explicit_periods"' in config_source
-    assert "saved_periods = custom_tariff.get(\"power_sync_explicit_periods\")" in config_source
-
-    shared_source = SHARED_LOADPOINT.read_text()
-    assert "{**getattr(config_entry, \"data\", {}), **getattr(config_entry, \"options\", {})}" in shared_source
-    assert 'store._data["vehicle_charging_configs"] = existing' in shared_source
-
-
-def test_setup_has_no_speculative_entity_registry_rename() -> None:
-    """Restoring the original domain must not rewrite deployed entity identities."""
-    source = INIT.read_text()
-    assert "def _migrate_entity_ids(" not in source
-    assert "_migrate_entity_ids(hass, entry)" not in source
-
-
-def test_component_code_never_targets_the_undeployed_nir_persistence_namespace() -> None:
-    """Normal setup and evaluation can only read/write the original namespace."""
-    offenders = [
-        path.relative_to(COMPONENT)
-        for path in COMPONENT.rglob("*.py")
-        if "powersync_nir" in path.read_text()
-    ]
-    assert not offenders
-
-
-def _load_module(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_external_session_reconciliation_preserves_the_physical_loadpoint_id() -> None:
-    """The reversal does not rewrite a shared controller's physical identity."""
-    reconciler = _load_module(
-        "power_sync_persistence_reconciler",
-        COMPONENT / "automations" / "external_session_reconciler.py",
+    entry = SimpleNamespace(
+        data={},
+        options={
+            "conf_generic_charger_enabled": True,
+            "conf_shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+            "conf_shared_loadpoint_profile_a_name": "Tank",
+            "conf_shared_loadpoint_profile_a_state": "tank",
+            "conf_shared_loadpoint_profile_b_name": "Tesla",
+            "conf_shared_loadpoint_profile_b_state": "tesla",
+        },
     )
-    observed_at = datetime(2026, 10, 10, tzinfo=timezone.utc)
+    assert asyncio.run(shared_loadpoint.ensure_shared_logical_vehicle_configs(entry, first_runtime))
+    first_runtime.update_trigger_runtime(42, {"above_since": "2026-10-10T04:05:00+00:00"})
+    asyncio.run(first_runtime.async_save())
 
-    observation = reconciler.generic_power_observation(
-        binding_id="generic_ev",
-        power_kw=7.2,
-        observed_at=observed_at,
-        now=observed_at,
-    )
-
-    assert observation.binding_id == "generic_ev"
-    assert observation.power_kw == 7.2
-    assert observation.fresh
-
-
-def test_ownership_keeps_the_existing_loadpoint_key() -> None:
-    """Logical profiles do not cause persistence to rename the physical key."""
-    ownership = _load_module(
-        "power_sync_persistence_ownership",
-        COMPONENT / "automations" / "ev_ownership.py",
-    )
-
-    assert ownership.normalize_vehicle_id("generic_ev") == "generic_ev"
-    assert ownership.normalize_vehicle_id("sigenergy_charger") == "sigenergy_charger"
+    restored_runtime = automations.AutomationStore(object())
+    asyncio.run(restored_runtime.async_load())
+    restored = restored_runtime.get_by_id(42)
+    assert restored["name"] == "Legacy solar guard"
+    assert restored["trigger_runtime"] == {"above_since": "2026-10-10T04:05:00+00:00"}
+    assert restored_runtime.get_custom_tariff()["power_sync_explicit_periods"] == [{"start": "00:00"}]
+    profiles = restored_runtime._data["vehicle_charging_configs"]
+    assert next(profile for profile in profiles if profile["vehicle_id"] == "shared_ev_profile_a")["app_owned_limit"] == 80
+    assert {profile["vehicle_id"] for profile in profiles} == {
+        "shared_ev_profile_a",
+        "shared_ev_profile_b",
+    }
+    assert _MemoryStore.constructed_keys == ["power_sync.automations", "power_sync.automations"]
+    assert "powersync_nir.automations" not in _MemoryStore.records

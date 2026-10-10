@@ -9,7 +9,7 @@ from pathlib import Path
 SOURCE = (
     Path(__file__).resolve().parents[1]
     / "custom_components"
-    / "powersync_nir"
+    / "power_sync"
     / "__init__.py"
 )
 

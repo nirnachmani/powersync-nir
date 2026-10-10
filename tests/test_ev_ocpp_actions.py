@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 
-ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "powersync_nir"
+ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
 
 
 @pytest.mark.parametrize('matched', [True, False])
@@ -114,18 +114,18 @@ def _install_ha_stubs() -> None:
 
 _install_ha_stubs()
 
-_ps = types.ModuleType("powersync_nir")
+_ps = types.ModuleType("power_sync")
 _ps.__path__ = [str(ROOT)]
-sys.modules["powersync_nir"] = _ps
+sys.modules["power_sync"] = _ps
 
-_automations = types.ModuleType("powersync_nir.automations")
+_automations = types.ModuleType("power_sync.automations")
 _automations.__path__ = [str(ROOT / "automations")]
-sys.modules["powersync_nir.automations"] = _automations
+sys.modules["power_sync.automations"] = _automations
 
-if not hasattr(sys.modules.get("powersync_nir.const"), "CONF_EV_PROVIDER"):
-    sys.modules.pop("powersync_nir.const", None)
-sys.modules.pop("powersync_nir.automations.actions", None)
-actions = importlib.import_module("powersync_nir.automations.actions")
+if not hasattr(sys.modules.get("power_sync.const"), "CONF_EV_PROVIDER"):
+    sys.modules.pop("power_sync.const", None)
+sys.modules.pop("power_sync.automations.actions", None)
+actions = importlib.import_module("power_sync.automations.actions")
 
 
 @pytest.fixture(autouse=True)
@@ -159,7 +159,7 @@ def _phase_managed_hass(*, currents=(20, 18, 17), age_seconds=1):
         for index, current in enumerate(currents, 1)
     ]
     hass = _Hass(states)
-    hass.data["powersync_nir"]["entry-1"]["automation_store"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["automation_store"] = SimpleNamespace(
         _data={
             "home_power_settings": {
                 "phase_type": "three",
@@ -191,7 +191,7 @@ def test_phase_management_clamps_owned_initial_target_to_worst_phase(monkeypatch
     ))
 
     assert target == 10
-    status = hass.data["powersync_nir"]["entry-1"]["phase_load_management_status"]
+    status = hass.data["power_sync"]["entry-1"]["phase_load_management_status"]
     assert status["limiting_phase"] == "l1"
     assert status["allocated_amps"] == 10
 
@@ -252,7 +252,7 @@ def test_phase_management_stale_data_stops_active_owned_charging(monkeypatch):
         actions._set_vehicle_amps(hass, _Entry(), "charger", 16, params)
     ) is True
     assert commanded == [0]
-    status = hass.data["powersync_nir"]["entry-1"]["phase_load_management_status"]
+    status = hass.data["power_sync"]["entry-1"]["phase_load_management_status"]
     assert status["available"] is False
     assert "stale" in status["telemetry_reason"]
 
@@ -330,7 +330,7 @@ def test_phase_management_settings_change_clears_remembered_targets():
     )
 
     assert "entry-1" not in actions._phase_load_management_targets
-    assert hass.data["powersync_nir"]["entry-1"]["phase_load_management_status"] == {
+    assert hass.data["power_sync"]["entry-1"]["phase_load_management_status"] == {
         "enabled": False,
         "available": None,
         "reason": "disabled",
@@ -394,7 +394,7 @@ class _Hass:
         registry_entities: dict[str, object] | None = None,
         registry_devices: dict[str, object] | None = None,
     ) -> None:
-        self.data = {"powersync_nir": {"entry-1": {}}}
+        self.data = {"power_sync": {"entry-1": {}}}
         self.states = _States(states)
         self.services = _Services()
         self.entity_registry = SimpleNamespace(entities=registry_entities or {})
@@ -439,7 +439,7 @@ def test_automated_shared_sequence_budget_reuses_profile_token_and_rejects_compe
     ]
     assert actions._reserve_automated_shared_loadpoint_sequence(hass, entry, competitor) is False
     actions._clear_automated_shared_loadpoint_cycle(hass, entry)
-    assert "_automated_shared_loadpoint_sequence_budget" not in hass.data["powersync_nir"][
+    assert "_automated_shared_loadpoint_sequence_budget" not in hass.data["power_sync"][
         "entry-1"
     ]
 
@@ -484,7 +484,7 @@ def test_unchecked_dynamic_shared_command_rejects_competing_sequence_before_io(m
 
 
 def _set_external_policy(hass, vehicle_id: str, policy: str = "yield") -> None:
-    hass.data["powersync_nir"]["entry-1"]["automation_store"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["automation_store"] = SimpleNamespace(
         _data={
             "vehicle_charging_configs": [
                 {"vehicle_id": vehicle_id, "external_control_policy": policy}
@@ -594,7 +594,7 @@ def test_tesla_active_charger_capability_is_vin_scoped_and_follows_swap():
 
 def test_tesla_active_charger_capability_applies_lower_site_limit():
     hass, vin_a, _vin_b = _tesla_capability_hass(first_max=32)
-    hass.data["powersync_nir"]["entry-1"]["automation_store"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["automation_store"] = SimpleNamespace(
         _data={
             "home_power_settings": {
                 "max_charge_speed_enabled": True,
@@ -1533,7 +1533,7 @@ def test_tesla_physical_start_exact_wall_connector_power_is_fail_closed(
     )
     keyed_vin = vin_a if physical_key_vin == "target" else vin_b
     physical_key = "vehicle:" + keyed_vin.lower()
-    hass.data["powersync_nir"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
         data={
             "ev_power_fallback_by_physical_key": {
                 physical_key: power_kw,
@@ -1730,8 +1730,8 @@ def test_unconfirmed_tesla_dynamic_start_creates_no_runtime_or_ownership(
     assert stop_calls[0]["vehicle_id"] == vin
     assert stop_calls[0]["vehicle_vin"] == vin
     assert stop_calls[0]["_force_tesla_stop_request"] is True
-    assert hass.data["powersync_nir"]["entry-1"].get("ev_ownership") in (None, {})
-    command = hass.data["powersync_nir"]["entry-1"]["ev_last_command"][vin]
+    assert hass.data["power_sync"]["entry-1"].get("ev_ownership") in (None, {})
+    command = hass.data["power_sync"]["entry-1"]["ev_last_command"][vin]
     assert command["success"] is False
     assert "physical charging was not confirmed" in command["reason"]
     assert "compensating stop request accepted" in command["reason"]
@@ -1830,7 +1830,7 @@ def test_already_charging_tesla_is_recovered_without_restart_or_stop(
     assert stop_calls == []
     assert len(timer_calls) == 1
     assert actions._dynamic_ev_state["entry-1"][vin]["active"] is True
-    ownership = hass.data["powersync_nir"]["entry-1"]["ev_ownership"]
+    ownership = hass.data["power_sync"]["entry-1"]["ev_ownership"]
     assert ownership[vin]["owner_mode"] == "smart_schedule"
 
 
@@ -1974,7 +1974,7 @@ def test_non_fleet_command_keeps_existing_separate_wake_requirement(monkeypatch)
 
 def test_tesla_preserve_charge_holds_current_soc_with_backup_reserve():
     hass = _Hass([])
-    hass.data["powersync_nir"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
         data={"battery_level": 63.4}
     )
 
@@ -1983,7 +1983,7 @@ def test_tesla_preserve_charge_holds_current_soc_with_backup_reserve():
     assert result is True
     assert hass.services.calls == [
         (
-            "powersync_nir",
+            "power_sync",
             "set_backup_reserve",
             {"percent": 63, "source": "automation_preserve_charge"},
         )
@@ -1992,7 +1992,7 @@ def test_tesla_preserve_charge_holds_current_soc_with_backup_reserve():
 
 def test_tesla_preserve_charge_caps_unsupported_mid_80s_soc_to_80_percent():
     hass = _Hass([])
-    hass.data["powersync_nir"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
         data={"battery_level": 91}
     )
 
@@ -2001,7 +2001,7 @@ def test_tesla_preserve_charge_caps_unsupported_mid_80s_soc_to_80_percent():
     assert result is True
     assert hass.services.calls == [
         (
-            "powersync_nir",
+            "power_sync",
             "set_backup_reserve",
             {"percent": 80, "source": "automation_preserve_charge"},
         )
@@ -2010,7 +2010,7 @@ def test_tesla_preserve_charge_caps_unsupported_mid_80s_soc_to_80_percent():
 
 def test_tesla_preserve_charge_uses_100_percent_when_already_full():
     hass = _Hass([])
-    hass.data["powersync_nir"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
         data={"battery_level": 99}
     )
 
@@ -2019,7 +2019,7 @@ def test_tesla_preserve_charge_uses_100_percent_when_already_full():
     assert result is True
     assert hass.services.calls == [
         (
-            "powersync_nir",
+            "power_sync",
             "set_backup_reserve",
             {"percent": 100, "source": "automation_preserve_charge"},
         )
@@ -2051,7 +2051,7 @@ def test_tesla_grid_export_supports_legacy_entry_without_battery_system():
     assert result is True
     assert hass.services.calls == [
         (
-            "powersync_nir",
+            "power_sync",
             "set_grid_export",
             {"rule": "pv_only", "source": "automation"},
         )
@@ -2326,7 +2326,7 @@ def _zaptec_entry(installation_id: str = ""):
 def _zaptec_hass(cached_state: dict):
     client = _ZaptecClient()
     hass = _Hass([])
-    hass.data["powersync_nir"]["entry-1"].update({
+    hass.data["power_sync"]["entry-1"].update({
         "zaptec_client": client,
         "zaptec_cached_state": cached_state,
     })
@@ -2338,7 +2338,7 @@ def _install_solar_surplus_runtime_stubs(
     live_status: dict,
     ev_soc: float | None = None,
 ):
-    ev_planner = types.ModuleType("powersync_nir.automations.ev_charging_planner")
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
 
     async def get_ev_location(*args, **kwargs):
         return "home"
@@ -2348,11 +2348,11 @@ def _install_solar_surplus_runtime_stubs(
 
     ev_planner.get_ev_location = get_ev_location
     ev_planner.get_ev_battery_level = get_ev_battery_level
-    monkeypatch.setitem(sys.modules, "powersync_nir.automations.ev_charging_planner", ev_planner)
+    monkeypatch.setitem(sys.modules, "power_sync.automations.ev_charging_planner", ev_planner)
 
-    ev_session = types.ModuleType("powersync_nir.automations.ev_charging_session")
+    ev_session = types.ModuleType("power_sync.automations.ev_charging_session")
     ev_session.get_session_manager = lambda: None
-    monkeypatch.setitem(sys.modules, "powersync_nir.automations.ev_charging_session", ev_session)
+    monkeypatch.setitem(sys.modules, "power_sync.automations.ev_charging_session", ev_session)
 
     async def fake_live_status(*args, **kwargs):
         return live_status
@@ -2443,7 +2443,7 @@ def test_solar_surplus_parallel_reserve_allows_excess_above_battery_rate():
 
 def test_active_solar_surplus_refreshes_threshold_with_hysteresis(monkeypatch):
     hass = _Hass([])
-    hass.data["powersync_nir"]["entry-1"]["automation_store"] = types.SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["automation_store"] = types.SimpleNamespace(
         _data={
             "solar_surplus_config": {
                 "enabled": True,
@@ -2843,7 +2843,7 @@ def test_observed_wall_connector_power_is_counted_for_solar_surplus_stop(monkeyp
     monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_amps)
     monkeypatch.setattr(actions, "_get_current_ev_export_price", lambda *args: 8.0)
 
-    ev_planner = types.ModuleType("powersync_nir.automations.ev_charging_planner")
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
 
     async def home_location(*args, **kwargs):
         return "home"
@@ -2851,7 +2851,7 @@ def test_observed_wall_connector_power_is_counted_for_solar_surplus_stop(monkeyp
     ev_planner.get_ev_location = home_location
     monkeypatch.setitem(
         sys.modules,
-        "powersync_nir.automations.ev_charging_planner",
+        "power_sync.automations.ev_charging_planner",
         ev_planner,
     )
 
@@ -2938,7 +2938,7 @@ def test_solar_surplus_active_tesla_uses_positive_measured_power_under_curtailme
             "phases": 1,
         }
 
-    ev_planner = types.ModuleType("powersync_nir.automations.ev_charging_planner")
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
     ev_planner.get_ev_location = home_location
 
     async def no_ev_soc(*args, **kwargs):
@@ -2947,7 +2947,7 @@ def test_solar_surplus_active_tesla_uses_positive_measured_power_under_curtailme
     ev_planner.get_ev_battery_level = no_ev_soc
     monkeypatch.setitem(
         sys.modules,
-        "powersync_nir.automations.ev_charging_planner",
+        "power_sync.automations.ev_charging_planner",
         ev_planner,
     )
     monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", not_unplugged)
@@ -3050,9 +3050,9 @@ def test_solar_surplus_direct_parallel_reserve_tops_up_existing_battery_charge()
 
 def test_dynamic_ocpp_update_leaves_energy_to_ocpp_session_poll(monkeypatch):
     manager = _SessionManager()
-    ev_session = types.ModuleType("powersync_nir.automations.ev_charging_session")
+    ev_session = types.ModuleType("power_sync.automations.ev_charging_session")
     ev_session.get_session_manager = lambda: manager
-    monkeypatch.setitem(sys.modules, "powersync_nir.automations.ev_charging_session", ev_session)
+    monkeypatch.setitem(sys.modules, "power_sync.automations.ev_charging_session", ev_session)
 
     async def not_unplugged(*args, **kwargs):
         return False
@@ -3310,11 +3310,11 @@ def test_dynamic_tesla_resumes_after_site_headroom_returns(monkeypatch):
     monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
     monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start_charging)
 
-    ev_session = types.ModuleType("powersync_nir.automations.ev_charging_session")
+    ev_session = types.ModuleType("power_sync.automations.ev_charging_session")
     ev_session.get_session_manager = lambda: None
     monkeypatch.setitem(
         sys.modules,
-        "powersync_nir.automations.ev_charging_session",
+        "power_sync.automations.ev_charging_session",
         ev_session,
     )
 
@@ -4659,7 +4659,7 @@ def test_generic_dynamic_start_without_physical_readback_stays_unmanaged():
         ("switch", "turn_on", {"entity_id": "switch.garage_ev"}),
         ("switch", "turn_off", {"entity_id": "switch.garage_ev"}),
     ]
-    assert hass.data["powersync_nir"]["entry-1"].get("ev_ownership") in (None, {})
+    assert hass.data["power_sync"]["entry-1"].get("ev_ownership") in (None, {})
 
 
 def test_generic_dynamic_start_promotes_only_fresh_physical_readback():
@@ -4738,7 +4738,7 @@ def test_generic_cloud_start_settles_delayed_readback_safely(monkeypatch, readba
         nonlocal elapsed
         assert actions._dynamic_ev_state == {}
         if readback != "ownership" or elapsed < 10:
-            assert hass.data["powersync_nir"]["entry-1"].get("ev_ownership") in (None, {})
+            assert hass.data["power_sync"]["entry-1"].get("ev_ownership") in (None, {})
         assert hass.services.calls == [
             ("switch", "turn_on", {"entity_id": "switch.garage_ev"})
         ]
@@ -4753,7 +4753,7 @@ def test_generic_cloud_start_settles_delayed_readback_safely(monkeypatch, readba
             )
             await actions._action_stop_ev_charging_dynamic(hass, _Entry(), stop_params)
         if elapsed == 10 and readback == "ownership":
-            from powersync_nir.automations.ev_ownership import claim_ev_ownership
+            from power_sync.automations.ev_ownership import claim_ev_ownership
             claim_ev_ownership(hass, _Entry(), "_default", owner_mode="manual")
         if elapsed >= 45:
             if readback in ("status", "stale", "stop_other", "ownership"):
@@ -4778,9 +4778,9 @@ def test_generic_cloud_start_settles_delayed_readback_safely(monkeypatch, readba
         result = asyncio.run(run_start())
         assert result is (readback in ("status", "power", "stop_other"))
 
-    assert hass.data["powersync_nir"]["entry-1"].get("_pending_generic_ev_starts") == {}
+    assert hass.data["power_sync"]["entry-1"].get("_pending_generic_ev_starts") == {}
     if readback == "ownership":
-        from powersync_nir.automations.ev_ownership import get_ev_ownership
+        from power_sync.automations.ev_ownership import get_ev_ownership
         assert actions._dynamic_ev_state == {}
         assert get_ev_ownership(hass, _Entry(), "_default")[1]["owner_mode"] == "manual"
         assert len(hass.services.calls) == 1
@@ -4794,7 +4794,7 @@ def test_generic_cloud_start_settles_delayed_readback_safely(monkeypatch, readba
         elif readback != "cancel":
             assert elapsed == 60
         assert actions._dynamic_ev_state == {}
-        assert hass.data["powersync_nir"]["entry-1"].get("ev_ownership") in (None, {})
+        assert hass.data["power_sync"]["entry-1"].get("ev_ownership") in (None, {})
         assert hass.services.calls == [
             ("switch", "turn_on", {"entity_id": "switch.garage_ev"}),
             ("switch", "turn_off", {"entity_id": "switch.garage_ev"}),
@@ -5361,7 +5361,7 @@ def test_generic_dynamic_start_rejects_no_positive_integer_range(monkeypatch):
     assert actions._dynamic_ev_state == {}
     assert hass.services.calls == []
     assert timer_calls == []
-    assert hass.data["powersync_nir"]["entry-1"].get("ev_ownership") in (None, {})
+    assert hass.data["power_sync"]["entry-1"].get("ev_ownership") in (None, {})
 
 
 def test_solar_surplus_stays_paused_at_pause_soc_until_min_soc(monkeypatch):
@@ -5696,7 +5696,7 @@ def test_direct_ev_start_action_records_manual_ownership(monkeypatch):
     )
 
     assert result is True
-    lease = hass.data["powersync_nir"]["entry-1"]["ev_ownership"]["generic_ev"]
+    lease = hass.data["power_sync"]["entry-1"]["ev_ownership"]["generic_ev"]
     assert lease["owner_mode"] == "manual"
     # Manual starts run through the same dynamic controller as every other
     # mode, so they record the same start_<owner_mode> label. Nothing branches
@@ -5705,7 +5705,7 @@ def test_direct_ev_start_action_records_manual_ownership(monkeypatch):
 
 
 def test_direct_manual_start_preempts_solar_surplus_ownership(monkeypatch):
-    from powersync_nir.automations import ev_ownership
+    from power_sync.automations import ev_ownership
 
     async def fake_start(*args, **kwargs):
         return True
@@ -5751,14 +5751,14 @@ def test_direct_manual_start_preempts_solar_surplus_ownership(monkeypatch):
     assert cancelled == [True]
     state = actions._dynamic_ev_state["entry-1"]["generic_ev"]
     assert state["params"]["owner_mode"] == "manual"
-    lease = hass.data["powersync_nir"]["entry-1"]["ev_ownership"]["generic_ev"]
+    lease = hass.data["power_sync"]["entry-1"]["ev_ownership"]["generic_ev"]
     assert lease["owner_mode"] == "manual"
 
 
 def test_solar_surplus_disable_cannot_release_concurrent_manual_takeover(
     monkeypatch,
 ):
-    from powersync_nir.automations import ev_ownership
+    from power_sync.automations import ev_ownership
 
     async def run_race():
         hass = _Hass([])
@@ -5830,12 +5830,12 @@ def test_solar_surplus_disable_cannot_release_concurrent_manual_takeover(
 
     state = actions._dynamic_ev_state["entry-1"]["generic_ev"]
     assert state["params"]["owner_mode"] == "manual"
-    lease = hass.data["powersync_nir"]["entry-1"]["ev_ownership"]["generic_ev"]
+    lease = hass.data["power_sync"]["entry-1"]["ev_ownership"]["generic_ev"]
     assert lease["owner_mode"] == "manual"
 
 
 def test_solar_surplus_disable_preserves_manual_solar_policy(monkeypatch):
-    from powersync_nir.automations import ev_ownership
+    from power_sync.automations import ev_ownership
 
     hass = _Hass([])
     actions._dynamic_ev_state.clear()
@@ -5888,7 +5888,7 @@ def test_solar_surplus_disable_preserves_manual_solar_policy(monkeypatch):
     assert result is True
     assert stopped == ["automatic_ev"]
     assert set(actions._dynamic_ev_state["entry-1"]) == {"manual_ev"}
-    lease = hass.data["powersync_nir"]["entry-1"]["ev_ownership"]["manual_ev"]
+    lease = hass.data["power_sync"]["entry-1"]["ev_ownership"]["manual_ev"]
     assert lease["owner_mode"] == "manual_solar_surplus"
 
 
@@ -5913,7 +5913,7 @@ def test_direct_ev_start_action_can_skip_ownership(monkeypatch):
     )
 
     assert result is True
-    assert "ev_ownership" not in hass.data["powersync_nir"]["entry-1"]
+    assert "ev_ownership" not in hass.data["power_sync"]["entry-1"]
 
 
 def test_untracked_dynamic_stop_is_passive_by_default():
@@ -5958,7 +5958,7 @@ def test_explicit_untracked_dynamic_stop_controls_ocpp_charger():
         ("switch", "turn_off", {"entity_id": "switch.evse_1_charge_control"})
     ]
     assert (
-        hass.data["powersync_nir"]["entry-1"]["ev_last_command"]["ocpp_evse_1"]["command"]
+        hass.data["power_sync"]["entry-1"]["ev_last_command"]["ocpp_evse_1"]["command"]
         == "stop"
     )
 
@@ -5993,13 +5993,13 @@ def test_dynamic_start_claims_business_owner_mode():
     assert state["params"]["owner_mode"] == "price_level_recovery"
     assert state["ownership"]["owner_mode"] == "price_level_recovery"
     assert (
-        hass.data["powersync_nir"]["entry-1"]["ev_ownership"]["ocpp_evse_1"]["last_command"]["command"]
+        hass.data["power_sync"]["entry-1"]["ev_ownership"]["ocpp_evse_1"]["last_command"]["command"]
         == "start_price_level_recovery"
     )
 
 
 def test_solar_surplus_dynamic_start_uses_home_power_max_over_idle_tesla_cap(monkeypatch):
-    ev_planner = types.ModuleType("powersync_nir.automations.ev_charging_planner")
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
 
     async def plugged_in(*args, **kwargs):
         return True
@@ -6011,7 +6011,7 @@ def test_solar_surplus_dynamic_start_uses_home_power_max_over_idle_tesla_cap(mon
     ev_planner.get_ev_battery_level = ev_soc
     monkeypatch.setitem(
         sys.modules,
-        "powersync_nir.automations.ev_charging_planner",
+        "power_sync.automations.ev_charging_planner",
         ev_planner,
     )
 
@@ -6022,7 +6022,7 @@ def test_solar_surplus_dynamic_start_uses_home_power_max_over_idle_tesla_cap(mon
     hass = _Hass([
         _State("number.car_charging_amps", "16", {"min": 5, "max": 16}),
     ])
-    hass.data["powersync_nir"]["entry-1"]["automation_store"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["automation_store"] = SimpleNamespace(
         _data={
             "home_power_settings": {
                 "max_charge_speed_enabled": True,
@@ -6056,7 +6056,7 @@ def test_solar_surplus_restart_reclaims_exact_recovered_session(monkeypatch):
     vehicle_id = "5YJTEST0000000001"
     current_entity = "number.car_charge_current"
     charging_entity = "sensor.car_charging"
-    ev_planner = types.ModuleType("powersync_nir.automations.ev_charging_planner")
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
 
     async def plugged_in(*args, **kwargs):
         return True
@@ -6072,15 +6072,15 @@ def test_solar_surplus_restart_reclaims_exact_recovered_session(monkeypatch):
     ev_planner.get_ev_location = at_home
     monkeypatch.setitem(
         sys.modules,
-        "powersync_nir.automations.ev_charging_planner",
+        "power_sync.automations.ev_charging_planner",
         ev_planner,
     )
 
-    ev_session = types.ModuleType("powersync_nir.automations.ev_charging_session")
+    ev_session = types.ModuleType("power_sync.automations.ev_charging_session")
     ev_session.get_session_manager = lambda: None
     monkeypatch.setitem(
         sys.modules,
-        "powersync_nir.automations.ev_charging_session",
+        "power_sync.automations.ev_charging_session",
         ev_session,
     )
 
@@ -6118,7 +6118,7 @@ def test_solar_surplus_restart_reclaims_exact_recovered_session(monkeypatch):
         _State(current_entity, "1", {"min": 0, "max": 32}),
         _State(charging_entity, "charging"),
     ])
-    hass.data["powersync_nir"]["entry-1"].update(
+    hass.data["power_sync"]["entry-1"].update(
         {
             "ev_recovered_ownership": {
                 vehicle_id: {
@@ -6217,7 +6217,7 @@ def test_solar_surplus_restart_rejects_changed_charge_current():
         _State(current_entity, "1", {"min": 0, "max": 32}),
         _State(charging_entity, "charging"),
     ])
-    hass.data["powersync_nir"]["entry-1"].update(
+    hass.data["power_sync"]["entry-1"].update(
         {
             "ev_recovered_ownership": {
                 vehicle_id: {
@@ -6245,12 +6245,12 @@ def test_solar_surplus_restart_rejects_changed_charge_current():
     )
 
     assert recovered_amps is None
-    assert hass.data["powersync_nir"]["entry-1"]["ev_recovered_ownership"] == {}
+    assert hass.data["power_sync"]["entry-1"]["ev_recovered_ownership"] == {}
 
 
 def test_app_solar_surplus_start_rechecks_disabled_persisted_toggle():
     hass = _Hass([])
-    hass.data["powersync_nir"]["entry-1"]["automation_store"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["automation_store"] = SimpleNamespace(
         _data={"solar_surplus_config": {"enabled": False}}
     )
     actions._dynamic_ev_state.clear()
@@ -6271,13 +6271,13 @@ def test_app_solar_surplus_start_rechecks_disabled_persisted_toggle():
 
     assert result is False
     assert actions._dynamic_ev_state == {}
-    command = hass.data["powersync_nir"]["entry-1"]["ev_last_command"]["VIN123"]
+    command = hass.data["power_sync"]["entry-1"]["ev_last_command"]["VIN123"]
     assert command["success"] is False
     assert "disabled before the session started" in command["reason"]
 
 
 def test_solar_surplus_dynamic_start_blocks_full_ev(monkeypatch):
-    ev_planner = types.ModuleType("powersync_nir.automations.ev_charging_planner")
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
 
     async def plugged_in(*args, **kwargs):
         return True
@@ -6289,7 +6289,7 @@ def test_solar_surplus_dynamic_start_blocks_full_ev(monkeypatch):
     ev_planner.get_ev_battery_level = full_ev_soc
     monkeypatch.setitem(
         sys.modules,
-        "powersync_nir.automations.ev_charging_planner",
+        "power_sync.automations.ev_charging_planner",
         ev_planner,
     )
     hass = _Hass([])
@@ -6311,14 +6311,14 @@ def test_solar_surplus_dynamic_start_blocks_full_ev(monkeypatch):
 
     assert result is False
     assert actions._dynamic_ev_state == {}
-    last_command = hass.data["powersync_nir"]["entry-1"]["ev_last_command"]["VIN123"]
+    last_command = hass.data["power_sync"]["entry-1"]["ev_last_command"]["VIN123"]
     assert last_command["command"] == "start_solar_surplus"
     assert last_command["success"] is False
     assert last_command["reason"] == "EV 100.0% >= 100%, already full"
 
 
 def test_solar_surplus_dynamic_start_blocks_unplugged_ev(monkeypatch):
-    ev_planner = types.ModuleType("powersync_nir.automations.ev_charging_planner")
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
 
     async def unplugged(*args, **kwargs):
         return False
@@ -6330,7 +6330,7 @@ def test_solar_surplus_dynamic_start_blocks_unplugged_ev(monkeypatch):
     ev_planner.get_ev_battery_level = ev_soc
     monkeypatch.setitem(
         sys.modules,
-        "powersync_nir.automations.ev_charging_planner",
+        "power_sync.automations.ev_charging_planner",
         ev_planner,
     )
     hass = _Hass([])
@@ -6352,7 +6352,7 @@ def test_solar_surplus_dynamic_start_blocks_unplugged_ev(monkeypatch):
 
     assert result is False
     assert actions._dynamic_ev_state == {}
-    last_command = hass.data["powersync_nir"]["entry-1"]["ev_last_command"]["VIN123"]
+    last_command = hass.data["power_sync"]["entry-1"]["ev_last_command"]["VIN123"]
     assert last_command["command"] == "start_solar_surplus"
     assert last_command["success"] is False
     assert last_command["reason"] == "vehicle is not plugged in"
@@ -6361,7 +6361,7 @@ def test_solar_surplus_dynamic_start_blocks_unplugged_ev(monkeypatch):
 def test_solar_surplus_active_default_session_debounces_resolved_vin_unplug(
     monkeypatch,
 ):
-    ev_planner = types.ModuleType("powersync_nir.automations.ev_charging_planner")
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
 
     async def unplugged(*args, **kwargs):
         return False
@@ -6373,7 +6373,7 @@ def test_solar_surplus_active_default_session_debounces_resolved_vin_unplug(
     ev_planner.get_ev_battery_level = ev_soc
     monkeypatch.setitem(
         sys.modules,
-        "powersync_nir.automations.ev_charging_planner",
+        "power_sync.automations.ev_charging_planner",
         ev_planner,
     )
     hass = _Hass([])
@@ -6431,7 +6431,7 @@ def test_dynamic_start_uses_home_power_grid_import_limit(monkeypatch):
     monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
 
     hass = _Hass([])
-    hass.data["powersync_nir"]["entry-1"]["automation_store"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["automation_store"] = SimpleNamespace(
         _data={
             "home_power_settings": {
                 "phase_type": "single",
@@ -6722,7 +6722,7 @@ def test_dynamic_single_smart_schedule_start_rejects_unusable_coordinator(monkey
 
     for coordinator in cases:
         hass = _Hass([])
-        hass.data["powersync_nir"]["entry-1"]["sungrow_coordinator"] = coordinator
+        hass.data["power_sync"]["entry-1"]["sungrow_coordinator"] = coordinator
         actions._dynamic_ev_state.clear()
         result = asyncio.run(
             actions._action_start_ev_charging_dynamic(
@@ -6786,7 +6786,7 @@ def test_dynamic_single_smart_schedule_start_refreshes_coordinator(monkeypatch):
 
     coordinator = Coordinator()
     hass = _Hass([])
-    hass.data["powersync_nir"]["entry-1"]["tesla_coordinator"] = coordinator
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = coordinator
     actions._dynamic_ev_state.clear()
     result = asyncio.run(
         actions._action_start_ev_charging_dynamic(
@@ -7233,7 +7233,7 @@ def test_dynamic_start_prefers_tesla_site_meter_limit_over_home_power(monkeypatc
     monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
 
     hass = _Hass([])
-    hass.data["powersync_nir"]["entry-1"]["automation_store"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["automation_store"] = SimpleNamespace(
         _data={
             "home_power_settings": {
                 "phase_type": "single",
@@ -7242,7 +7242,7 @@ def test_dynamic_start_prefers_tesla_site_meter_limit_over_home_power(monkeypatc
             }
         }
     )
-    hass.data["powersync_nir"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
         _site_info_cache={"max_site_meter_power_ac": 16.1},
         data={
             "battery_power": 0,
@@ -7468,7 +7468,7 @@ def test_dynamic_session_follows_active_charger_cap_changes(monkeypatch):
         set_amps_calls.append(amps)
         return True
 
-    ev_planner = types.ModuleType("powersync_nir.automations.ev_charging_planner")
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
 
     async def home_location(*args, **kwargs):
         return "home"
@@ -7476,7 +7476,7 @@ def test_dynamic_session_follows_active_charger_cap_changes(monkeypatch):
     ev_planner.get_ev_location = home_location
     monkeypatch.setitem(
         sys.modules,
-        "powersync_nir.automations.ev_charging_planner",
+        "power_sync.automations.ev_charging_planner",
         ev_planner,
     )
     monkeypatch.setattr(
@@ -7641,7 +7641,7 @@ def test_scheduled_sigenergy_start_uses_persisted_optimizer_import_limit(monkeyp
 
 def test_optimizer_import_limit_yields_to_lower_home_power_cap():
     hass = _Hass([])
-    hass.data["powersync_nir"]["entry-1"]["automation_store"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["automation_store"] = SimpleNamespace(
         _data={
             "home_power_settings": {
                 "phase_type": "single",
@@ -7663,16 +7663,16 @@ def test_optimizer_import_limit_yields_to_lower_home_power_cap():
 @pytest.mark.parametrize("force_max_rate", [False, True])
 def test_smart_schedule_start_preserves_optimizer_import_limit(monkeypatch, force_max_rate):
     """Exercise the planner-to-action limit handoff, not just the resolver."""
-    optimization = types.ModuleType("powersync_nir.optimization")
+    optimization = types.ModuleType("power_sync.optimization")
     optimization.__path__ = [str(ROOT / "optimization")]
-    monkeypatch.setitem(sys.modules, "powersync_nir.optimization", optimization)
-    planner = importlib.import_module("powersync_nir.automations.ev_charging_planner")
-    monkeypatch.setitem(sys.modules, "powersync_nir.automations.actions", actions)
+    monkeypatch.setitem(sys.modules, "power_sync.optimization", optimization)
+    planner = importlib.import_module("power_sync.automations.ev_charging_planner")
+    monkeypatch.setitem(sys.modules, "power_sync.automations.actions", actions)
     monkeypatch.setattr(
         planner.dt_util, "now", lambda: SimpleNamespace(weekday=lambda: 0)
     )
     hass = _Hass([])
-    hass.data["powersync_nir"]["entry-1"]["optimization_coordinator"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["optimization_coordinator"] = SimpleNamespace(
         _config=SimpleNamespace(
             max_charge_w=11000, max_discharge_w=11000, max_grid_import_w=13500
         )
@@ -8028,11 +8028,11 @@ def test_dynamic_multi_tesla_restarts_only_stopped_owned_loadpoint(monkeypatch, 
     monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
     monkeypatch.setattr(actions, "_action_start_ev_charging", fake_start)
 
-    ev_session = types.ModuleType("powersync_nir.automations.ev_charging_session")
+    ev_session = types.ModuleType("power_sync.automations.ev_charging_session")
     ev_session.get_session_manager = lambda: None
     monkeypatch.setitem(
         sys.modules,
-        "powersync_nir.automations.ev_charging_session",
+        "power_sync.automations.ev_charging_session",
         ev_session,
     )
 
@@ -8134,7 +8134,7 @@ def test_scheduled_dynamic_update_uses_solax_kilowatt_snapshot(monkeypatch):
         }
     }
     hass = _Hass([])
-    hass.data["powersync_nir"]["entry-1"]["solax_coordinator"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["solax_coordinator"] = SimpleNamespace(
         last_update_success=True,
         data={
             "battery_level": 70,
@@ -8149,7 +8149,7 @@ def test_scheduled_dynamic_update_uses_solax_kilowatt_snapshot(monkeypatch):
 
     assert set_amps_calls == [26]
 
-    hass.data["powersync_nir"]["entry-1"]["solax_coordinator"].data.update(
+    hass.data["power_sync"]["entry-1"]["solax_coordinator"].data.update(
         {
             "grid_power": 12.5,
             "solar_power": 0.0,
@@ -8226,7 +8226,7 @@ def test_scheduled_dynamic_update_does_not_write_without_solax_telemetry(monkeyp
         }
     }
     hass = _Hass([])
-    hass.data["powersync_nir"]["entry-1"]["solax_coordinator"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["solax_coordinator"] = SimpleNamespace(
         last_update_success=True,
         data={"battery_level": 70, "grid_power": 0.0}
     )
@@ -8347,7 +8347,7 @@ def test_dynamic_update_uses_detected_sigenergy_evdc_rate_entity(monkeypatch):
 
 
 def test_dynamic_update_clears_unplugged_ble_session(monkeypatch):
-    ev_planner = types.ModuleType("powersync_nir.automations.ev_charging_planner")
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
     plug_checks: list[str | None] = []
 
     async def is_ev_plugged_in(*args, vehicle_vin=None, **kwargs):
@@ -8355,7 +8355,7 @@ def test_dynamic_update_clears_unplugged_ble_session(monkeypatch):
         return False
 
     ev_planner.is_ev_plugged_in = is_ev_plugged_in
-    monkeypatch.setitem(sys.modules, "powersync_nir.automations.ev_charging_planner", ev_planner)
+    monkeypatch.setitem(sys.modules, "power_sync.automations.ev_charging_planner", ev_planner)
 
     cancelled = []
     actions._dynamic_ev_state.clear()
@@ -8383,23 +8383,23 @@ def test_dynamic_update_clears_unplugged_ble_session(monkeypatch):
     assert plug_checks == ["ble_ble_slater"]
     assert hass.services.calls == []
     assert (
-        hass.data["powersync_nir"]["entry-1"]["ev_last_command"]["ble_ble_slater"]["command"]
+        hass.data["power_sync"]["entry-1"]["ev_last_command"]["ble_ble_slater"]["command"]
         == "release"
     )
     assert (
-        hass.data["powersync_nir"]["entry-1"]["ev_last_command"]["ble_ble_slater"]["reason"]
+        hass.data["power_sync"]["entry-1"]["ev_last_command"]["ble_ble_slater"]["reason"]
         == "vehicle unplugged"
     )
 
 
 def test_dynamic_update_keeps_plugged_ble_session(monkeypatch):
-    ev_planner = types.ModuleType("powersync_nir.automations.ev_charging_planner")
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
 
     async def is_ev_plugged_in(*args, **kwargs):
         return True
 
     ev_planner.is_ev_plugged_in = is_ev_plugged_in
-    monkeypatch.setitem(sys.modules, "powersync_nir.automations.ev_charging_planner", ev_planner)
+    monkeypatch.setitem(sys.modules, "power_sync.automations.ev_charging_planner", ev_planner)
 
     actions._dynamic_ev_state.clear()
     actions._dynamic_ev_state["entry-1"] = {
@@ -8884,7 +8884,7 @@ def test_exact_wall_connector_range_fallback_continues_to_vin_provider(monkeypat
 def test_dynamic_start_is_blocked_by_manual_owner():
     hass = _Hass([_State("switch.evse_1_charge_control", "off")])
     actions._dynamic_ev_state.clear()
-    hass.data["powersync_nir"]["entry-1"]["ev_ownership"] = {
+    hass.data["power_sync"]["entry-1"]["ev_ownership"] = {
         "ocpp_evse_1": {"owner": "powersync", "owner_mode": "manual"}
     }
 
@@ -8907,7 +8907,7 @@ def test_dynamic_start_is_blocked_by_manual_owner():
     assert result is False
     assert hass.services.calls == []
     assert actions._dynamic_ev_state == {}
-    last_command = hass.data["powersync_nir"]["entry-1"]["ev_last_command"]["ocpp_evse_1"]
+    last_command = hass.data["power_sync"]["entry-1"]["ev_last_command"]["ocpp_evse_1"]
     assert last_command["command"] == "start_price_level_recovery"
     assert last_command["success"] is False
     assert "manual already owns" in last_command["reason"]
@@ -8927,7 +8927,7 @@ def test_dynamic_start_updates_same_owner_family_without_restarting():
             "session_id": "sess-1",
         }
     }
-    hass.data["powersync_nir"]["entry-1"]["ev_ownership"] = {
+    hass.data["power_sync"]["entry-1"]["ev_ownership"] = {
         "ocpp_evse_1": {
             "owner": "powersync",
             "owner_mode": "price_level_recovery",
@@ -8954,7 +8954,7 @@ def test_dynamic_start_updates_same_owner_family_without_restarting():
     assert hass.services.calls == []
     state = actions._dynamic_ev_state["entry-1"]["ocpp_evse_1"]
     assert state["params"]["owner_mode"] == "price_level_opportunity"
-    ownership = hass.data["powersync_nir"]["entry-1"]["ev_ownership"]["ocpp_evse_1"]
+    ownership = hass.data["power_sync"]["entry-1"]["ev_ownership"]["ocpp_evse_1"]
     assert ownership["owner_mode"] == "price_level_opportunity"
     assert ownership["last_command"]["command"] == "update_price_level_opportunity"
 
@@ -8991,7 +8991,7 @@ def test_dynamic_start_is_blocked_by_legacy_foreign_state():
     assert result is False
     assert hass.services.calls == []
     assert "ocpp_evse_1" in actions._dynamic_ev_state["entry-1"]
-    last_command = hass.data["powersync_nir"]["entry-1"]["ev_last_command"]["ocpp_evse_1"]
+    last_command = hass.data["power_sync"]["entry-1"]["ev_last_command"]["ocpp_evse_1"]
     assert last_command["success"] is False
     assert "solar_surplus already owns" in last_command["reason"]
 
@@ -9042,7 +9042,7 @@ def test_dynamic_start_takes_over_legacy_solar_surplus_when_allowed():
     state = actions._dynamic_ev_state["entry-1"]["ocpp_evse_1"]
     assert state["params"]["dynamic_mode"] == "battery_target"
     assert state["params"]["owner_mode"] == "price_level_recovery"
-    ownership = hass.data["powersync_nir"]["entry-1"]["ev_ownership"]["ocpp_evse_1"]
+    ownership = hass.data["power_sync"]["entry-1"]["ev_ownership"]["ocpp_evse_1"]
     assert ownership["owner_mode"] == "price_level_recovery"
 
 
@@ -9057,7 +9057,7 @@ def test_inflight_solar_surplus_update_cannot_command_after_scheduled_takeover(
     live_status_calls = 0
     set_amps_calls: list[int] = []
 
-    ev_planner = types.ModuleType("powersync_nir.automations.ev_charging_planner")
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
 
     async def get_ev_location(*args, **kwargs):
         return "home"
@@ -9069,15 +9069,15 @@ def test_inflight_solar_surplus_update_cannot_command_after_scheduled_takeover(
     ev_planner.get_ev_battery_level = get_ev_battery_level
     monkeypatch.setitem(
         sys.modules,
-        "powersync_nir.automations.ev_charging_planner",
+        "power_sync.automations.ev_charging_planner",
         ev_planner,
     )
 
-    ev_session = types.ModuleType("powersync_nir.automations.ev_charging_session")
+    ev_session = types.ModuleType("power_sync.automations.ev_charging_session")
     ev_session.get_session_manager = lambda: None
     monkeypatch.setitem(
         sys.modules,
-        "powersync_nir.automations.ev_charging_session",
+        "power_sync.automations.ev_charging_session",
         ev_session,
     )
 
@@ -9176,7 +9176,7 @@ def test_inflight_solar_surplus_update_cannot_command_after_scheduled_takeover(
 
 
 def test_dynamic_start_updates_solar_surplus_owner_when_same_mode_allowed(monkeypatch):
-    ev_planner = types.ModuleType("powersync_nir.automations.ev_charging_planner")
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
 
     async def is_ev_plugged_in(*args, **kwargs):
         return True
@@ -9184,7 +9184,7 @@ def test_dynamic_start_updates_solar_surplus_owner_when_same_mode_allowed(monkey
     ev_planner.is_ev_plugged_in = is_ev_plugged_in
     monkeypatch.setitem(
         sys.modules,
-        "powersync_nir.automations.ev_charging_planner",
+        "power_sync.automations.ev_charging_planner",
         ev_planner,
     )
 
@@ -9212,7 +9212,7 @@ def test_dynamic_start_updates_solar_surplus_owner_when_same_mode_allowed(monkey
             "session_id": "sess-1",
         }
     }
-    hass.data["powersync_nir"]["entry-1"]["ev_ownership"] = {
+    hass.data["power_sync"]["entry-1"]["ev_ownership"] = {
         "ocpp_evse_1": {
             "owner": "powersync",
             "owner_mode": "solar_surplus",
@@ -9252,13 +9252,13 @@ def test_dynamic_start_updates_solar_surplus_owner_when_same_mode_allowed(monkey
     assert state["paused"] is False
     assert state["paused_reason"] is None
     assert state["reason"] == ""
-    ownership = hass.data["powersync_nir"]["entry-1"]["ev_ownership"]["ocpp_evse_1"]
+    ownership = hass.data["power_sync"]["entry-1"]["ev_ownership"]["ocpp_evse_1"]
     assert ownership["owner_mode"] == "smart_schedule_solar_surplus"
     assert ownership["last_command"]["command"] == "update_smart_schedule_solar_surplus"
 
 
 def test_solar_surplus_takeover_without_pause_uses_incoming_floor(monkeypatch):
-    ev_planner = types.ModuleType("powersync_nir.automations.ev_charging_planner")
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
 
     async def is_ev_plugged_in(*args, **kwargs):
         return True
@@ -9266,7 +9266,7 @@ def test_solar_surplus_takeover_without_pause_uses_incoming_floor(monkeypatch):
     ev_planner.is_ev_plugged_in = is_ev_plugged_in
     monkeypatch.setitem(
         sys.modules,
-        "powersync_nir.automations.ev_charging_planner",
+        "power_sync.automations.ev_charging_planner",
         ev_planner,
     )
 
@@ -9285,7 +9285,7 @@ def test_solar_surplus_takeover_without_pause_uses_incoming_floor(monkeypatch):
             },
         }
     }
-    hass.data["powersync_nir"]["entry-1"]["ev_ownership"] = {
+    hass.data["power_sync"]["entry-1"]["ev_ownership"] = {
         "ocpp_evse_1": {
             "owner": "powersync",
             "owner_mode": "solar_surplus",
@@ -9317,7 +9317,7 @@ def test_solar_surplus_takeover_without_pause_uses_incoming_floor(monkeypatch):
 
 
 def test_solar_surplus_takeover_preserves_default_runtime_identity(monkeypatch):
-    ev_planner = types.ModuleType("powersync_nir.automations.ev_charging_planner")
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
 
     async def is_ev_plugged_in(*args, **kwargs):
         return True
@@ -9325,7 +9325,7 @@ def test_solar_surplus_takeover_preserves_default_runtime_identity(monkeypatch):
     ev_planner.is_ev_plugged_in = is_ev_plugged_in
     monkeypatch.setitem(
         sys.modules,
-        "powersync_nir.automations.ev_charging_planner",
+        "power_sync.automations.ev_charging_planner",
         ev_planner,
     )
 
@@ -9342,7 +9342,7 @@ def test_solar_surplus_takeover_preserves_default_runtime_identity(monkeypatch):
             },
         }
     }
-    hass.data["powersync_nir"]["entry-1"]["ev_ownership"] = {
+    hass.data["power_sync"]["entry-1"]["ev_ownership"] = {
         "_default": {
             "owner": "powersync",
             "owner_mode": "solar_surplus",
@@ -9368,7 +9368,7 @@ def test_solar_surplus_takeover_preserves_default_runtime_identity(monkeypatch):
 
     assert result is True
     assert set(actions._dynamic_ev_state["entry-1"]) == {"_default"}
-    assert set(hass.data["powersync_nir"]["entry-1"]["ev_ownership"]) == {
+    assert set(hass.data["power_sync"]["entry-1"]["ev_ownership"]) == {
         "_default"
     }
     assert (
@@ -9379,7 +9379,7 @@ def test_solar_surplus_takeover_preserves_default_runtime_identity(monkeypatch):
 
 def test_smart_schedule_solar_refresh_preserves_owned_floor(monkeypatch):
     hass = _Hass([])
-    hass.data["powersync_nir"]["entry-1"]["automation_store"] = SimpleNamespace(
+    hass.data["power_sync"]["entry-1"]["automation_store"] = SimpleNamespace(
         _data={
             "solar_surplus_config": {
                 "enabled": False,
@@ -9437,7 +9437,7 @@ def test_manual_session_replaces_existing_owner_without_physical_stop():
     assert state["params"]["dynamic_mode"] == "manual"
     assert state["ownership"]["owner_mode"] == "manual"
     assert state["ownership"]["last_command"]["command"] == "start"
-    assert hass.data["powersync_nir"]["entry-1"]["ev_ownership"]["VIN123"]["owner_mode"] == "manual"
+    assert hass.data["power_sync"]["entry-1"]["ev_ownership"]["VIN123"]["owner_mode"] == "manual"
     assert cancelled == [True]
     assert hass.services.calls == []
 
@@ -9462,7 +9462,7 @@ def test_manual_session_records_quick_control_metadata():
     )
 
     state = actions._dynamic_ev_state["entry-1"]["VIN123"]
-    ownership = hass.data["powersync_nir"]["entry-1"]["ev_ownership"]["VIN123"]
+    ownership = hass.data["power_sync"]["entry-1"]["ev_ownership"]["VIN123"]
     assert state["params"]["source_mode"] == "grid_allowed"
     assert state["params"]["duration_minutes"] == 90
     assert state["params"]["expires_at"] == "2026-05-01T01:30:00+00:00"
@@ -9629,7 +9629,7 @@ def test_solar_surplus_update_stops_full_ev(monkeypatch):
 
     assert actions._dynamic_ev_state == {}
     assert set_amps_calls == [0]
-    last_command = hass.data["powersync_nir"]["entry-1"]["ev_last_command"][vehicle_id]
+    last_command = hass.data["power_sync"]["entry-1"]["ev_last_command"][vehicle_id]
     assert last_command["command"] == "stop"
     assert last_command["reason"] == "already full"
 
@@ -10018,7 +10018,7 @@ def test_solar_surplus_external_tesla_start_suspends_until_charge_ends(monkeypat
     override_state = actions._dynamic_ev_state["entry-1"][vehicle_id]
     assert override_state["params"]["owner_mode"] == "solar_surplus"
     assert override_state["external_manual_override"] is True
-    ev_ownership = importlib.import_module("powersync_nir.automations.ev_ownership")
+    ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
     lease = ev_ownership.get_ev_ownership(hass, _Entry(), vehicle_id)[1]
     assert lease["owner"] == "external"
     assert lease["owner_mode"] == "external"
@@ -10633,8 +10633,8 @@ def test_clear_tracked_session_does_not_send_physical_stop():
 
     assert actions._dynamic_ev_state == {}
     assert cancelled == [True]
-    assert hass.data["powersync_nir"]["entry-1"]["ev_ownership"] == {}
-    assert hass.data["powersync_nir"]["entry-1"]["ev_last_command"]["VIN123"]["command"] == "release"
+    assert hass.data["power_sync"]["entry-1"]["ev_ownership"] == {}
+    assert hass.data["power_sync"]["entry-1"]["ev_last_command"]["VIN123"]["command"] == "release"
     assert hass.services.calls == []
 
 
@@ -11355,7 +11355,7 @@ def test_dynamic_stop_notification_requires_physical_confirmation(
 
 
 def _install_away_location_module(monkeypatch, location: str = "work") -> None:
-    planner = types.ModuleType("powersync_nir.automations.ev_charging_planner")
+    planner = types.ModuleType("power_sync.automations.ev_charging_planner")
 
     async def away_location(*args, **kwargs):
         return location
@@ -11363,7 +11363,7 @@ def _install_away_location_module(monkeypatch, location: str = "work") -> None:
     planner.get_ev_location = away_location
     monkeypatch.setitem(
         sys.modules,
-        "powersync_nir.automations.ev_charging_planner",
+        "power_sync.automations.ev_charging_planner",
         planner,
     )
 
@@ -11382,7 +11382,7 @@ def test_away_tesla_dynamic_stop_is_passive_for_every_smart_mode(
     owner_mode,
     dynamic_mode,
 ):
-    from powersync_nir.automations import ev_ownership
+    from power_sync.automations import ev_ownership
 
     vehicle_id = "LRW3F7FS1NC484342"
     hass = _Hass([])
@@ -11442,7 +11442,7 @@ def test_away_tesla_dynamic_stop_is_passive_for_every_smart_mode(
 def test_away_untracked_smart_stop_does_not_touch_external_tesla_session(
     monkeypatch,
 ):
-    from powersync_nir.automations import ev_ownership
+    from power_sync.automations import ev_ownership
 
     vehicle_id = "LRW3F7FS1NC484342"
     hass = _Hass([])
@@ -11570,7 +11570,7 @@ def test_smart_schedule_group_removes_away_vehicle_before_group_write(monkeypatc
     home_vin = "5YJTEST00000000A1"
     away_vin = "5YJTEST00000000B2"
     hass = _Hass([])
-    planner = types.ModuleType("powersync_nir.automations.ev_charging_planner")
+    planner = types.ModuleType("power_sync.automations.ev_charging_planner")
 
     async def vehicle_location(*args, vehicle_vin=None, **kwargs):
         return "work" if vehicle_vin == away_vin else "home"
@@ -11578,7 +11578,7 @@ def test_smart_schedule_group_removes_away_vehicle_before_group_write(monkeypatc
     planner.get_ev_location = vehicle_location
     monkeypatch.setitem(
         sys.modules,
-        "powersync_nir.automations.ev_charging_planner",
+        "power_sync.automations.ev_charging_planner",
         planner,
     )
 
@@ -11849,7 +11849,7 @@ def test_handover_start_that_is_never_confirmed_creates_no_session_or_lease(
     assert len(start_calls) == 1
     assert timer_calls == []
     assert vin not in actions._dynamic_ev_state.get("entry-1", {})
-    ownership = hass.data["powersync_nir"]["entry-1"].get("ev_ownership", {})
+    ownership = hass.data["power_sync"]["entry-1"].get("ev_ownership", {})
     assert ownership.get(vin, {}).get("owner_mode") != "price_level_opportunity"
     # Teardown stop plus the compensating stop for the unconfirmed start.
     assert len(stop_calls) == 2
@@ -12283,7 +12283,7 @@ def test_both_mode_ble_start_distinguishes_preflight_and_unconfirmed_write(monke
         return wake_confirmed
     async def unconfirmed(*args, **kwargs):
         assert args[2] == vin
-        assert args[5] == hass.data["powersync_nir"]["_ev_ble_start_dispatched_at"]["car"]
+        assert args[5] == hass.data["power_sync"]["_ev_ble_start_dispatched_at"]["car"]
         return settled, "physical confirmation result"
     stops = []
     async def scoped_stop(_hass, _entry, params, *args, **kwargs):
@@ -12467,7 +12467,7 @@ def _app_surplus_params(profile, entry, phases=1):
     end = source.index('                            if vc.get("vehicle_id"):', start)
     block = ast.parse(textwrap.dedent(source[start:end]))
     namespace = {
-        "__package__": "powersync_nir",
+        "__package__": "power_sync",
         "vc": dict(profile), "entry": entry, "vc_phases": phases,
         "surplus_config": {}, "min_battery_soc": 20, "allow_parallel": False,
     }
@@ -12699,7 +12699,7 @@ def test_solar_surplus_yields_external_generic_session_without_command(monkeypat
     assert hass.services.calls == []
     assert state["external_manual_override"] is True
     assert "External manual charging active" in state["reason"]
-    from powersync_nir.automations.ev_ownership import get_ev_ownership
+    from power_sync.automations.ev_ownership import get_ev_ownership
 
     lease = get_ev_ownership(hass, entry, "generic_ev")[1]
     assert lease["owner"] == "external"
@@ -12798,7 +12798,7 @@ def test_generic_stop_requires_a_configured_control_entity():
 @pytest.mark.parametrize("outcome, expected", [(False, "failed"), (None, "unconfirmed"), (True, None)])
 def test_surplus_stop_outcome_replaces_expired_delay(monkeypatch, outcome, expected):
     """A stop request is not a completed stop or another grace period."""
-    from powersync_nir.automations.loadpoint_status import build_loadpoint_status
+    from power_sync.automations.loadpoint_status import build_loadpoint_status
 
     hass = _Hass([])
     state = _solar_surplus_state(current_amps=5)
@@ -12923,7 +12923,7 @@ def _stale_awake_ble_hass(services_factory=None):
 
 def _arm_wake_backoff(hass, prefix: str = "car", seconds: float = 60.0) -> None:
     loop = asyncio.get_running_loop()
-    hass.data.setdefault("powersync_nir", {})["_ev_ble_wake_retry_after"] = {
+    hass.data.setdefault("power_sync", {})["_ev_ble_wake_retry_after"] = {
         prefix: loop.time() + seconds
     }
 
@@ -13295,7 +13295,7 @@ def test_ble_backoff_is_vehicle_prefix_scoped_for_explicit_boost():
 
     async def run():
         loop = asyncio.get_running_loop()
-        hass.data["powersync_nir"]["_ev_ble_wake_retry_after"] = {
+        hass.data["power_sync"]["_ev_ble_wake_retry_after"] = {
             "electric_bullet": loop.time() + 60,
         }
         return await actions._wake_tesla_ble(

@@ -15,7 +15,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-COMPONENT_ROOT = ROOT / "custom_components" / "powersync_nir"
+COMPONENT_ROOT = ROOT / "custom_components" / "power_sync"
 
 
 def _install_ha_stubs() -> None:
@@ -54,20 +54,20 @@ def _install_ha_stubs() -> None:
 _install_ha_stubs()
 sys.modules.setdefault("aiohttp", types.ModuleType("aiohttp"))
 
-package = types.ModuleType("powersync_nir")
+package = types.ModuleType("power_sync")
 package.__path__ = [str(COMPONENT_ROOT)]
-sys.modules["powersync_nir"] = package
-automations = types.ModuleType("powersync_nir.automations")
+sys.modules["power_sync"] = package
+automations = types.ModuleType("power_sync.automations")
 automations.__path__ = [str(COMPONENT_ROOT / "automations")]
-sys.modules["powersync_nir.automations"] = automations
+sys.modules["power_sync.automations"] = automations
 for module_name in (
-    "powersync_nir.const",
-    "powersync_nir.automations.actions",
-    "powersync_nir.automations.shared_loadpoint",
+    "power_sync.const",
+    "power_sync.automations.actions",
+    "power_sync.automations.shared_loadpoint",
 ):
     sys.modules.pop(module_name, None)
-actions = importlib.import_module("powersync_nir.automations.actions")
-ownership = importlib.import_module("powersync_nir.automations.ev_ownership")
+actions = importlib.import_module("power_sync.automations.actions")
+ownership = importlib.import_module("power_sync.automations.ev_ownership")
 
 
 class _State:
@@ -86,7 +86,7 @@ class _Hass:
             }.get(entity_id)
         )
         self.services = SimpleNamespace(async_call=AsyncMock())
-        self.data = {"powersync_nir": {"entry-1": {}}}
+        self.data = {"power_sync": {"entry-1": {}}}
 
 
 class _Entry:
@@ -119,7 +119,7 @@ def _shared_solar_preflight_setup(*, charger_type="generic", physical_id="generi
             "sigenergy_charger_enabled": True,
             "sigenergy_charger_type": "evac",
         }
-    hass.data["powersync_nir"]["entry-1"].update(
+    hass.data["power_sync"]["entry-1"].update(
         {
             "automation_store": SimpleNamespace(
                 _data={
@@ -145,7 +145,7 @@ def _shared_solar_preflight_setup(*, charger_type="generic", physical_id="generi
 
 def _install_preflight_plug_probe(monkeypatch, result=True):
     plugged = AsyncMock(return_value=result)
-    planner = types.ModuleType("powersync_nir.automations.ev_charging_planner")
+    planner = types.ModuleType("power_sync.automations.ev_charging_planner")
     planner.is_ev_plugged_in = plugged
     monkeypatch.setitem(sys.modules, planner.__name__, planner)
     return plugged
@@ -168,9 +168,9 @@ def test_shared_solar_preflight_allows_selected_generic_with_fresh_matched_conte
     hass.services.async_call.assert_not_awaited()
     timer_spy.assert_not_called()
     assert actions._dynamic_ev_state == dynamic_state_before
-    assert "_dynamic_ev_state" not in hass.data["powersync_nir"]["entry-1"]
-    assert "ev_ownership" not in hass.data["powersync_nir"]["entry-1"]
-    assert "ev_manual_stop_holds" not in hass.data["powersync_nir"]["entry-1"]
+    assert "_dynamic_ev_state" not in hass.data["power_sync"]["entry-1"]
+    assert "ev_ownership" not in hass.data["power_sync"]["entry-1"]
+    assert "ev_manual_stop_holds" not in hass.data["power_sync"]["entry-1"]
 
 
 def test_shared_solar_preflight_allows_selected_evac_with_fresh_matched_context(monkeypatch):
@@ -205,7 +205,7 @@ def test_observed_solar_adoption_creates_one_seeded_runtime_without_hardware_or_
         id = "adopted-session"
 
     manager = SimpleNamespace(start_session=AsyncMock(return_value=Session()))
-    sessions = types.ModuleType("powersync_nir.automations.ev_charging_session")
+    sessions = types.ModuleType("power_sync.automations.ev_charging_session")
     sessions.get_session_manager = lambda: manager
     monkeypatch.setitem(sys.modules, sessions.__name__, sessions)
 
@@ -257,7 +257,7 @@ def test_observed_scheduled_adoption_creates_one_runtime_without_hardware_or_tim
         id = "adopted-scheduled-session"
 
     manager = SimpleNamespace(start_session=AsyncMock(return_value=Session()))
-    sessions = types.ModuleType("powersync_nir.automations.ev_charging_session")
+    sessions = types.ModuleType("power_sync.automations.ev_charging_session")
     sessions.get_session_manager = lambda: manager
     monkeypatch.setitem(sys.modules, sessions.__name__, sessions)
 
@@ -309,7 +309,7 @@ def test_observed_smart_schedule_adoption_creates_one_runtime_without_hardware_o
         id = "adopted-smart-schedule-session"
 
     manager = SimpleNamespace(start_session=AsyncMock(return_value=Session()))
-    sessions = types.ModuleType("powersync_nir.automations.ev_charging_session")
+    sessions = types.ModuleType("power_sync.automations.ev_charging_session")
     sessions.get_session_manager = lambda: manager
     monkeypatch.setitem(sys.modules, sessions.__name__, sessions)
 
@@ -358,7 +358,7 @@ def test_observed_price_level_adoption_creates_one_runtime_without_hardware_or_t
         id = "adopted-price-level-session"
 
     manager = SimpleNamespace(start_session=AsyncMock(return_value=Session()))
-    sessions = types.ModuleType("powersync_nir.automations.ev_charging_session")
+    sessions = types.ModuleType("power_sync.automations.ev_charging_session")
     sessions.get_session_manager = lambda: manager
     monkeypatch.setitem(sys.modules, sessions.__name__, sessions)
 
@@ -431,7 +431,7 @@ def test_shared_solar_preflight_fails_closed_without_admission(
     monkeypatch, context, solar_enabled, plugged_in, reason
 ):
     hass, entry = _shared_solar_preflight_setup()
-    entry_data = hass.data["powersync_nir"]["entry-1"]
+    entry_data = hass.data["power_sync"]["entry-1"]
     if context is not None:
         entry_data["_shared_loadpoint_cycle_context"] = context
     elif solar_enabled is False:
@@ -467,7 +467,7 @@ def test_cycle_decision_ledger_records_selected_shared_generic_schedule_decision
         source="scheduled",
     )
 
-    assert hass.data["powersync_nir"]["entry-1"][
+    assert hass.data["power_sync"]["entry-1"][
         "_automated_shared_loadpoint_decision_ledger"
     ] == {
         "generic_ev": {
@@ -501,7 +501,7 @@ def test_cycle_decision_ledger_records_selected_shared_evac_schedule_decision():
         source="",
     )
 
-    assert hass.data["powersync_nir"]["entry-1"][
+    assert hass.data["power_sync"]["entry-1"][
         "_automated_shared_loadpoint_decision_ledger"
     ]["sigenergy_charger"]["shared_ev_profile_a"] == {
         "allowed": False,
@@ -538,10 +538,10 @@ def test_cycle_decision_ledger_omits_unselected_and_non_shared_backends():
         source="scheduled",
     )
 
-    assert hass.data["powersync_nir"]["entry-1"][
+    assert hass.data["power_sync"]["entry-1"][
         "_automated_shared_loadpoint_decision_ledger"
     ] == {}
-    assert tesla_hass.data["powersync_nir"]["entry-1"][
+    assert tesla_hass.data["power_sync"]["entry-1"][
         "_automated_shared_loadpoint_decision_ledger"
     ] == {}
 
@@ -555,7 +555,7 @@ def test_cycle_decision_ledger_is_cleared_with_sequence_cycle():
 
     actions._clear_automated_shared_loadpoint_cycle(hass, _Entry())
 
-    assert "_automated_shared_loadpoint_decision_ledger" not in hass.data["powersync_nir"]["entry-1"]
+    assert "_automated_shared_loadpoint_decision_ledger" not in hass.data["power_sync"]["entry-1"]
 
 
 def _claim_shared_loadpoint(
@@ -1221,7 +1221,7 @@ def test_active_shared_handoff_fences_interleaved_old_periodic_write(monkeypatch
     assert old_state["handoff_settling"] is True
     assert old_state["active"] is False
     assert old_state["params"] is old_params
-    assert hass.data["powersync_nir"][entry.entry_id]["dynamic_ev_state"]["generic_ev"] is old_state
+    assert hass.data["power_sync"][entry.entry_id]["dynamic_ev_state"]["generic_ev"] is old_state
     set_amps.assert_not_awaited()
 
 
@@ -1250,7 +1250,7 @@ def test_active_shared_handoff_stops_outgoing_profile_before_incoming_profile_ca
     _claim_shared_loadpoint(hass, profile_id="shared_ev_profile_a")
 
     reconciler = importlib.import_module(
-        "powersync_nir.automations.external_session_reconciler"
+        "power_sync.automations.external_session_reconciler"
     )
     monkeypatch.setattr(
         reconciler,

@@ -11,7 +11,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = (
-    ROOT / "custom_components" / "powersync_nir" / "automations" / "shared_loadpoint_diagnostics.py"
+    ROOT / "custom_components" / "power_sync" / "automations" / "shared_loadpoint_diagnostics.py"
 )
 SPEC = importlib.util.spec_from_file_location("shared_loadpoint_diagnostics_test", MODULE_PATH)
 assert SPEC and SPEC.loader
@@ -134,7 +134,7 @@ def test_persisted_snapshot_survives_the_transient_cycle_ledger_clear():
         entry_id = "entry-1"
 
     store = Store()
-    hass = type("Hass", (), {"data": {"powersync_nir": {"entry-1": {"automation_store": store}}}})()
+    hass = type("Hass", (), {"data": {"power_sync": {"entry-1": {"automation_store": store}}}})()
 
     import asyncio
     asyncio.run(module.persist_shared_loadpoint_diagnostic_snapshot(hass, Entry(), _snapshot()))
@@ -148,7 +148,7 @@ def test_persisted_snapshot_survives_the_transient_cycle_ledger_clear():
 
 
 def test_endpoint_contract_is_authenticated_and_status_endpoint_is_unchanged():
-    source = (ROOT / "custom_components" / "powersync_nir" / "__init__.py").read_text()
+    source = (ROOT / "custom_components" / "power_sync" / "__init__.py").read_text()
 
     assert 'url = "/api/power_sync/ev/shared_loadpoints/diagnostics"' in source
     assert 'name = "api:power_sync:ev:shared_loadpoints:diagnostics"' in source

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-COMPONENT = Path("custom_components/powersync_nir")
+COMPONENT = Path("custom_components/power_sync")
 SHARED = COMPONENT / "automations/shared_loadpoint.py"
 ACTIONS = COMPONENT / "automations/actions.py"
 PLANNER = COMPONENT / "automations/ev_charging_planner.py"

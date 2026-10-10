@@ -65,12 +65,12 @@ def _write_inventory(root: Path) -> Path:
     inventory.parent.mkdir(parents=True)
     inventory.write_text(
         """# Inventory
-- `custom_components/powersync_nir/automations/actions.py`
+- `custom_components/power_sync/automations/actions.py`
 - `tests/test_shared_loadpoint_action_guard.py`
 """,
         encoding="utf-8",
     )
-    source = root / "custom_components/powersync_nir/automations/actions.py"
+    source = root / "custom_components/power_sync/automations/actions.py"
     source.parent.mkdir(parents=True)
     source.write_text(
         "def resolve_shared_loadpoint_command():\n    return None\n",
@@ -135,8 +135,8 @@ def test_collector_rejects_reverse_or_unrelated_range(tmp_path):
         (
             "mechanical-overlap",
             {
-                "changed_paths": ["custom_components/powersync_nir/automations/actions.py"],
-                "changed_symbols": [{"name": "format_log_line", "path": "custom_components/powersync_nir/automations/actions.py", "status": "modified"}],
+                "changed_paths": ["custom_components/power_sync/automations/actions.py"],
+                "changed_symbols": [{"name": "format_log_line", "path": "custom_components/power_sync/automations/actions.py", "status": "modified"}],
                 "changed_tests": [],
             },
             "mechanical-overlap",
@@ -144,8 +144,8 @@ def test_collector_rejects_reverse_or_unrelated_range(tmp_path):
         (
             "compatible-semantic-overlap",
             {
-                "changed_paths": ["custom_components/powersync_nir/automations/actions.py", "tests/test_widget.py"],
-                "changed_symbols": [{"name": "resolve_shared_loadpoint_command", "path": "custom_components/powersync_nir/automations/actions.py", "status": "modified"}],
+                "changed_paths": ["custom_components/power_sync/automations/actions.py", "tests/test_widget.py"],
+                "changed_symbols": [{"name": "resolve_shared_loadpoint_command", "path": "custom_components/power_sync/automations/actions.py", "status": "modified"}],
                 "changed_tests": [{"path": "tests/test_widget.py", "names": ["test_widget_sync"]}],
             },
             "compatible-semantic-overlap",
@@ -153,8 +153,8 @@ def test_collector_rejects_reverse_or_unrelated_range(tmp_path):
         (
             "redundant-private-coverage",
             {
-                "changed_paths": ["custom_components/powersync_nir/automations/actions.py", "tests/test_shared_loadpoint_action_guard.py"],
-                "changed_symbols": [{"name": "resolve_shared_loadpoint_command", "path": "custom_components/powersync_nir/automations/actions.py", "status": "modified"}],
+                "changed_paths": ["custom_components/power_sync/automations/actions.py", "tests/test_shared_loadpoint_action_guard.py"],
+                "changed_symbols": [{"name": "resolve_shared_loadpoint_command", "path": "custom_components/power_sync/automations/actions.py", "status": "modified"}],
                 "changed_tests": [{"path": "tests/test_shared_loadpoint_action_guard.py", "names": ["test_shared_command_guard"]}],
             },
             "redundant-private-coverage",
@@ -162,8 +162,8 @@ def test_collector_rejects_reverse_or_unrelated_range(tmp_path):
         (
             "incompatible-semantic-conflict",
             {
-                "changed_paths": ["custom_components/powersync_nir/automations/actions.py"],
-                "changed_symbols": [{"name": "resolve_shared_loadpoint_command", "path": "custom_components/powersync_nir/automations/actions.py", "status": "deleted"}],
+                "changed_paths": ["custom_components/power_sync/automations/actions.py"],
+                "changed_symbols": [{"name": "resolve_shared_loadpoint_command", "path": "custom_components/power_sync/automations/actions.py", "status": "deleted"}],
                 "changed_tests": [],
             },
             "incompatible-semantic-conflict",

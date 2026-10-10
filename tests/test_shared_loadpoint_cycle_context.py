@@ -12,23 +12,23 @@ from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
-COMPONENT_ROOT = ROOT / "custom_components" / "powersync_nir"
+COMPONENT_ROOT = ROOT / "custom_components" / "power_sync"
 
 
 def _load_module():
-    package = types.ModuleType("powersync_nir")
+    package = types.ModuleType("power_sync")
     package.__path__ = [str(COMPONENT_ROOT)]
-    sys.modules["powersync_nir"] = package
-    automations = types.ModuleType("powersync_nir.automations")
+    sys.modules["power_sync"] = package
+    automations = types.ModuleType("power_sync.automations")
     automations.__path__ = [str(COMPONENT_ROOT / "automations")]
-    sys.modules["powersync_nir.automations"] = automations
+    sys.modules["power_sync.automations"] = automations
     for name in (
-        "powersync_nir.const",
-        "powersync_nir.automations.shared_loadpoint",
-        "powersync_nir.automations.external_session_reconciler",
+        "power_sync.const",
+        "power_sync.automations.shared_loadpoint",
+        "power_sync.automations.external_session_reconciler",
     ):
         sys.modules.pop(name, None)
-    return importlib.import_module("powersync_nir.automations.external_session_reconciler")
+    return importlib.import_module("power_sync.automations.external_session_reconciler")
 
 
 module = _load_module()
@@ -61,7 +61,7 @@ class _Hass:
                 "sensor.profile_power": _State("0", observed_at=observed_at),
             }.get(entity_id)
         )
-        self.data = {"powersync_nir": {"entry-1": {"automation_store": store}}}
+        self.data = {"power_sync": {"entry-1": {"automation_store": store}}}
 
 
 class _Entry:
@@ -94,7 +94,7 @@ def test_cycle_context_reconciles_selected_generic_loadpoint_as_external():
         "observed_at": NOW,
         "evidence": "fresh_power",
     }
-    assert hass.data["powersync_nir"]["entry-1"]["_shared_loadpoint_cycle_context"] == context
+    assert hass.data["power_sync"]["entry-1"]["_shared_loadpoint_cycle_context"] == context
     assert store.saved == 1
 
 
@@ -116,7 +116,7 @@ def test_cycle_context_reads_selected_generic_profile_params():
 def test_cycle_context_uses_canonical_powersync_command_origin():
     store = _Store()
     hass = _Hass(store)
-    hass.data["powersync_nir"]["entry-1"]["ev_last_command"] = {
+    hass.data["power_sync"]["entry-1"]["ev_last_command"] = {
         "generic_ev": {"at": NOW.isoformat(), "source": "powersync", "success": True}
     }
 
@@ -174,7 +174,7 @@ def test_cycle_context_publishes_fresh_evac_observation_provenance():
 def test_unselected_or_incomplete_binding_publishes_no_cycle_context():
     store = _Store()
     hass = _Hass(store, selector="unmapped")
-    entry_data = hass.data["powersync_nir"]["entry-1"]
+    entry_data = hass.data["power_sync"]["entry-1"]
     entry_data["_shared_loadpoint_cycle_context"] = {"origin": "external"}
 
     assert asyncio.run(module.reconcile_selected_shared_loadpoint_cycle(hass, _Entry(), now=NOW)) is None

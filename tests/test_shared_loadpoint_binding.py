@@ -12,23 +12,23 @@ from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
-COMPONENT_ROOT = ROOT / "custom_components" / "powersync_nir"
+COMPONENT_ROOT = ROOT / "custom_components" / "power_sync"
 
 
 def _load_shared_loadpoint():
     """Load the pure binding module without importing HA's integration package."""
     for name, path in (
         ("custom_components", ROOT / "custom_components"),
-        ("custom_components.powersync_nir", COMPONENT_ROOT),
-        ("custom_components.powersync_nir.automations", COMPONENT_ROOT / "automations"),
+        ("custom_components.power_sync", COMPONENT_ROOT),
+        ("custom_components.power_sync.automations", COMPONENT_ROOT / "automations"),
     ):
         package = types.ModuleType(name)
         package.__path__ = [str(path)]
         sys.modules.setdefault(name, package)
     for name, path in (
-        ("custom_components.powersync_nir.const", COMPONENT_ROOT / "const.py"),
+        ("custom_components.power_sync.const", COMPONENT_ROOT / "const.py"),
         (
-            "custom_components.powersync_nir.automations.shared_loadpoint",
+            "custom_components.power_sync.automations.shared_loadpoint",
             COMPONENT_ROOT / "automations" / "shared_loadpoint.py",
         ),
     ):
@@ -37,7 +37,7 @@ def _load_shared_loadpoint():
         module = importlib.util.module_from_spec(spec)
         sys.modules[name] = module
         spec.loader.exec_module(module)
-    return sys.modules["custom_components.powersync_nir.automations.shared_loadpoint"]
+    return sys.modules["custom_components.power_sync.automations.shared_loadpoint"]
 
 
 def _load_session_manager():
@@ -50,7 +50,7 @@ def _load_session_manager():
     homeassistant.util = util
     util.dt = dt
 
-    name = "custom_components.powersync_nir.automations.ev_charging_session"
+    name = "custom_components.power_sync.automations.ev_charging_session"
     spec = importlib.util.spec_from_file_location(
         name, COMPONENT_ROOT / "automations" / "ev_charging_session.py"
     )
