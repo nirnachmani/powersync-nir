@@ -9,18 +9,17 @@ PYTHON="$ROOT/.venv/bin/python"
 cd "$ROOT"
 
 if [[ ! -x "$PYTHON" ]]; then
-    printf '%s\n' \
-        "Missing project virtual environment: $PYTHON" \
-        'Create it, then install test dependencies with:' \
-        "  uv pip install --python $ROOT/.venv/bin/python -r requirements-test.txt" >&2
-    exit 1
+    printf 'Bootstrapping project test virtual environment with uv.\n'
+    uv venv .venv
 fi
+
+printf 'Installing pinned optimizer-gate test dependencies into the project virtual environment.\n'
+uv pip install --python "$PYTHON" -r requirements-test.txt
 
 if ! "$PYTHON" -c 'import aiohttp; import highspy' >/dev/null 2>&1; then
     printf '%s\n' \
-        'Missing required test dependency (aiohttp or highspy).' \
-        'Install the declared test dependencies into the project virtual environment:' \
-        "  uv pip install --python $PYTHON -r requirements-test.txt" >&2
+        'Failed to import required optimizer-gate test dependencies (aiohttp or highspy).' \
+        "Verify the pinned requirements installed into: $PYTHON" >&2
     exit 1
 fi
 
@@ -45,8 +44,9 @@ core_tests=(
     tests/test_tou_season_boundary_forecast.py
 )
 
-printf 'Running optimizer continuity gate: %d core suites plus telemetry and baseline contracts.\n' "${#core_tests[@]}"
+printf 'Running optimizer continuity gate: %d core suites plus telemetry, baseline, and runner contracts.\n' "${#core_tests[@]}"
 "$PYTHON" -m pytest -q \
     "${core_tests[@]}" \
     tests/test_home_load_telemetry.py \
-    tests/test_power_sync_surface_contract.py
+    tests/test_power_sync_surface_contract.py \
+    tests/test_optimizer_regression_runner.py

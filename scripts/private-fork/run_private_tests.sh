@@ -9,8 +9,8 @@ PYTHON="$ROOT/.venv/bin/python"
 cd "$ROOT"
 
 if [[ ! -x "$PYTHON" ]]; then
-    printf 'Missing project virtual environment: %s\n' "$PYTHON" >&2
-    exit 1
+    printf 'Bootstrapping project test virtual environment with uv.\n'
+    uv venv .venv
 fi
 
 if [[ "${1:-}" == "--broader" ]]; then

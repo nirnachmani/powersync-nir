@@ -3,9 +3,13 @@
 Run the private gate from the repository root:
 
 ```bash
-uv pip install --python .venv/bin/python -r requirements-test.txt
 scripts/private-fork/run_private_tests.sh
 ```
+
+On a clean checkout, either private runner creates `.venv` with `uv venv .venv`
+when it is absent; the optimizer continuity runner then installs the pinned
+test-only requirements with `.venv/bin/python`. They never use or install into
+a global Python environment.
 
 `run_private_tests.sh` always invokes `run_optimizer_regression_tests.sh` before
 its existing private-fork checks. The continuity runner uses only the project
@@ -20,6 +24,7 @@ Actions, use `actions/checkout` with `fetch-depth: 0` (and ensure tags are
 available); do not add this gate to a release workflow solely to obtain that
 checkout.
 
-`requirements-test.txt` is test tooling only. Do not copy `aiohttp` into the
-Home Assistant integration manifest unless it becomes a genuine integration
+`requirements-test.txt` is test tooling only and exactly pins the `aiohttp` and
+`highspy` versions verified for this optimizer gate. Do not copy `aiohttp` into
+the Home Assistant integration manifest unless it becomes a genuine integration
 runtime requirement.
