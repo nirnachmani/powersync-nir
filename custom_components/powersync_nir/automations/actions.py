@@ -7426,6 +7426,51 @@ def _resolve_shared_loadpoint_direct_command(
             "Shared loadpoint command blocked: no selected shared logical EV profile"
         )
         return None
+
+    # A logical selector proves which profile is active, but direct hardware
+    # commands must also respect the single physical lease.  Do not claim or
+    # replace that lease here: this guard only authorizes its current holder.
+    if resolved_params.get("shared_loadpoint_binding"):
+        from .ev_ownership import get_ev_ownership, owner_family
+
+        physical_vehicle_id = str(resolved_params["vehicle_id"])
+        _lease_id, lease = get_ev_ownership(
+            hass,
+            config_entry,
+            physical_vehicle_id,
+        )
+        if lease is not None:
+            selected_profile_id = str(
+                resolved_params.get("active_logical_vehicle_id")
+                or resolved_params.get("logical_vehicle_id")
+                or ""
+            )
+            lease_profile_id = str(lease.get("active_profile_id") or "")
+            requested_owner_mode = (
+                resolved_params.get("owner_mode")
+                or resolved_params.get("dynamic_mode")
+            )
+            lease_owner_mode = lease.get("owner_mode")
+            owner_matches = (
+                lease.get("owner") == "powersync"
+                and (
+                    not requested_owner_mode
+                    or (
+                        lease_owner_mode is not None
+                        and owner_family(requested_owner_mode)
+                        == owner_family(lease_owner_mode)
+                    )
+                )
+            )
+            if (
+                not lease_profile_id
+                or lease_profile_id != selected_profile_id
+                or not owner_matches
+            ):
+                _LOGGER.info(
+                    "Shared loadpoint command blocked: physical lease belongs to another owner or profile"
+                )
+                return None
     return str(resolved_params["vehicle_id"]), resolved_params
 
 

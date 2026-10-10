@@ -64,6 +64,7 @@ for module_name in (
 ):
     sys.modules.pop(module_name, None)
 actions = importlib.import_module("powersync_nir.automations.actions")
+ownership = importlib.import_module("powersync_nir.automations.ev_ownership")
 
 
 class _State:
@@ -102,6 +103,19 @@ def _generic_params() -> dict:
         "charger_type": "generic",
         "charger_switch_entity": "switch.shared_ev",
     }
+
+
+def _claim_shared_loadpoint(
+    hass, *, profile_id: str, owner_mode: str = "scheduled", owner: str = "powersync"
+) -> None:
+    ownership.claim_ev_ownership(
+        hass,
+        _Entry(),
+        "generic_ev",
+        owner=owner,
+        owner_mode=owner_mode,
+        extra={"active_profile_id": profile_id},
+    )
 
 
 def test_physical_generic_id_cannot_bypass_selected_profile_for_direct_stop():
@@ -150,6 +164,28 @@ def test_selected_logical_generic_id_reaches_canonical_direct_start_command(monk
     assert result is True
     assert seen[0]["vehicle_id"] == "generic_ev"
     assert seen[0]["logical_vehicle_id"] == "shared_ev_profile_a"
+
+
+def test_direct_shared_start_is_blocked_when_physical_lease_belongs_to_other_profile(monkeypatch):
+    hass = _Hass(selector_state="tesla")
+    _claim_shared_loadpoint(hass, profile_id="shared_ev_profile_a")
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_start_generic_charger_switch", start)
+
+    result = asyncio.run(
+        actions._action_start_ev_charging(
+            hass,
+            _Entry(),
+            {
+                **_generic_params(),
+                "vehicle_id": "shared_ev_profile_b",
+                "owner_mode": "scheduled",
+            },
+        )
+    )
+
+    assert result is False
+    start.assert_not_awaited()
 
 
 def test_inactive_logical_generic_id_cannot_issue_direct_start():
@@ -246,6 +282,49 @@ def test_selected_logical_generic_id_reaches_canonical_current_command(monkeypat
     assert result is True
     assert seen[0]["vehicle_id"] == "generic_ev"
     assert seen[0]["logical_vehicle_id"] == "shared_ev_profile_a"
+
+
+def test_direct_shared_current_write_reaches_current_physical_lease_owner(monkeypatch):
+    hass = _Hass()
+    _claim_shared_loadpoint(hass, profile_id="shared_ev_profile_a")
+    set_amps = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_set_generic_charger_amps_entity", set_amps)
+
+    result = asyncio.run(
+        actions._action_set_ev_charging_amps(
+            hass,
+            _Entry(),
+            {
+                **_generic_params(),
+                "vehicle_id": "shared_ev_profile_a",
+                "owner_mode": "scheduled",
+                "charger_amps_entity": "number.shared_ev_amps",
+                "amps": 8,
+            },
+        )
+    )
+
+    assert result is True
+    set_amps.assert_awaited_once()
+
+
+def test_direct_shared_stop_is_blocked_when_foreign_owner_controls_physical_loadpoint():
+    hass = _Hass()
+    _claim_shared_loadpoint(
+        hass,
+        profile_id="shared_ev_profile_a",
+        owner_mode="external",
+        owner="external",
+    )
+
+    result = asyncio.run(
+        actions._action_stop_ev_charging(
+            hass, _Entry(), {**_generic_params(), "vehicle_id": "shared_ev_profile_a"}
+        )
+    )
+
+    assert result is False
+    hass.services.async_call.assert_not_awaited()
 
 
 def test_physical_evac_id_cannot_bypass_selected_profile_for_direct_start(monkeypatch):
