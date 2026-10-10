@@ -8110,6 +8110,8 @@ async def _resolve_shared_loadpoint_direct_command(
         )
         if resolved_params is None:
             return None
+        if not resolved_params.get("shared_loadpoint_binding"):
+            return str(vehicle_id), resolved_params
         physical_vehicle_id = str(resolved_params["vehicle_id"])
         _lease_id, lease = get_ev_ownership(hass, config_entry, physical_vehicle_id)
         if not isinstance(lease, dict) or lease.get("owner") != "external":

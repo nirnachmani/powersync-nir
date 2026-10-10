@@ -242,6 +242,30 @@ def test_non_shared_generic_command_resolution_preserves_original_params():
     assert "vehicle_id" not in resolved[1]
 
 
+def test_external_stop_authorization_preserves_unbound_generic_params():
+    hass, _now = _phase_managed_hass()
+    params = {
+        "charger_type": "generic",
+        "charger_switch_entity": "switch.boost_ev",
+        "_external_session_stop_authorization": (
+            actions._EXTERNAL_SESSION_STOP_AUTHORIZATION
+        ),
+    }
+
+    resolved = asyncio.run(
+        actions._resolve_shared_loadpoint_direct_command(
+            hass,
+            _Entry(),
+            "boost-car",
+            params,
+            allow_external_session_stop=True,
+        )
+    )
+
+    assert resolved == ("boost-car", params)
+    assert "vehicle_id" not in resolved[1]
+
+
 def test_phase_management_stale_data_stops_active_owned_charging(monkeypatch):
     hass, now = _phase_managed_hass(age_seconds=120)
     monkeypatch.setattr(actions.dt_util, "utcnow", lambda: now)
