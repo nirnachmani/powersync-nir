@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import inspect
 import sys
 import types
 from datetime import datetime, timezone
@@ -171,6 +172,193 @@ def test_shared_smart_schedule_live_soc_authorizes_current_write():
     )) is True
 
     assert hass.services.async_call.await_count == 1
+
+
+def test_shared_session_soc_provenance_reads_only_selected_profiles_live_entity():
+    hass = _Hass(profile_a_soc="42")
+    entry = _Entry()
+    entry.options = {
+        **entry.options,
+        "shared_loadpoint_profile_a_soc_entity": "sensor.tank_soc",
+        "shared_loadpoint_profile_b_soc_entity": "sensor.tesla_soc",
+    }
+    hass.data["power_sync"]["entry-1"]["shared_profile_soc_metadata"] = {
+        "shared_ev_profile_b": {"value": 88, "source": "cache"}
+    }
+
+    assert actions._logical_session_soc_provenance(
+        hass, entry, "shared_ev_profile_a"
+    ) == {
+        "start_soc": 42,
+        "start_soc_entity": "sensor.tank_soc",
+        "start_soc_time": hass.states.get("sensor.tank_soc").last_updated.isoformat(),
+        "start_soc_source": "state",
+    }
+    assert actions._logical_session_soc_provenance(
+        hass, entry, "shared_ev_profile_b"
+    ) == {}
+
+
+@pytest.mark.parametrize(
+    "controller_path",
+    ("dynamic_group_stop", "solar_surplus_stop", "battery_target_stop"),
+)
+@pytest.mark.parametrize(
+    ("profile_soc", "expected_soc"),
+    (("42", 42), ("unavailable", None)),
+)
+def test_shared_controller_stop_uses_selected_logical_soc_provenance(
+    controller_path, profile_soc, expected_soc
+):
+    """Every active controller finalizes shared history from its profile only."""
+    hass = _Hass(profile_a_soc=profile_soc)
+    entry = _Entry()
+    entry.options = {
+        **entry.options,
+        "shared_loadpoint_profile_a_soc_entity": "sensor.tank_soc",
+    }
+    # This is deliberately plausible fallback data that must never leak into
+    # a shared logical session when its selected profile is unavailable.
+    hass.data["power_sync"]["entry-1"]["live_status"] = {"battery_soc": 91}
+    hass.data["power_sync"]["entry-1"]["shared_profile_soc_metadata"] = {
+        "shared_ev_profile_b": {"value": 88, "source": "cache"}
+    }
+
+    controller = {
+        "dynamic_group_stop": actions._update_smart_schedule_battery_target_group,
+        "solar_surplus_stop": actions._dynamic_ev_update_surplus,
+        "battery_target_stop": actions._dynamic_ev_update,
+    }[controller_path]
+    assert "_shared_session_end_soc_provenance" in inspect.getsource(controller)
+
+    result = actions._shared_session_end_soc_provenance(
+        hass,
+        entry,
+        {
+            "shared_loadpoint_binding": True,
+            "active_logical_vehicle_id": "shared_ev_profile_a",
+            "controller_path": controller_path,
+        },
+    )
+
+    assert result["end_soc"] == expected_soc
+    if expected_soc is None:
+        assert result == {
+            "end_soc": None,
+            "end_soc_entity": None,
+            "end_soc_time": None,
+            "end_soc_source": None,
+        }
+    else:
+        assert result == {
+            "end_soc": 42,
+            "end_soc_entity": "sensor.tank_soc",
+            "end_soc_time": hass.states.get("sensor.tank_soc").last_updated.isoformat(),
+            "end_soc_source": "state",
+        }
+
+
+@pytest.mark.parametrize(
+    ("charger_type", "binding_id"),
+    [("generic", "generic_ev"), ("sigenergy", "sigenergy_charger")],
+)
+def test_manual_shared_session_records_selected_logical_soc_provenance(
+    monkeypatch, charger_type, binding_id
+):
+    hass = _Hass(profile_a_soc="42")
+    entry = _Entry()
+    entry.options = {
+        **entry.options,
+        "shared_loadpoint_profile_a_soc_entity": "sensor.tank_soc",
+    }
+    if charger_type == "sigenergy":
+        entry.options.update(
+            generic_charger_enabled=False,
+            sigenergy_charger_enabled=True,
+            sigenergy_charger_type="evac",
+        )
+    actions._dynamic_ev_state.clear()
+    monkeypatch.setattr(actions, "_manual_session_target_amps", AsyncMock(return_value=8))
+    monkeypatch.setattr(actions, "_phase_load_management_applies", lambda *_args: False)
+    monkeypatch.setattr(actions, "async_track_time_interval", lambda *_args: lambda: None)
+
+    manager = SimpleNamespace(start_session=AsyncMock(return_value=SimpleNamespace(id="manual")))
+    sessions = types.ModuleType("power_sync.automations.ev_charging_session")
+    sessions.get_session_manager = lambda: manager
+    monkeypatch.setitem(sys.modules, sessions.__name__, sessions)
+
+    asyncio.run(actions.record_manual_ev_charging_session(
+        hass,
+        entry,
+        binding_id,
+        {
+            "charger_type": charger_type,
+            "shared_loadpoint_binding": True,
+            "active_logical_vehicle_id": "shared_ev_profile_a",
+        },
+    ))
+
+    assert manager.start_session.await_args.kwargs == {
+        "vehicle_id": "shared_ev_profile_a",
+        "logical_vehicle_id": "shared_ev_profile_a",
+        "loadpoint_id": binding_id,
+        "mode": "manual",
+        "start_soc": 42,
+        "start_soc_entity": "sensor.tank_soc",
+        "start_soc_time": hass.states.get("sensor.tank_soc").last_updated.isoformat(),
+        "start_soc_source": "state",
+    }
+
+
+@pytest.mark.parametrize(
+    ("charger_type", "binding_id"),
+    [("generic", "generic_ev"), ("sigenergy", "sigenergy_charger")],
+)
+def test_manual_shared_session_does_not_fallback_when_selected_soc_is_unavailable(
+    monkeypatch, charger_type, binding_id
+):
+    hass = _Hass(profile_a_soc="unavailable")
+    entry = _Entry()
+    entry.options = {
+        **entry.options,
+        "shared_loadpoint_profile_a_soc_entity": "sensor.tank_soc",
+    }
+    hass.data["power_sync"]["entry-1"]["shared_profile_soc_metadata"] = {
+        "shared_ev_profile_b": {"value": 88, "source": "cache"}
+    }
+    if charger_type == "sigenergy":
+        entry.options.update(
+            generic_charger_enabled=False,
+            sigenergy_charger_enabled=True,
+            sigenergy_charger_type="evac",
+        )
+    actions._dynamic_ev_state.clear()
+    monkeypatch.setattr(actions, "_manual_session_target_amps", AsyncMock(return_value=8))
+    monkeypatch.setattr(actions, "_phase_load_management_applies", lambda *_args: False)
+    monkeypatch.setattr(actions, "async_track_time_interval", lambda *_args: lambda: None)
+
+    manager = SimpleNamespace(start_session=AsyncMock(return_value=SimpleNamespace(id="manual")))
+    sessions = types.ModuleType("power_sync.automations.ev_charging_session")
+    sessions.get_session_manager = lambda: manager
+    monkeypatch.setitem(sys.modules, sessions.__name__, sessions)
+
+    asyncio.run(actions.record_manual_ev_charging_session(
+        hass,
+        entry,
+        binding_id,
+        {
+            "charger_type": charger_type,
+            "shared_loadpoint_binding": True,
+            "active_logical_vehicle_id": "shared_ev_profile_a",
+        },
+    ))
+
+    assert manager.start_session.await_args.kwargs == {
+        "vehicle_id": "shared_ev_profile_a",
+        "logical_vehicle_id": "shared_ev_profile_a",
+        "loadpoint_id": binding_id,
+        "mode": "manual",
+    }
 
 
 def _shared_solar_preflight_setup(*, charger_type="generic", physical_id="generic_ev"):
@@ -1254,6 +1442,94 @@ def test_selected_logical_evac_id_reaches_canonical_current_command(monkeypatch)
     assert set_amps.await_args.args[2]["logical_vehicle_id"] == "shared_ev_profile_a"
 
 
+@pytest.mark.parametrize(
+    ("outgoing_soc", "expected_end_soc"),
+    (("46", 46), ("unavailable", None)),
+)
+def test_fresh_idle_handoff_finalizes_outgoing_profile_with_only_its_live_soc(
+    monkeypatch, outgoing_soc, expected_end_soc
+):
+    hass = _Hass(selector_state="tesla", profile_a_soc=outgoing_soc)
+    entry = _Entry()
+    entry.options = {
+        **entry.options,
+        "shared_loadpoint_profile_a_soc_entity": "sensor.tank_soc",
+        "shared_loadpoint_profile_b_soc_entity": "sensor.tesla_soc",
+    }
+    states = {
+        "sensor.connected_vehicle": _State("tesla"),
+        "sensor.tank_soc": _State(outgoing_soc),
+        # Incoming B's valid sample must not be written into A's final history.
+        "sensor.tesla_soc": _State("88"),
+        "switch.shared_ev": _State("on"),
+        "number.shared_ev_amps": _State("6"),
+    }
+    states["number.shared_ev_amps"].attributes = {"min": 6, "max": 32}
+    hass.states = SimpleNamespace(get=states.get)
+    old_params = {
+        **_generic_params(),
+        "vehicle_id": "generic_ev",
+        "vehicle_vin": "generic_ev",
+        "logical_vehicle_id": "shared_ev_profile_a",
+        "active_logical_vehicle_id": "shared_ev_profile_a",
+        "shared_loadpoint_binding": True,
+        "dynamic_mode": "battery_target",
+        "owner_mode": "scheduled",
+    }
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state[entry.entry_id] = {
+        "generic_ev": {
+            "active": True,
+            "active_profile_id": "shared_ev_profile_a",
+            "params": old_params,
+            "current_amps": 8,
+            "session_id": "outgoing-session",
+        }
+    }
+    _claim_shared_loadpoint(hass, profile_id="shared_ev_profile_a")
+    reconciler = importlib.import_module("power_sync.automations.external_session_reconciler")
+    monkeypatch.setattr(
+        reconciler,
+        "generic_observation_from_hass",
+        lambda *_args, **_kwargs: SimpleNamespace(fresh=True, charging=False),
+    )
+    monkeypatch.setattr(
+        reconciler,
+        "reconcile_shared_external_session",
+        lambda *_args, **_kwargs: SimpleNamespace(active_profile_id="shared_ev_profile_a"),
+    )
+    monkeypatch.setattr(reconciler, "persist_reconciliation_state", AsyncMock())
+    manager = SimpleNamespace(transfer_idle_session_attribution=AsyncMock(return_value=True))
+    sessions = types.ModuleType("power_sync.automations.ev_charging_session")
+    sessions.get_session_manager = lambda: manager
+    monkeypatch.setitem(sys.modules, sessions.__name__, sessions)
+
+    assert asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            entry,
+            {
+                **_generic_params(),
+                "vehicle_id": "shared_ev_profile_b",
+                "dynamic_mode": "battery_target",
+                "owner_mode": "scheduled",
+            },
+        )
+    ) is True
+
+    handoff = manager.transfer_idle_session_attribution.await_args.kwargs
+    assert handoff["from_vehicle_id"] == "shared_ev_profile_a"
+    assert handoff["to_vehicle_id"] == "shared_ev_profile_b"
+    assert handoff["end_soc"] == expected_end_soc
+    if expected_end_soc is None:
+        assert handoff["end_soc_entity"] is None
+        assert handoff["end_soc_time"] is None
+        assert handoff["end_soc_source"] is None
+    else:
+        assert handoff["end_soc_entity"] == "sensor.tank_soc"
+        assert handoff["end_soc_source"] == "state"
+
+
 def test_active_shared_handoff_fences_interleaved_old_periodic_write(monkeypatch):
     """The old callback cannot write after handoff begins but before its stop returns."""
     hass = _Hass()
@@ -1424,6 +1700,134 @@ def test_shared_dynamic_session_keeps_logical_identity_for_periodic_rate_and_sto
     assert asyncio.run(
         actions._set_vehicle_amps(hass, entry, "generic_ev", 8, _generic_params())
     ) is False
+
+
+@pytest.mark.parametrize(
+    ("charger_type", "binding_id", "profile_soc", "expected_soc"),
+    [
+        ("generic", "generic_ev", "42", 42),
+        ("sigenergy", "sigenergy_charger", "42", 42),
+        ("generic", "generic_ev", "unavailable", None),
+        ("sigenergy", "sigenergy_charger", "unavailable", None),
+    ],
+)
+def test_managed_shared_start_records_only_selected_profiles_live_soc(
+    monkeypatch, charger_type, binding_id, profile_soc, expected_soc
+):
+    hass = _Hass(profile_a_soc=profile_soc)
+    entry = _Entry()
+    entry.options = {
+        **entry.options,
+        "shared_loadpoint_profile_a_soc_entity": "sensor.tank_soc",
+    }
+    if charger_type == "sigenergy":
+        entry.options.update(
+            generic_charger_enabled=False,
+            sigenergy_charger_enabled=True,
+            sigenergy_charger_type="evac",
+        )
+    hass.data["power_sync"]["entry-1"]["shared_profile_soc_metadata"] = {
+        "shared_ev_profile_b": {"value": 88, "source": "cache"}
+    }
+    actions._dynamic_ev_state.clear()
+    monkeypatch.setattr(actions, "_set_vehicle_amps", AsyncMock(return_value=True))
+    monkeypatch.setattr(actions, "_resolve_teslemetry_bt_prefix", lambda _hass: None)
+    manager = SimpleNamespace(start_session=AsyncMock(return_value=SimpleNamespace(id="managed")))
+    sessions = types.ModuleType("power_sync.automations.ev_charging_session")
+    sessions.get_session_manager = lambda: manager
+    monkeypatch.setitem(sys.modules, sessions.__name__, sessions)
+
+    assert asyncio.run(actions._action_start_ev_charging_dynamic(
+        hass,
+        entry,
+        {
+            **(_generic_params() if charger_type == "generic" else {"charger_type": "sigenergy"}),
+            "vehicle_id": "shared_ev_profile_a",
+            "dynamic_mode": "battery_target",
+            "fixed_charge_amps": 8,
+            "max_charge_amps": 8,
+        },
+    )) is True
+
+    call = manager.start_session.await_args.kwargs
+    assert call["vehicle_id"] == "shared_ev_profile_a"
+    assert call["logical_vehicle_id"] == "shared_ev_profile_a"
+    assert call["loadpoint_id"] == binding_id
+    assert call["start_soc"] == expected_soc
+    if expected_soc is None:
+        assert "start_soc_entity" not in call
+        assert "start_soc_time" not in call
+        assert "start_soc_source" not in call
+    else:
+        assert call["start_soc_entity"] == "sensor.tank_soc"
+        assert call["start_soc_time"] == hass.states.get("sensor.tank_soc").last_updated.isoformat()
+        assert call["start_soc_source"] == "state"
+
+
+@pytest.mark.parametrize(
+    ("charger_type", "binding_id", "profile_soc", "expected_soc"),
+    [
+        ("generic", "generic_ev", "42", 42),
+        ("sigenergy", "sigenergy_charger", "42", 42),
+        ("generic", "generic_ev", "unavailable", None),
+        ("sigenergy", "sigenergy_charger", "unavailable", None),
+    ],
+)
+@pytest.mark.parametrize(
+    ("adopt_name", "mode"),
+    [
+        ("_adopt_observed_solar_surplus_shared_session", "solar_surplus"),
+        ("_adopt_observed_scheduled_shared_session", "scheduled"),
+        ("_adopt_observed_smart_schedule_shared_session", "smart_schedule"),
+        ("_adopt_observed_price_level_shared_session", "price_level"),
+    ],
+)
+def test_adopted_shared_starts_record_only_selected_profiles_live_soc(
+    monkeypatch, charger_type, binding_id, profile_soc, expected_soc, adopt_name, mode
+):
+    hass = _Hass(profile_a_soc=None if profile_soc == "unavailable" else profile_soc)
+    entry = _Entry()
+    entry.options = {
+        **entry.options,
+        "shared_loadpoint_profile_a_soc_entity": "sensor.tank_soc",
+    }
+    if charger_type == "sigenergy":
+        entry.options.update(
+            generic_charger_enabled=False,
+            sigenergy_charger_enabled=True,
+            sigenergy_charger_type="evac",
+        )
+    selected_state = hass.states.get("sensor.tank_soc")
+    hass.data["power_sync"]["entry-1"]["shared_profile_soc_metadata"] = {
+        "shared_ev_profile_b": {"value": 88, "source": "cache"}
+    }
+    actions._dynamic_ev_state.clear()
+    manager = SimpleNamespace(start_session=AsyncMock(return_value=SimpleNamespace(id="adopted")))
+    sessions = types.ModuleType("power_sync.automations.ev_charging_session")
+    sessions.get_session_manager = lambda: manager
+    monkeypatch.setitem(sys.modules, sessions.__name__, sessions)
+
+    assert asyncio.run(getattr(actions, adopt_name)(
+        hass,
+        entry,
+        binding_id=binding_id,
+        active_profile_id="shared_ev_profile_a",
+        selected_params={"charger_type": charger_type},
+        observed_at=datetime(2026, 10, 10, tzinfo=timezone.utc),
+    )) is True
+
+    call = manager.start_session.await_args.kwargs
+    assert call["vehicle_id"] == "shared_ev_profile_a"
+    assert call["logical_vehicle_id"] == "shared_ev_profile_a"
+    assert call["loadpoint_id"] == binding_id
+    assert call["mode"] == mode
+    assert call.get("start_soc") == expected_soc
+    if expected_soc is None:
+        assert "start_soc_entity" not in call
+    else:
+        assert call["start_soc_entity"] == "sensor.tank_soc"
+        assert call["start_soc_time"] == selected_state.last_updated.isoformat()
+        assert call["start_soc_source"] == "state"
 
 
 @pytest.mark.parametrize(

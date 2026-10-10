@@ -225,12 +225,14 @@ def test_charging_or_unknown_observation_never_hands_shared_runtime_to_other_pro
         assert lease["active_profile_id"] == PROFILE_A_ID
 
 
-def test_idle_handoff_transfers_active_physical_session_attribution_in_place():
+def test_idle_handoff_closes_outgoing_logical_session_without_rewriting_history():
     sessions = _load_session_manager()
     manager = sessions.ChargingSessionManager(SimpleNamespace())
+    manager._cache_loaded = True
     session = sessions.ChargingSession(
         id="session-1",
         vehicle_id=PROFILE_A_ID,
+        logical_vehicle_id=PROFILE_A_ID,
         loadpoint_id="generic_ev",
         start_time="2026-01-01T00:00:00+00:00",
         total_energy_kwh=4.2,
@@ -247,9 +249,11 @@ def test_idle_handoff_transfers_active_physical_session_attribution_in_place():
     )
 
     assert transferred is True
-    assert manager.active_sessions == {"generic_ev": session}
-    assert session.vehicle_id == PROFILE_B_ID
-    assert session.id == "session-1"
+    assert manager.active_sessions == {}
+    assert session.vehicle_id == PROFILE_A_ID
+    assert session.logical_vehicle_id == PROFILE_A_ID
+    assert session.completed is True
+    assert session.end_soc is None
     assert session.total_energy_kwh == 4.2
 
 

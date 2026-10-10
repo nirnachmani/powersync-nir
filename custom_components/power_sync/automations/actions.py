@@ -6353,9 +6353,11 @@ async def _adopt_observed_solar_surplus_shared_session(
             else:
                 session = await manager.start_session(
                     vehicle_id=active_profile_id,
+                    logical_vehicle_id=active_profile_id,
                     loadpoint_id=binding_id,
                     mode="solar_surplus",
                     start_time=observed_at or dt_util.now(),
+                    **_logical_session_soc_provenance(hass, config_entry, active_profile_id),
                 )
             _dynamic_ev_state[entry_id][binding_id]["session_id"] = session.id
     except Exception as err:
@@ -6456,9 +6458,11 @@ async def _adopt_observed_price_level_shared_session(
             else:
                 session = await manager.start_session(
                     vehicle_id=active_profile_id,
+                    logical_vehicle_id=active_profile_id,
                     loadpoint_id=binding_id,
                     mode="price_level",
                     start_time=observed_at or dt_util.now(),
+                    **_logical_session_soc_provenance(hass, config_entry, active_profile_id),
                 )
             _dynamic_ev_state[entry_id][binding_id]["session_id"] = session.id
     except Exception as err:
@@ -6559,9 +6563,11 @@ async def _adopt_observed_scheduled_shared_session(
             else:
                 session = await manager.start_session(
                     vehicle_id=active_profile_id,
+                    logical_vehicle_id=active_profile_id,
                     loadpoint_id=binding_id,
                     mode="scheduled",
                     start_time=observed_at or dt_util.now(),
+                    **_logical_session_soc_provenance(hass, config_entry, active_profile_id),
                 )
             _dynamic_ev_state[entry_id][binding_id]["session_id"] = session.id
     except Exception as err:
@@ -6649,7 +6655,9 @@ async def _adopt_observed_smart_schedule_shared_session(
             else:
                 session = await manager.start_session(
                     vehicle_id=active_profile_id, loadpoint_id=binding_id,
+                    logical_vehicle_id=active_profile_id,
                     mode="smart_schedule", start_time=observed_at or dt_util.now(),
+                    **_logical_session_soc_provenance(hass, config_entry, active_profile_id),
                 )
             _dynamic_ev_state[entry_id][binding_id]["session_id"] = session.id
     except Exception as err:
@@ -7216,10 +7224,22 @@ async def record_manual_ev_charging_session(
         from .ev_charging_session import get_session_manager
         session_manager = get_session_manager()
         if session_manager:
+            logical_vehicle_id = (
+                full_params.get("active_logical_vehicle_id")
+                or full_params.get("logical_vehicle_id")
+                or resolved_vehicle_id
+            )
+            shared_soc = (
+                _logical_session_soc_provenance(hass, config_entry, logical_vehicle_id)
+                if full_params.get("shared_loadpoint_binding")
+                else {}
+            )
             session = await session_manager.start_session(
-                vehicle_id=full_params.get("active_logical_vehicle_id", resolved_vehicle_id),
+                vehicle_id=logical_vehicle_id,
+                logical_vehicle_id=logical_vehicle_id,
                 loadpoint_id=resolved_vehicle_id,
                 mode="manual",
+                **shared_soc,
             )
             session_id = session.id
     except Exception as e:
@@ -10201,11 +10221,20 @@ async def _update_smart_schedule_battery_target_group(
                 prior_amps = previous_amps[vehicle_id]
                 current_amps = int(state.get("current_amps", 0) or 0)
                 if prior_amps > 0 and current_amps <= 0:
-                    live_soc = live_status.get("battery_soc")
+                    end_soc_kwargs: dict[str, Any]
+                    if params.get("shared_loadpoint_binding"):
+                        end_soc_kwargs = _shared_session_end_soc_provenance(
+                            hass, config_entry, params
+                        )
+                    else:
+                        live_soc = live_status.get("battery_soc")
+                        end_soc_kwargs = {
+                            "end_soc": int(live_soc) if live_soc else None,
+                        }
                     await session_manager.end_session(
                         vehicle_id=vehicle_id,
                         reason="battery_target_stop",
-                        end_soc=int(live_soc) if live_soc else None,
+                        **end_soc_kwargs,
                     )
                 elif current_amps > 0:
                     power_kw = _dynamic_ev_commanded_power_kw(state)
@@ -11520,10 +11549,19 @@ async def _dynamic_ev_update_surplus(
                         reason = "insufficient_surplus"
                         if state.get("paused"):
                             reason = "battery_low"
+                        end_soc_kwargs: dict[str, Any]
+                        if params.get("shared_loadpoint_binding"):
+                            end_soc_kwargs = _shared_session_end_soc_provenance(
+                                hass, config_entry, params
+                            )
+                        else:
+                            end_soc_kwargs = {
+                                "end_soc": int(battery_soc) if battery_soc else None,
+                            }
                         await session_manager.end_session(
                             vehicle_id=vehicle_id,
                             reason=reason,
-                            end_soc=int(battery_soc) if battery_soc else None,
+                            **end_soc_kwargs,
                         )
                         _LOGGER.debug(f"Solar surplus EV: Ended session for {vehicle_id} ({reason})")
                 except Exception as e:
@@ -13388,12 +13426,20 @@ async def _dynamic_ev_update(
                 )
             elif current_amps > 0 and new_amps == 0:
                 # Session end - charging stopped
-                live_soc = live_status.get("battery_soc")
-                end_soc = int(live_soc) if live_soc else None
+                end_soc_kwargs: dict[str, Any]
+                if params.get("shared_loadpoint_binding"):
+                    end_soc_kwargs = _shared_session_end_soc_provenance(
+                        hass, config_entry, params
+                    )
+                else:
+                    live_soc = live_status.get("battery_soc")
+                    end_soc_kwargs = {
+                        "end_soc": int(live_soc) if live_soc else None,
+                    }
                 await session_manager.end_session(
                     vehicle_id=vehicle_id,
                     reason="battery_target_stop",
-                    end_soc=end_soc,
+                    **end_soc_kwargs,
                 )
                 _LOGGER.debug(f"Dynamic EV: Ended session for {vehicle_id}")
     except Exception as e:
@@ -13536,6 +13582,57 @@ def _consume_recovered_solar_surplus_continuation_amps(
         live_amps,
     )
     return live_amps
+
+
+def _logical_session_soc_provenance(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    logical_vehicle_id: Any,
+) -> dict[str, Any]:
+    """Return only a shared profile's own current SoC sample for history.
+
+    A shared physical charger has no vehicle SoC.  Do not borrow the house
+    battery, sibling profile, cache, or Generic legacy entity when a profile's
+    configured state is unavailable.
+    """
+    try:
+        from .shared_loadpoint import resolve_shared_profile_soc
+
+        sample = resolve_shared_profile_soc(hass, config_entry, str(logical_vehicle_id or ""))
+    except Exception:
+        sample = None
+    if sample is None:
+        return {}
+    timestamp = sample.timestamp
+    return {
+        "start_soc": int(sample.value),
+        "start_soc_entity": sample.entity_id,
+        "start_soc_time": timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp),
+        "start_soc_source": sample.source,
+    }
+
+
+def _shared_session_end_soc_provenance(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    params: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return final SoC fields for a shared session without physical fallbacks."""
+    logical_vehicle_id = (
+        params.get("active_logical_vehicle_id")
+        or params.get("logical_vehicle_id")
+    )
+    sample = (
+        _logical_session_soc_provenance(hass, config_entry, logical_vehicle_id)
+        if params.get("shared_loadpoint_binding") and logical_vehicle_id
+        else {}
+    )
+    return {
+        "end_soc": sample.get("start_soc"),
+        "end_soc_entity": sample.get("start_soc_entity"),
+        "end_soc_time": sample.get("start_soc_time"),
+        "end_soc_source": sample.get("start_soc_source"),
+    }
 
 
 async def _action_start_ev_charging_dynamic_locked(
@@ -13727,45 +13824,50 @@ async def _action_start_ev_charging_dynamic_locked(
             if not observation.fresh:
                 return False
             if observation.charging is False:
-                # The physical session is keyed by the shared loadpoint, while
-                # its vehicle ID is logical-profile attribution.  Move that
-                # attribution before changing the runtime/lease metadata so a
-                # failed transfer cannot leave recorded energy under A while
-                # the active profile says B.  This is metadata-only: it does
-                # not start/end a session or contact charger hardware.
+                # Fresh idle ends A's logical history.  It is not evidence that
+                # B has started, so never retag A's session or keep an active B
+                # runtime/lease. B must wait for its own real start/adoption.
                 if existing_state.get("session_id"):
                     try:
                         from .ev_charging_session import get_session_manager
 
                         session_manager = get_session_manager()
+                        end_soc_kwargs = _shared_session_end_soc_provenance(
+                            hass,
+                            config_entry,
+                            {
+                                "shared_loadpoint_binding": True,
+                                "active_logical_vehicle_id": existing_state.get("active_profile_id"),
+                            },
+                        )
                         if session_manager and not await session_manager.transfer_idle_session_attribution(
                             loadpoint_id=vehicle_id,
                             from_vehicle_id=str(existing_state.get("active_profile_id") or ""),
                             to_vehicle_id=requested_profile_id,
                             fresh_idle=True,
+                            **end_soc_kwargs,
                         ):
                             _LOGGER.warning(
-                                "Dynamic EV: refusing idle shared profile handoff because "
-                                "session attribution transfer failed for %s",
+                                "Dynamic EV: refusing idle shared profile split because "
+                                "the outgoing session could not be finalized for %s",
                                 vehicle_id,
                             )
                             return False
                     except Exception as err:
                         _LOGGER.warning(
-                            "Dynamic EV: refusing idle shared profile handoff because "
-                            "session attribution transfer errored for %s: %s",
+                            "Dynamic EV: refusing idle shared profile split for %s: %s",
                             vehicle_id,
                             err,
                         )
                         return False
-                if not handoff_idle_shared_profile(
-                    existing_state, lease, requested_profile_id, observation
-                ):
-                    return False
-                reconciliation.active_profile_id = requested_profile_id
-                await persist_reconciliation_state(
-                    hass, config_entry, vehicle_id, reconciliation
+                release_ev_ownership(
+                    hass, config_entry, vehicle_id,
+                    reason="managed shared charging profile ended at fresh idle",
+                    command="release",
                 )
+                entry_vehicles.pop(vehicle_id, None)
+                reconciliation.active_profile_id = None
+                await persist_reconciliation_state(hass, config_entry, vehicle_id, reconciliation)
                 if DOMAIN in hass.data and entry_id in hass.data[DOMAIN]:
                     hass.data[DOMAIN][entry_id]["dynamic_ev_state"] = entry_vehicles
                 return True
@@ -14956,17 +15058,28 @@ async def _action_start_ev_charging_dynamic_locked(
         from .ev_charging_session import get_session_manager
         session_manager = get_session_manager()
         if session_manager:
-            # Get initial SoC if available
-            initial_soc = None
-            live_status = await _get_tesla_live_status(hass, config_entry)
-            if live_status:
-                initial_soc = live_status.get("battery_soc")
+            logical_vehicle_id = params.get("active_logical_vehicle_id", vehicle_id)
+            shared_soc = _logical_session_soc_provenance(
+                hass, config_entry, logical_vehicle_id
+            )
+            # Shared logical sessions may use only their selected profile's
+            # state entity. Other vehicle types retain their existing live
+            # Tesla start SoC behavior.
+            if shared_soc:
+                initial_soc = shared_soc["start_soc"]
+            elif params.get("shared_loadpoint_binding"):
+                initial_soc = None
+            else:
+                live_status = await _get_tesla_live_status(hass, config_entry)
+                initial_soc = live_status.get("battery_soc") if live_status else None
 
             session = await session_manager.start_session(
-                vehicle_id=params.get("active_logical_vehicle_id", vehicle_id),
+                vehicle_id=logical_vehicle_id,
+                logical_vehicle_id=logical_vehicle_id,
                 loadpoint_id=vehicle_id,
                 mode=owner_mode,
-                start_soc=int(initial_soc) if initial_soc else None,
+                start_soc=int(initial_soc) if initial_soc is not None else None,
+                **{key: value for key, value in shared_soc.items() if key != "start_soc"},
             )
             _dynamic_ev_state[entry_id][vehicle_id]["session_id"] = session.id
             _LOGGER.info(f"📊 Started charging session {session.id}")
@@ -15184,19 +15297,36 @@ async def _action_stop_ev_charging_dynamic(
                 from .ev_charging_session import get_session_manager
                 session_manager = get_session_manager()
                 if session_manager and state.get("session_id"):
-                    # Try to get current SoC for end_soc
-                    end_soc = None
-                    try:
-                        live_status = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("live_status", {})
-                        if live_status.get("battery_soc"):
-                            end_soc = int(live_status["battery_soc"])
-                    except Exception:
-                        pass
+                    # Shared sessions use only the same logical profile's
+                    # live SoC; unavailable is faithfully persisted as null.
+                    session_kwargs = {}
+                    logical_vehicle_id = state.get("active_profile_id") or state_params.get(
+                        "active_logical_vehicle_id"
+                    )
+                    if state_params.get("shared_loadpoint_binding") and logical_vehicle_id:
+                        sample = _logical_session_soc_provenance(
+                            hass, config_entry, logical_vehicle_id
+                        )
+                        end_soc = sample.get("start_soc")
+                        session_kwargs = {
+                            "end_soc_entity": sample.get("start_soc_entity"),
+                            "end_soc_time": sample.get("start_soc_time"),
+                            "end_soc_source": sample.get("start_soc_source"),
+                        }
+                    else:
+                        end_soc = None
+                        try:
+                            live_status = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("live_status", {})
+                            if live_status.get("battery_soc") is not None:
+                                end_soc = int(live_status["battery_soc"])
+                        except Exception:
+                            pass
 
                     await session_manager.end_session(
                         vehicle_id=vid,
                         reason="manual" if params.get("manual_stop") else "stopped",
                         end_soc=end_soc,
+                        **session_kwargs,
                     )
                     _LOGGER.debug(f"Dynamic EV: Ended charging session for {vid}")
             except Exception as e:

@@ -74,6 +74,9 @@ class ChargingSession:
     vehicle_id: str
     start_time: str  # ISO format
     loadpoint_id: Optional[str] = None
+    # ``vehicle_id`` remains the history key; shared loadpoints also record
+    # the logical profile that owned this session.
+    logical_vehicle_id: Optional[str] = None
     end_time: Optional[str] = None
 
     # Energy tracking
@@ -92,6 +95,12 @@ class ChargingSession:
     start_soc: Optional[int] = None
     end_soc: Optional[int] = None
     target_soc: Optional[int] = None
+    start_soc_entity: Optional[str] = None
+    start_soc_time: Optional[str] = None
+    start_soc_source: Optional[str] = None
+    end_soc_entity: Optional[str] = None
+    end_soc_time: Optional[str] = None
+    end_soc_source: Optional[str] = None
 
     # Session metadata
     mode: str = "solar_surplus"  # or "battery_target", "scheduled", "boost"
@@ -114,6 +123,7 @@ class ChargingSession:
         data = {
             "id": self.id,
             "vehicle_id": self.vehicle_id,
+            "logical_vehicle_id": self.logical_vehicle_id,
             "loadpoint_id": self.loadpoint_id,
             "start_time": self.start_time,
             "end_time": self.end_time,
@@ -128,6 +138,12 @@ class ChargingSession:
             "start_soc": self.start_soc,
             "end_soc": self.end_soc,
             "target_soc": self.target_soc,
+            "start_soc_entity": self.start_soc_entity,
+            "start_soc_time": self.start_soc_time,
+            "start_soc_source": self.start_soc_source,
+            "end_soc_entity": self.end_soc_entity,
+            "end_soc_time": self.end_soc_time,
+            "end_soc_source": self.end_soc_source,
             "mode": self.mode,
             "completed": self.completed,
             "stopped_reason": self.stopped_reason,
@@ -146,6 +162,7 @@ class ChargingSession:
         return cls(
             id=data["id"],
             vehicle_id=data["vehicle_id"],
+            logical_vehicle_id=data.get("logical_vehicle_id", data["vehicle_id"]),
             start_time=data["start_time"],
             loadpoint_id=data.get("loadpoint_id"),
             end_time=data.get("end_time"),
@@ -160,6 +177,12 @@ class ChargingSession:
             start_soc=data.get("start_soc"),
             end_soc=data.get("end_soc"),
             target_soc=data.get("target_soc"),
+            start_soc_entity=data.get("start_soc_entity"),
+            start_soc_time=data.get("start_soc_time"),
+            start_soc_source=data.get("start_soc_source"),
+            end_soc_entity=data.get("end_soc_entity"),
+            end_soc_time=data.get("end_soc_time"),
+            end_soc_source=data.get("end_soc_source"),
             mode=data.get("mode", "solar_surplus"),
             completed=data.get("completed", False),
             stopped_reason=data.get("stopped_reason"),
@@ -389,6 +412,10 @@ class ChargingSessionManager:
         target_soc: Optional[int] = None,
         loadpoint_id: Optional[str] = None,
         start_time: datetime | None = None,
+        logical_vehicle_id: Optional[str] = None,
+        start_soc_entity: Optional[str] = None,
+        start_soc_time: Optional[str] = None,
+        start_soc_source: Optional[str] = None,
     ) -> ChargingSession:
         """Start a new charging session.
 
@@ -412,11 +439,15 @@ class ChargingSessionManager:
             session = ChargingSession(
                 id=str(uuid.uuid4()),
                 vehicle_id=vehicle_id,
+                logical_vehicle_id=logical_vehicle_id or vehicle_id,
                 start_time=(start_time or dt_util.now()).isoformat(),
                 loadpoint_id=loadpoint_id,
                 mode=mode,
                 start_soc=start_soc,
                 target_soc=target_soc,
+                start_soc_entity=start_soc_entity,
+                start_soc_time=start_soc_time,
+                start_soc_source=start_soc_source,
             )
 
             self.active_sessions[session_key] = session
@@ -431,13 +462,15 @@ class ChargingSessionManager:
         to_vehicle_id: str,
         *,
         fresh_idle: bool,
+        end_soc: Optional[int] = None,
+        end_soc_entity: Optional[str] = None,
+        end_soc_time: Optional[str] = None,
+        end_soc_source: Optional[str] = None,
     ) -> bool:
-        """Move an active physical session's logical attribution after idle proof.
+        """Close an outgoing logical session after a fresh idle handoff proof.
 
-        The caller supplies the fresh physical idle observation; this method
-        never creates, ends, or re-keys a session.  Requiring the outgoing
-        attribution to match prevents a stale profile handoff from rewriting
-        another logical vehicle's history.
+        Idle proves that the outgoing logical vehicle stopped. It never proves
+        the incoming vehicle began, so this deliberately creates no B session.
         """
         if (
             not fresh_idle
@@ -454,10 +487,17 @@ class ChargingSessionManager:
                 session is None
                 or session.completed
                 or session.loadpoint_id != loadpoint_id
-                or session.vehicle_id != from_vehicle_id
+                or (session.logical_vehicle_id or session.vehicle_id) != from_vehicle_id
             ):
                 return False
-            session.vehicle_id = to_vehicle_id
+            await self._end_session_unlocked(
+                loadpoint_id,
+                "profile_handoff_idle",
+                end_soc,
+                end_soc_entity,
+                end_soc_time,
+                end_soc_source,
+            )
             return True
 
     async def update_session(
@@ -516,6 +556,9 @@ class ChargingSessionManager:
         vehicle_id: str,
         reason: str,
         end_soc: Optional[int] = None,
+        end_soc_entity: Optional[str] = None,
+        end_soc_time: Optional[str] = None,
+        end_soc_source: Optional[str] = None,
     ) -> Optional[ChargingSession]:
         """End a charging session and persist to storage.
 
@@ -528,18 +571,34 @@ class ChargingSessionManager:
             Completed session or None if no active session
         """
         async with self._session_lock:
-            return await self._end_session_unlocked(vehicle_id, reason, end_soc)
+            return await self._end_session_unlocked(
+                vehicle_id, reason, end_soc, end_soc_entity, end_soc_time, end_soc_source
+            )
 
     async def _end_session_unlocked(
         self,
         vehicle_id: str,
         reason: str,
         end_soc: Optional[int] = None,
+        end_soc_entity: Optional[str] = None,
+        end_soc_time: Optional[str] = None,
+        end_soc_source: Optional[str] = None,
     ) -> Optional[ChargingSession]:
         """End a charging session (caller must hold _session_lock)."""
         session = self.active_sessions.pop(vehicle_id, None)
         if not session:
             return None
+
+        # Shared logical profiles may never inherit a physical/site or cached
+        # SoC value. A valid profile-owned state sample is explicitly marked.
+        if (
+            str(session.logical_vehicle_id or session.vehicle_id).startswith("shared_ev_profile_")
+            and end_soc_source != "state"
+        ):
+            end_soc = None
+            end_soc_entity = None
+            end_soc_time = None
+            end_soc_source = None
 
         # End any active segment
         session.end_segment()
@@ -549,6 +608,9 @@ class ChargingSessionManager:
         session.completed = True
         session.stopped_reason = reason
         session.end_soc = end_soc
+        session.end_soc_entity = end_soc_entity
+        session.end_soc_time = end_soc_time
+        session.end_soc_source = end_soc_source
 
         # Add to cache and save
         self._sessions_cache.append(session)
