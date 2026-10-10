@@ -28,6 +28,50 @@ UTC = timezone.utc
 NOW = datetime(2026, 10, 10, 4, 0, tzinfo=UTC)
 
 
+def test_reconciliation_state_round_trips_through_private_binding_record() -> None:
+    class Entry:
+        entry_id = "entry-1"
+
+    class Store:
+        def __init__(self) -> None:
+            self._data = {}
+            self.saved = 0
+
+        async def async_save(self) -> None:
+            self.saved += 1
+
+    class Hass:
+        def __init__(self, store: Store) -> None:
+            self.data = {"powersync_nir": {"entry-1": {"automation_store": store}}}
+
+    store = Store()
+    hass = Hass(store)
+    expected = module.ReconciliationState(
+        origin="external",
+        physical_active=True,
+        active_profile_id="shared_ev_profile_a",
+        stop_outcome={"status": "pending"},
+        observed_session_token="session-1",
+    )
+
+    persist = getattr(module, "persist_reconciliation_state", None)
+    load = getattr(module, "load_reconciliation_state", None)
+    assert persist is not None
+    assert load is not None
+    asyncio.run(persist(hass, Entry(), "garage", expected))
+
+    assert store.saved == 1
+    assert store._data["_shared_loadpoint_reconciliation_state"] == {
+        "binding_id": "garage",
+        "origin": "external",
+        "physical_active": True,
+        "active_profile_id": "shared_ev_profile_a",
+        "stop_outcome": {"status": "pending"},
+        "observed_session_token": "session-1",
+    }
+    assert load(hass, Entry(), "garage") == expected
+
+
 def test_fresh_evac_charging_read_is_physically_active() -> None:
     class EvacState:
         charger_type = "evac"

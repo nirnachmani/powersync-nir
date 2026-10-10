@@ -6,10 +6,16 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Mapping
 
+try:
+    from ..const import DOMAIN
+except ImportError:  # Lightweight behavior tests load this module by path.
+    DOMAIN = "powersync_nir"
+
 
 GENERIC_ACTIVE_POWER_EPSILON_KW = 0.05
 DEFAULT_FRESHNESS_SECONDS = 90
 DEFAULT_COMMAND_FRESHNESS_SECONDS = 90
+_RECONCILIATION_STATE_STORAGE_KEY = "_shared_loadpoint_reconciliation_state"
 
 
 @dataclass(frozen=True)
@@ -42,6 +48,78 @@ class ReconciliationState:
     active_profile_id: str | None = None
     stop_outcome: dict[str, Any] | None = None
     observed_session_token: str | None = None
+
+
+def _automation_store(hass: Any, config_entry: Any) -> Any | None:
+    """Return this entry's storage without creating runtime or policy state."""
+    entry = getattr(hass, "data", {}).get(DOMAIN, {}).get(config_entry.entry_id, {})
+    return entry.get("automation_store") if isinstance(entry, Mapping) else None
+
+
+async def persist_reconciliation_state(
+    hass: Any,
+    config_entry: Any,
+    binding_id: str,
+    state: ReconciliationState,
+) -> None:
+    """Persist one private physical-session record for this entry's binding."""
+    store = _automation_store(hass, config_entry)
+    data = getattr(store, "_data", None)
+    if not isinstance(data, dict):
+        return
+    data[_RECONCILIATION_STATE_STORAGE_KEY] = {
+        "binding_id": binding_id,
+        "origin": state.origin,
+        "physical_active": state.physical_active,
+        "active_profile_id": state.active_profile_id,
+        "stop_outcome": dict(state.stop_outcome) if state.stop_outcome is not None else None,
+        "observed_session_token": state.observed_session_token,
+    }
+    save = getattr(store, "async_save", None)
+    if save is None:
+        return
+    result = save()
+    if hasattr(result, "__await__"):
+        await result
+
+
+def load_reconciliation_state(
+    hass: Any,
+    config_entry: Any,
+    binding_id: str,
+) -> ReconciliationState:
+    """Load only the record for this binding; unrelated or malformed data is unknown."""
+    store = _automation_store(hass, config_entry)
+    data = getattr(store, "_data", None)
+    record = data.get(_RECONCILIATION_STATE_STORAGE_KEY) if isinstance(data, Mapping) else None
+    if not isinstance(record, Mapping) or record.get("binding_id") != binding_id:
+        return ReconciliationState()
+    origin = record.get("origin")
+    if not isinstance(origin, str):
+        origin = "unknown"
+    return ReconciliationState(
+        origin=origin,
+        physical_active=(
+            record.get("physical_active")
+            if isinstance(record.get("physical_active"), bool)
+            else None
+        ),
+        active_profile_id=(
+            record.get("active_profile_id")
+            if isinstance(record.get("active_profile_id"), str)
+            else None
+        ),
+        stop_outcome=(
+            dict(record["stop_outcome"])
+            if isinstance(record.get("stop_outcome"), Mapping)
+            else None
+        ),
+        observed_session_token=(
+            record.get("observed_session_token")
+            if isinstance(record.get("observed_session_token"), str)
+            else None
+        ),
+    )
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
