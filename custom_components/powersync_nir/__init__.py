@@ -43124,6 +43124,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 from .automations.actions import (
                     _action_start_ev_charging_dynamic,
                     _dynamic_ev_state,
+                    _preflight_shared_solar_surplus_decision,
+                    _record_automated_shared_loadpoint_decision,
                     stop_solar_surplus_ev_charging,
                 )
                 from .solar_surplus_config import (
@@ -43169,6 +43171,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         # Don't start new vehicles if parallel is disabled and one is already active
                         if not allow_parallel and surplus_session_active:
                             configs_to_start = []
+
+                        from .automations.shared_loadpoint import (
+                            canonical_shared_loadpoint_id,
+                            resolve_active_shared_profile,
+                        )
+
+                        selected_shared_profile_id = resolve_active_shared_profile(hass, entry)
+                        selected_shared_loadpoint_id = (
+                            canonical_shared_loadpoint_id(entry, selected_shared_profile_id)
+                            if selected_shared_profile_id is not None
+                            else None
+                        )
 
                         for vc in configs_to_start:
                             # Get phases from vehicle config, falling back to auto-schedule
@@ -43273,6 +43287,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 params["vehicle_vin"] = vc["vehicle_id"]
                             if vc.get("display_name"):
                                 params["vehicle_name"] = vc["display_name"]
+
+                            shared_candidate_matches_selected_loadpoint = (
+                                vc.get("vehicle_id") == selected_shared_profile_id
+                                and (
+                                    (
+                                        selected_shared_loadpoint_id == "generic_ev"
+                                        and vc_charger_type == "generic"
+                                    )
+                                    or (
+                                        selected_shared_loadpoint_id == "sigenergy_charger"
+                                        and vc_charger_type == "sigenergy"
+                                    )
+                                )
+                            )
+                            if shared_candidate_matches_selected_loadpoint:
+                                solar_decision = await _preflight_shared_solar_surplus_decision(
+                                    hass, entry
+                                )
+                                if solar_decision is not None:
+                                    _record_automated_shared_loadpoint_decision(
+                                        hass,
+                                        entry,
+                                        allowed=solar_decision["allowed"],
+                                        responsible_mode="solar_surplus",
+                                        reason=solar_decision["reason"],
+                                        source=solar_decision["source"],
+                                    )
 
                             _LOGGER.info(
                                 f"☀️ Solar surplus charging enabled in app — starting dynamic solar surplus session "
