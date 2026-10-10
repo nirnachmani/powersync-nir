@@ -1,6 +1,7 @@
 # Reference template: `powersync-private-updates`
 
-Use this as a repository-side reference for a portable maintenance skill on a
+Use this as a repository-side reference for a portable maintenance skill on the
+private `nirnachmani/powersync-nir` repository, on a
 separate server. It defines local source-maintenance gates only; it does not
 deploy, install an update agent, or change a public upstream repository.
 
@@ -30,7 +31,8 @@ classification, and report path. It may merge and commit only in that registered
 candidate after both gates pass. Any other classification requires a report and
 compatible-resolution work; no automatic merge is permitted.
 
-The validator is read-only and checks explicit selection/no first-profile
+The validator is read-only and checks the restored
+`custom_components/power_sync` component path, explicit selection/no first-profile
 fallback, Generic/EVAC guard seams, reconciler isolation from hardware and mode
 calculation, Android contract coverage, and the diagnostics route.
 

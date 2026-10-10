@@ -14,6 +14,8 @@
 
 </div>
 
+> **Private fork repository:** [`nirnachmani/powersync-nir`](https://github.com/nirnachmani/powersync-nir). The repository identity is private; the installed Home Assistant integration remains **PowerSync** with domain `power_sync` for compatibility.
+
 > **Disclaimer:** This is an unofficial integration and is not affiliated with or endorsed by Tesla, Sigenergy, Sungrow, FoxESS, GoodWe, AlphaESS, ESY Sunhome, Solax, SAJ, Fronius, SolarEdge, Neovolt, Bytewatt, Anker, Amber Electric, Localvolts, Flow Power, AGL, GloBird, CovaU, SA Power Networks, Octopus Energy, EPEX/ENTSO-E, or AEMO. Use at your own risk.
 
 > [!WARNING]
@@ -97,7 +99,7 @@ Solar inverters that bypass the battery can be curtailed during negative feed-in
 ## Quick Start
 
 1. **Install** via [HACS](#installation) (custom repository)
-2. **Add Integration** — Settings > Devices & Services > Add Integration > "PowerSync Nir"
+2. **Add Integration** — Settings > Devices & Services > Add Integration > "PowerSync"
 3. **Pick your electricity provider** and enter API credentials if required
 4. **Connect your battery system** and enter connection details, or choose **Custom / external controller** and select your existing Home Assistant telemetry entities
 5. **Done!** Sensors appear automatically and a **PowerSync dashboard** is auto-created in your sidebar. Enable [Smart Optimization](https://github.com/bolagnaise/PowerSync/wiki/Smart-Optimization) for automated scheduling, or install the [Mobile App](#mobile-app) for remote control.
@@ -118,12 +120,12 @@ Solar inverters that bypass the battery can be curtailed during negative feed-in
 
 ### Steps
 
-[![Add Repository to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=bolagnaise&repository=PowerSync&category=integration)
+[![Add Repository to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=nirnachmani&repository=powersync-nir&category=integration)
 
 Or manually:
 
 1. Open HACS > three dots > Custom repositories
-2. Add `https://github.com/bolagnaise/PowerSync` (Category: Integration)
+2. Add `https://github.com/nirnachmani/powersync-nir` (Category: Integration)
 3. Download PowerSync and restart Home Assistant
 4. Settings > Devices & Services > Add Integration > "PowerSync"
 5. Follow the guided setup for your provider and battery system

@@ -5,7 +5,7 @@ current repository only; it is not a deployment or upstream-update procedure.
 
 ## Shared physical loadpoint selection and binding
 
-- `custom_components/powersync_nir/automations/shared_loadpoint.py` defines the
+- `custom_components/power_sync/automations/shared_loadpoint.py` defines the
   two logical IDs (`shared_ev_profile_a`, `shared_ev_profile_b`) and
   `SharedLoadpointBinding`.
 - A binding requires a selector entity, distinct profile names, and distinct
@@ -86,14 +86,14 @@ canonical identity and ownership checks; they are not API payload bypasses.
 
 ## Directly coupled files
 
-- `custom_components/powersync_nir/automations/shared_loadpoint.py`
-- `custom_components/powersync_nir/automations/actions.py`
-- `custom_components/powersync_nir/automations/ev_charging_planner.py`
-- `custom_components/powersync_nir/automations/external_session_reconciler.py`
-- `custom_components/powersync_nir/automations/ev_ownership.py`
-- `custom_components/powersync_nir/automations/ev_charging_session.py`
-- `custom_components/powersync_nir/automations/shared_loadpoint_diagnostics.py`
-- `custom_components/powersync_nir/__init__.py`
+- `custom_components/power_sync/automations/shared_loadpoint.py`
+- `custom_components/power_sync/automations/actions.py`
+- `custom_components/power_sync/automations/ev_charging_planner.py`
+- `custom_components/power_sync/automations/external_session_reconciler.py`
+- `custom_components/power_sync/automations/ev_ownership.py`
+- `custom_components/power_sync/automations/ev_charging_session.py`
+- `custom_components/power_sync/automations/shared_loadpoint_diagnostics.py`
+- `custom_components/power_sync/__init__.py`
 - `tests/test_shared_loadpoint_*.py`, `tests/test_external_session_reconciler.py`,
   `tests/test_android_app_contract.py`, and
   `tests/test_android_app_multi_vehicle_contract.py`
