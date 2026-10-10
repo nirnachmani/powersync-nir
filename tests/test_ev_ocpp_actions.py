@@ -408,6 +408,81 @@ class _Entry:
     options = {}
 
 
+def test_automated_shared_sequence_budget_reuses_profile_token_and_rejects_competitor():
+    hass = _Hass([_State("sensor.connected_vehicle", "tank")])
+    entry = _Entry()
+    entry.options = {
+        "generic_charger_enabled": True,
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Tesla",
+        "shared_loadpoint_profile_b_state": "tesla",
+    }
+    first = {
+        "charger_type": "generic",
+        "shared_loadpoint_binding": True,
+        "logical_vehicle_id": "shared_ev_profile_a",
+    }
+    nested_write = dict(first)
+    competitor = {
+        "charger_type": "generic",
+        "shared_loadpoint_binding": True,
+        "logical_vehicle_id": "shared_ev_profile_b",
+    }
+
+    actions._begin_automated_shared_loadpoint_cycle(hass, entry)
+    assert actions._reserve_automated_shared_loadpoint_sequence(hass, entry, first) is True
+    assert actions._reserve_automated_shared_loadpoint_sequence(hass, entry, nested_write) is True
+    assert nested_write["_automated_shared_sequence_token"] is first[
+        "_automated_shared_sequence_token"
+    ]
+    assert actions._reserve_automated_shared_loadpoint_sequence(hass, entry, competitor) is False
+    actions._clear_automated_shared_loadpoint_cycle(hass, entry)
+    assert "_automated_shared_loadpoint_sequence_budget" not in hass.data["powersync_nir"][
+        "entry-1"
+    ]
+
+
+def test_unchecked_dynamic_shared_command_rejects_competing_sequence_before_io(monkeypatch):
+    hass = _Hass([
+        _State("sensor.connected_vehicle", "tank"),
+        _State("switch.shared_ev", "off"),
+    ])
+    entry = _Entry()
+    entry.options = {
+        "generic_charger_enabled": True,
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Tesla",
+        "shared_loadpoint_profile_b_state": "tesla",
+    }
+    first = {
+        "charger_type": "generic",
+        "shared_loadpoint_binding": True,
+        "logical_vehicle_id": "shared_ev_profile_a",
+    }
+    competitor = {
+        "charger_type": "generic",
+        "shared_loadpoint_binding": True,
+        "logical_vehicle_id": "shared_ev_profile_b",
+        "charger_switch_entity": "switch.shared_ev",
+    }
+
+    async def resolve(*_args, **_kwargs):
+        return "generic_ev", competitor
+
+    monkeypatch.setattr(actions, "_resolve_shared_loadpoint_direct_command", resolve)
+    actions._begin_automated_shared_loadpoint_cycle(hass, entry)
+    assert actions._reserve_automated_shared_loadpoint_sequence(hass, entry, first) is True
+
+    assert asyncio.run(
+        actions._set_vehicle_amps_unchecked(hass, entry, "generic_ev", 16, competitor)
+    ) is False
+    assert hass.services.calls == []
+
+
 def _set_external_policy(hass, vehicle_id: str, policy: str = "yield") -> None:
     hass.data["powersync_nir"]["entry-1"]["automation_store"] = SimpleNamespace(
         _data={

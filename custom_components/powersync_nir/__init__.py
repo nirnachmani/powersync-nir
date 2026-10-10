@@ -42984,7 +42984,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.debug("EV runtime restore failed: %s", err)
 
     # Set up automation evaluation timer (every 30 seconds)
-    async def auto_evaluate_automations(now):
+    auto_evaluation_lock = asyncio.Lock()
+
+    async def _auto_evaluate_automations_unlocked(now):
         """Evaluate all user automations and auto-schedule."""
         observed_tracker = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get(
             "observed_tesla_session_tracker"
@@ -43013,6 +43015,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
         except Exception as err:
             _LOGGER.debug("Shared loadpoint cycle reconciliation failed: %s", err)
+
+        from .automations.actions import _begin_automated_shared_loadpoint_cycle
+
+        _begin_automated_shared_loadpoint_cycle(hass, entry)
 
         try:
             triggered_count = await automation_engine.async_evaluate_all()
@@ -43285,6 +43291,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         except Exception as e:
             _LOGGER.debug(f"EV charging evaluation error: {e}")
+
+    async def auto_evaluate_automations(now):
+        """Serialize one entry's evaluation and clean its transient sequence budget."""
+        async with auto_evaluation_lock:
+            try:
+                await _auto_evaluate_automations_unlocked(now)
+            finally:
+                from .automations.actions import _clear_automated_shared_loadpoint_cycle
+
+                _clear_automated_shared_loadpoint_cycle(hass, entry)
 
     automation_cancel_timer = async_track_utc_time_change(
         hass,

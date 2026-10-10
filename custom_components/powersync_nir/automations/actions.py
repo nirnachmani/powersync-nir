@@ -6087,6 +6087,94 @@ _dynamic_ev_solar_update_locks: Dict[str, asyncio.Lock] = {}
 _phase_load_management_locks: Dict[str, asyncio.Lock] = {}
 _phase_load_management_targets: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
+_AUTOMATED_SHARED_SEQUENCE_BUDGET_KEY = "_automated_shared_loadpoint_sequence_budget"
+_AUTOMATED_SHARED_SEQUENCE_TOKEN_KEY = "_automated_shared_sequence_token"
+
+
+def _automated_shared_sequence_entry_data(
+    hass: HomeAssistant, config_entry: ConfigEntry | None
+) -> dict[str, Any] | None:
+    """Return the transient entry data used only by an auto-evaluation cycle."""
+    if config_entry is None:
+        return None
+    entry_data = getattr(hass, "data", {}).get(DOMAIN, {}).get(config_entry.entry_id)
+    return entry_data if isinstance(entry_data, dict) else None
+
+
+def _begin_automated_shared_loadpoint_cycle(
+    hass: HomeAssistant, config_entry: ConfigEntry
+) -> None:
+    """Start a private, per-evaluation shared-loadpoint sequence budget."""
+    entry_data = _automated_shared_sequence_entry_data(hass, config_entry)
+    if entry_data is not None:
+        entry_data[_AUTOMATED_SHARED_SEQUENCE_BUDGET_KEY] = {
+            "generation": object(),
+            "reservations": {},
+        }
+
+
+def _clear_automated_shared_loadpoint_cycle(
+    hass: HomeAssistant, config_entry: ConfigEntry
+) -> None:
+    """Discard the private budget when its auto-evaluation cycle completes."""
+    entry_data = _automated_shared_sequence_entry_data(hass, config_entry)
+    if entry_data is not None:
+        entry_data.pop(_AUTOMATED_SHARED_SEQUENCE_BUDGET_KEY, None)
+
+
+def _reserve_automated_shared_loadpoint_sequence(
+    hass: HomeAssistant, config_entry: ConfigEntry | None, params: dict[str, Any]
+) -> bool:
+    """Reserve one shared physical command sequence for this auto-evaluation.
+
+    Direct and manual commands run without a cycle budget and deliberately keep
+    their existing behavior.  Within an active automated cycle, nested writes
+    from the same logical profile receive the original opaque token while a
+    competing profile is refused before it can reach hardware.
+    """
+    if not params.get("shared_loadpoint_binding"):
+        return True
+    entry_data = _automated_shared_sequence_entry_data(hass, config_entry)
+    if entry_data is None:
+        return True
+    budget = entry_data.get(_AUTOMATED_SHARED_SEQUENCE_BUDGET_KEY)
+    if not isinstance(budget, dict):
+        return True
+
+    logical_profile_id = str(
+        params.get("active_logical_vehicle_id")
+        or params.get("logical_vehicle_id")
+        or ""
+    )
+    charger_type = str(params.get("charger_type") or "").strip().lower()
+    if not logical_profile_id or charger_type not in ("generic", "sigenergy"):
+        return False
+    from .shared_loadpoint import canonical_shared_loadpoint_id
+
+    loadpoint_id = canonical_shared_loadpoint_id(
+        config_entry, logical_profile_id, charger_type
+    )
+    if loadpoint_id not in ("generic_ev", "sigenergy_charger"):
+        return False
+    reservations = budget.setdefault("reservations", {})
+    reservation = reservations.get(loadpoint_id)
+    if reservation is None:
+        reservation = {
+            "logical_profile_id": logical_profile_id,
+            "token": object(),
+        }
+        reservations[loadpoint_id] = reservation
+    if reservation.get("logical_profile_id") != logical_profile_id:
+        _LOGGER.info(
+            "Shared loadpoint automated command blocked: %s is already reserved "
+            "by logical profile %s for this evaluation cycle",
+            loadpoint_id,
+            reservation.get("logical_profile_id"),
+        )
+        return False
+    params[_AUTOMATED_SHARED_SEQUENCE_TOKEN_KEY] = reservation["token"]
+    return True
+
 # Global storage for regular EV charging scheduled stop (for stop_outside_window)
 _ev_scheduled_stop: Dict[str, Any] = {}
 
@@ -7712,6 +7800,8 @@ async def _set_vehicle_amps_unchecked(
     if resolved_command is None:
         return False
     vehicle_id, params = resolved_command
+    if not _reserve_automated_shared_loadpoint_sequence(hass, config_entry, params):
+        return False
     charger_type = params.get("charger_type", "tesla")
 
     if charger_type == "tesla":
