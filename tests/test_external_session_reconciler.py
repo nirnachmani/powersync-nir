@@ -1,5 +1,6 @@
 """Behavior tests for pure shared-loadpoint observation reconciliation."""
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 import importlib.util
 from pathlib import Path
@@ -25,6 +26,119 @@ SPEC.loader.exec_module(module)
 
 UTC = timezone.utc
 NOW = datetime(2026, 10, 10, 4, 0, tzinfo=UTC)
+
+
+def test_fresh_evac_charging_read_is_physically_active() -> None:
+    class EvacState:
+        charger_type = "evac"
+        is_connected = True
+        is_charging = True
+        power_kw = 7.2
+
+    async def read_state():
+        return EvacState()
+
+    reconcile = getattr(module, "reconcile_evac_session_from_reader", None)
+    assert reconcile is not None
+
+    state = asyncio.run(
+        reconcile(
+            object(),
+            object(),
+            "shared-garage-loadpoint",
+            read_state=read_state,
+            now=NOW,
+            get_last_commands=lambda hass, entry: {},
+        )
+    )
+
+    assert state.physical_active is True
+    assert state.origin == "external"
+
+
+def test_fresh_evac_idle_read_is_physically_inactive() -> None:
+    class EvacState:
+        charger_type = "evac"
+        is_connected = True
+        is_charging = False
+        power_kw = None
+
+    async def read_state():
+        return EvacState()
+
+    state = asyncio.run(
+        module.reconcile_evac_session_from_reader(
+            object(),
+            object(),
+            "shared-garage-loadpoint",
+            read_state=read_state,
+            now=NOW,
+            get_last_commands=lambda hass, entry: {},
+        )
+    )
+
+    assert state.physical_active is False
+    assert state.origin == "unknown"
+
+
+@pytest.mark.parametrize("read_fails", [False, True])
+def test_failed_or_unknown_evac_read_is_indeterminate(read_fails: bool) -> None:
+    async def read_state():
+        if read_fails:
+            raise RuntimeError("Modbus unavailable")
+        return None
+
+    state = asyncio.run(
+        module.reconcile_evac_session_from_reader(
+            object(),
+            object(),
+            "shared-garage-loadpoint",
+            read_state=read_state,
+            now=NOW,
+            get_last_commands=lambda hass, entry: {},
+        )
+    )
+
+    assert state.physical_active is None
+    assert state.origin == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_origin"),
+    [
+        (
+            {"at": NOW.isoformat(), "source": "powersync", "success": True},
+            "powersync",
+        ),
+        ({"at": NOW.isoformat(), "source": "external", "success": True}, "external"),
+    ],
+)
+def test_fresh_evac_charging_uses_canonical_command_ledger_origin(
+    command: dict[str, object],
+    expected_origin: str,
+) -> None:
+    class EvacState:
+        charger_type = "evac"
+        is_connected = True
+        is_charging = True
+        power_kw = 7.2
+
+    async def read_state():
+        return EvacState()
+
+    state = asyncio.run(
+        module.reconcile_evac_session_from_reader(
+            object(),
+            object(),
+            "shared-garage-loadpoint",
+            read_state=read_state,
+            now=NOW,
+            get_last_commands=lambda hass, entry: {"shared-garage-loadpoint": command},
+        )
+    )
+
+    assert state.physical_active is True
+    assert state.origin == expected_origin
 
 
 def test_fresh_positive_generic_power_without_powersync_command_is_external() -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Mapping
+from typing import Any, Awaitable, Callable, Mapping
 
 
 GENERIC_ACTIVE_POWER_EPSILON_KW = 0.05
@@ -26,6 +26,11 @@ class SharedLoadpointObservation:
     @property
     def fresh_power(self) -> bool:
         return self.evidence == "fresh_power" and self.power_kw is not None
+
+    @property
+    def fresh(self) -> bool:
+        """Return whether this is a successful current physical read."""
+        return self.fresh_power or self.evidence == "fresh_evac_state"
 
 
 @dataclass
@@ -127,6 +132,36 @@ def generic_observation_from_hass(
     )
 
 
+def evac_observation_from_state(
+    *,
+    binding_id: str,
+    state: Any | None,
+) -> SharedLoadpointObservation:
+    """Map one just-read normalized EVAC state into the reconciler contract."""
+    if state is None or str(getattr(state, "charger_type", "")).lower() != "evac":
+        return SharedLoadpointObservation(
+            binding_id=binding_id,
+            connected=None,
+            charging=None,
+            power_kw=None,
+            observed_at=None,
+            evidence="failed_or_unknown_evac_read",
+        )
+    try:
+        power_kw = getattr(state, "power_kw", None)
+        numeric_power = max(0.0, float(power_kw)) if power_kw is not None else None
+    except (TypeError, ValueError):
+        numeric_power = None
+    return SharedLoadpointObservation(
+        binding_id=binding_id,
+        connected=bool(getattr(state, "is_connected", False)),
+        charging=bool(getattr(state, "is_charging", False)),
+        power_kw=numeric_power,
+        observed_at=None,
+        evidence="fresh_evac_state",
+    )
+
+
 def _recent_successful_powersync_command(
     commands: Mapping[str, Mapping[str, Any]],
     *,
@@ -197,6 +232,45 @@ def reconcile_generic_session_from_hass(
     )
 
 
+async def reconcile_evac_session_from_reader(
+    hass: Any,
+    config_entry: Any,
+    loadpoint_id: str,
+    *,
+    read_state: Callable[[], Awaitable[Any | None]],
+    previous: ReconciliationState | None = None,
+    active_profile_id: str | None = None,
+    now: datetime | None = None,
+    command_freshness_seconds: int = DEFAULT_COMMAND_FRESHNESS_SECONDS,
+    get_last_commands: Callable[[Any, Any], Mapping[str, Mapping[str, Any]]] | None = None,
+) -> ReconciliationState:
+    """Reconcile a freshly read Sigenergy EVAC state with the command ledger."""
+    current = _as_utc(now) or datetime.now(timezone.utc)
+    try:
+        observation = evac_observation_from_state(
+            binding_id=loadpoint_id,
+            state=await read_state(),
+        )
+    except Exception:
+        observation = evac_observation_from_state(binding_id=loadpoint_id, state=None)
+    if get_last_commands is None:
+        from .ev_ownership import get_ev_last_commands
+
+        get_last_commands = get_ev_last_commands
+    powersync_command_observed = _recent_successful_powersync_command(
+        get_last_commands(hass, config_entry),
+        loadpoint_id=loadpoint_id,
+        now=current,
+        freshness_seconds=command_freshness_seconds,
+    )
+    return reconcile_shared_external_session(
+        observation,
+        previous=previous,
+        powersync_command_observed=powersync_command_observed,
+        active_profile_id=active_profile_id,
+    )
+
+
 def reconcile_shared_external_session(
     observation: SharedLoadpointObservation,
     *,
@@ -206,7 +280,7 @@ def reconcile_shared_external_session(
 ) -> ReconciliationState:
     """Classify one observed physical state without deciding a charging policy."""
     state = previous or ReconciliationState()
-    if not observation.fresh_power:
+    if not observation.fresh:
         state.origin = "unknown"
         state.physical_active = None
         if state.stop_outcome and state.stop_outcome.get("status") == "pending":
