@@ -6095,6 +6095,44 @@ def cleanup_dynamic_ev_entry(hass: HomeAssistant, entry_id: str) -> None:
         entry_data.pop("dynamic_ev_state", None)
 
 
+def _fence_shared_handoff_runtime(
+    hass: HomeAssistant,
+    entry_id: str,
+    vehicle_id: str,
+    state: dict[str, Any],
+) -> None:
+    """Fence an outgoing shared runtime before its physical stop is dispatched.
+
+    The stopped runtime remains stored, with its original physical parameters,
+    until fresh readback confirms idle.  Marking it inactive first makes an
+    already-scheduled callback fail its identity/active guard before it can
+    send a stale rate or start command.
+    """
+    state["handoff_settling"] = True
+    state["active"] = False
+    for timer_key in ("cancel_timer", "quick_stop_timer"):
+        cancel_timer = state.get(timer_key)
+        if callable(cancel_timer):
+            try:
+                cancel_timer()
+            except Exception as err:
+                _LOGGER.debug(
+                    "Dynamic EV: failed to cancel shared handoff %s for %s: %s",
+                    timer_key,
+                    vehicle_id,
+                    err,
+                )
+        state[timer_key] = None
+
+    entry_data = (
+        hass.data.get(DOMAIN, {}).get(entry_id)
+        if isinstance(getattr(hass, "data", None), dict)
+        else None
+    )
+    if isinstance(entry_data, dict):
+        entry_data["dynamic_ev_state"] = _dynamic_ev_state.get(entry_id, {})
+
+
 def record_smart_schedule_effective_authorization(
     config_entry: ConfigEntry,
     vehicle_id: str,
@@ -12671,6 +12709,13 @@ async def _action_start_ev_charging_dynamic_locked(
         existing_state = entry_vehicles.get(vehicle_id)
         if (
             isinstance(existing_state, dict)
+            and existing_state.get("handoff_settling")
+        ):
+            # A failed/unknown/timed-out stop leaves the outgoing physical
+            # runtime fenced until a later reconciliation can prove it idle.
+            return False
+        if (
+            isinstance(existing_state, dict)
             and existing_state.get("active")
             and requested_profile_id
             and existing_state.get("active_profile_id") != requested_profile_id
@@ -12747,6 +12792,20 @@ async def _action_start_ev_charging_dynamic_locked(
             if observation.charging is not True:
                 return False
 
+            # Fence the outgoing controller before any awaited stop command.
+            # Its old physical parameters remain in state for stop/readback,
+            # but a queued periodic tick now fails its active-session guard.
+            _fence_shared_handoff_runtime(
+                hass, entry_id, vehicle_id, existing_state
+            )
+            old_stop_params = {
+                **old_params,
+                # The current selector authorizes this one physical stop while
+                # the old transport configuration remains authoritative.
+                "active_logical_vehicle_id": requested_profile_id,
+                "logical_vehicle_id": requested_profile_id,
+            }
+
             async def persist_handoff(updated_reconciliation):
                 await persist_reconciliation_state(
                     hass, config_entry, vehicle_id, updated_reconciliation
@@ -12757,16 +12816,10 @@ async def _action_start_ev_charging_dynamic_locked(
                 # stop_charging path. Never turn an active shared handoff into
                 # an ambiguous 0A rate update.
                 return await _action_stop_ev_charging(
-                    hass, config_entry, dict(old_params)
+                    hass, config_entry, dict(old_stop_params)
                 )
 
             async def finalize_old_physical_session():
-                cancel_timer = existing_state.get("cancel_timer")
-                if callable(cancel_timer):
-                    cancel_timer()
-                quick_stop_timer = existing_state.get("quick_stop_timer")
-                if callable(quick_stop_timer):
-                    quick_stop_timer()
                 try:
                     from .ev_charging_session import get_session_manager
 

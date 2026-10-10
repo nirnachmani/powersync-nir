@@ -208,3 +208,38 @@ def test_selected_logical_evac_id_reaches_canonical_current_command(monkeypatch)
     assert result is True
     assert set_amps.await_args.args[2]["vehicle_id"] == "sigenergy_charger"
     assert set_amps.await_args.args[2]["logical_vehicle_id"] == "shared_ev_profile_a"
+
+
+def test_active_shared_handoff_fences_interleaved_old_periodic_write(monkeypatch):
+    """The old callback cannot write after handoff begins but before its stop returns."""
+    hass = _Hass()
+    entry = _Entry()
+    old_params = {
+        **_generic_params(),
+        "dynamic_mode": "battery_target",
+        "fixed_charge_amps": 16,
+    }
+    timer_cancelled = []
+    old_state = {
+        "active": True,
+        "active_profile_id": "shared_ev_profile_a",
+        "params": old_params,
+        "current_amps": 8,
+        "cancel_timer": lambda: timer_cancelled.append("periodic"),
+    }
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state[entry.entry_id] = {"generic_ev": old_state}
+    set_amps = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", set_amps)
+
+    actions._fence_shared_handoff_runtime(
+        hass, entry.entry_id, "generic_ev", old_state
+    )
+    asyncio.run(actions._dynamic_ev_update(hass, entry, entry.entry_id, "generic_ev"))
+
+    assert timer_cancelled == ["periodic"]
+    assert old_state["handoff_settling"] is True
+    assert old_state["active"] is False
+    assert old_state["params"] is old_params
+    assert hass.data["powersync_nir"][entry.entry_id]["dynamic_ev_state"]["generic_ev"] is old_state
+    set_amps.assert_not_awaited()
