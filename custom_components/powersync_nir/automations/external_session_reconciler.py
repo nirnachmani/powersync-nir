@@ -86,6 +86,46 @@ def generic_power_observation(
     )
 
 
+def generic_observation_from_hass(
+    hass: Any,
+    *,
+    binding_id: str,
+    params: dict[str, Any],
+    now: datetime | None = None,
+    freshness_seconds: int = DEFAULT_FRESHNESS_SECONDS,
+) -> SharedLoadpointObservation:
+    """Read only Generic-Charger power telemetry into the reconciler contract."""
+    entity_id = str(params.get("charger_power_entity") or "").strip()
+    state = hass.states.get(entity_id) if entity_id else None
+    if state is None:
+        return generic_power_observation(
+            binding_id=binding_id,
+            power_kw=None,
+            observed_at=None,
+            now=now,
+            freshness_seconds=freshness_seconds,
+        )
+    try:
+        power = float(getattr(state, "state", ""))
+    except (TypeError, ValueError):
+        power = None
+    unit = str(getattr(state, "attributes", {}).get("unit_of_measurement") or "").lower()
+    if power is not None and unit in ("w", "watt", "watts"):
+        power /= 1000
+    observed_at = (
+        getattr(state, "last_reported", None)
+        or getattr(state, "last_updated", None)
+        or getattr(state, "last_changed", None)
+    )
+    return generic_power_observation(
+        binding_id=binding_id,
+        power_kw=power,
+        observed_at=observed_at,
+        now=now,
+        freshness_seconds=freshness_seconds,
+    )
+
+
 def reconcile_shared_external_session(
     observation: SharedLoadpointObservation,
     *,

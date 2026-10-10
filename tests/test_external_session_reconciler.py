@@ -105,3 +105,29 @@ def test_fresh_zero_power_confirms_pending_stop() -> None:
 
     assert state.physical_active is False
     assert state.stop_outcome == {"status": "confirmed"}
+
+
+def test_generic_hass_observation_uses_fresh_power_entity() -> None:
+    class State:
+        state = "7200"
+        last_updated = NOW
+        attributes = {"unit_of_measurement": "W"}
+
+    class Hass:
+        class states:
+            @staticmethod
+            def get(entity_id):
+                return State() if entity_id == "sensor.charger_power" else None
+
+    observe = getattr(module, "generic_observation_from_hass", None)
+    assert observe is not None
+    observation = observe(
+        Hass(),
+        binding_id="garage",
+        params={"charger_power_entity": "sensor.charger_power"},
+        now=NOW,
+    )
+
+    assert observation.evidence == "fresh_power"
+    assert observation.power_kw == 7.2
+    assert observation.charging is True
