@@ -10,6 +10,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
 
@@ -1176,8 +1178,45 @@ def test_shared_logical_profile_uses_fresh_cache_for_forecast_only():
     assert executor._shared_profile_soc_metadata["shared_ev_profile_a"]["source"] == "cache"
 
 
-def test_shared_restart_discards_ambiguous_invalid_and_expired_soc_caches():
-    """A shared binding never inherits anonymous cache authority after restart."""
+@pytest.mark.parametrize(
+    ("invalid_id", "invalid_entry"),
+    [
+        ("_default", lambda now: {"soc": 99, "updated": now.isoformat()}),
+        ("generic_ev", lambda now: {"soc": 88, "updated": now.isoformat()}),
+        ("shared_ev_profile_b", lambda now: {"soc": "not-a-number", "updated": now.isoformat()}),
+        (
+            "shared_ev_profile_b",
+            lambda now: {
+                "soc": 66,
+                "updated": (now + timedelta(seconds=1)).isoformat(),
+            },
+        ),
+        (
+            "shared_ev_profile_b",
+            lambda now: {
+                "soc": 66,
+                "updated": (
+                    now - ev_planner.SHARED_PROFILE_SOC_CACHE_MAX_AGE - timedelta(seconds=1)
+                ).isoformat(),
+            },
+        ),
+        ("shared_ev_profile_b", lambda now: {"soc": -0.1, "updated": now.isoformat()}),
+        ("shared_ev_profile_b", lambda now: {"soc": 100.1, "updated": now.isoformat()}),
+    ],
+    ids=(
+        "anonymous-default",
+        "anonymous-generic",
+        "malformed",
+        "future",
+        "valid-but-expired",
+        "finite-below-range",
+        "finite-above-range",
+    ),
+)
+def test_shared_restart_discards_each_invalid_soc_cache(
+    invalid_id, invalid_entry
+):
+    """Every invalid cache class is independently unable to control recovery."""
     entry = types.SimpleNamespace(
         data={},
         options={
@@ -1189,18 +1228,11 @@ def test_shared_restart_discards_ambiguous_invalid_and_expired_soc_caches():
             "shared_loadpoint_profile_b_state": "tesla",
         },
     )
+    now = datetime.now()
     stored_data = {
         "cached_vehicle_soc": {
-            "_default": {"soc": 99, "updated": datetime.now().isoformat()},
-            "generic_ev": {"soc": 88, "updated": datetime.now().isoformat()},
-            "shared_ev_profile_a": {"soc": 31, "updated": datetime.now().isoformat()},
-            "shared_ev_profile_b": {
-                "soc": "not-a-number",
-                "updated": (
-                    datetime.now() - ev_planner.SHARED_PROFILE_SOC_CACHE_MAX_AGE
-                    - timedelta(seconds=1)
-                ).isoformat(),
-            },
+            "shared_ev_profile_a": {"soc": 31, "updated": now.isoformat()},
+            invalid_id: invalid_entry(now),
         }
     }
 

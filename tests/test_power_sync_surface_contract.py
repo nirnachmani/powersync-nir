@@ -13,6 +13,78 @@ COMPONENT = ROOT / "custom_components" / "power_sync"
 BASELINE = "v2.12.1363"
 BASELINE_COMMIT = "85f99ea62a174cd9153d5ff2ce71023dda2c9a5c"
 OPTIMIZATION = Path("custom_components/power_sync/optimization")
+COORDINATOR = OPTIMIZATION / "coordinator.py"
+
+
+def _expected_optimizer_coordinator_source() -> str:
+    """Return baseline coordinator plus the one reviewed shared-LP guard."""
+    baseline = _git_show(BASELINE_COMMIT, COORDINATOR)
+    expected = baseline.replace(
+        """            from ..automations.ev_charging_planner import (
+                get_auto_schedule_executor,
+                is_smart_schedule_grid_price_allowed,
+            )
+            from ..const import DOMAIN
+""",
+        """            from ..automations.ev_charging_planner import (
+                get_auto_schedule_executor,
+                is_smart_schedule_grid_price_allowed,
+            )
+            from ..automations.shared_loadpoint import (
+                PROFILE_A_ID,
+                PROFILE_B_ID,
+                binding_for_entry,
+                canonical_shared_loadpoint_id,
+                resolve_active_shared_profile,
+            )
+            from ..const import DOMAIN
+""",
+        1,
+    ).replace(
+        """            now = dt_util.now()
+            plans = []
+            policy_diagnostics: dict[str, dict[str, Any]] = {}
+            for vehicle_id, state in (getattr(executor, "_state", {}) or {}).items():
+""",
+        """            now = dt_util.now()
+            plans = []
+            policy_diagnostics: dict[str, dict[str, Any]] = {}
+            shared_binding = binding_for_entry(executor.config_entry)
+            selected_shared_profile = (
+                resolve_active_shared_profile(
+                    getattr(self, "hass", None), executor.config_entry
+                )
+                if shared_binding is not None
+                else None
+            )
+            shared_physical_loadpoint = (
+                canonical_shared_loadpoint_id(
+                    executor.config_entry, PROFILE_A_ID
+                )
+                if shared_binding is not None
+                else None
+            )
+            for vehicle_id, state in (getattr(executor, "_state", {}) or {}).items():
+                if (
+                    shared_binding is not None
+                    and (
+                        vehicle_id == shared_physical_loadpoint
+                        or (
+                            vehicle_id in (PROFILE_A_ID, PROFILE_B_ID)
+                            and vehicle_id != selected_shared_profile
+                        )
+                    )
+                ):
+                    # The planner normally clears this at its availability
+                    # boundary. Keep this narrow read-side guard for restored
+                    # or selector-race state so two logical profiles cannot
+                    # reach the LP as one physical Generic/EVAC loadpoint.
+                    continue
+""",
+        1,
+    )
+    assert expected != baseline
+    return expected
 
 
 def _git(*args: str) -> str:
@@ -61,9 +133,15 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
     assert restored_files == baseline_files
     for relative_name in baseline_files:
         relative_path = Path(relative_name)
-        assert (ROOT / relative_path).read_text(encoding="utf-8").replace(
+        actual = (ROOT / relative_path).read_text(encoding="utf-8").replace(
             "\r\n", "\n"
-        ) == _git_show(BASELINE_COMMIT, relative_path)
+        )
+        expected = (
+            _expected_optimizer_coordinator_source()
+            if relative_path == COORDINATOR
+            else _git_show(BASELINE_COMMIT, relative_path)
+        )
+        assert actual == expected
 
 
 def test_dashboard_assets_are_served_from_restored_power_sync_namespace():
