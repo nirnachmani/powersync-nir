@@ -619,7 +619,7 @@ async def resolve_end_of_cycle_external_shared_session(
     now: datetime | None,
     external_control_policy: str,
     cycle_ledger: Mapping[str, Any] | None,
-    get_lease: Callable[[], Mapping[str, Any] | None],
+    get_lease: Callable[[], Mapping[str, Any] | None] | None,
     ensure_external_ownership: Callable[[str], Awaitable[None]],
     stop_and_confirm: Callable[..., Awaitable[bool]],
     release_temporary_external_ownership: Callable[[str], Awaitable[None]] | None = None,
@@ -658,6 +658,18 @@ async def resolve_end_of_cycle_external_shared_session(
         and observed_at is not None
         and 0 <= (current - observed_at).total_seconds() <= DEFAULT_FRESHNESS_SECONDS
     )
+    if (
+        binding_id not in {"generic_ev", "sigenergy_charger"}
+        or not active_profile_id
+        or not isinstance(selected_params, Mapping)
+        or not (
+            context_is_current_fresh_external_session
+            or context_is_current_fresh_idle
+        )
+        or get_lease is None
+    ):
+        return False
+
     temporary_lease_token = state.temporary_external_lease_token
     lease = get_lease()
     if (
@@ -673,10 +685,7 @@ async def resolve_end_of_cycle_external_shared_session(
         state.temporary_external_lease_token = None
         return False
     if (
-        binding_id not in {"generic_ev", "sigenergy_charger"}
-        or not active_profile_id
-        or not isinstance(selected_params, Mapping)
-        or not context_is_current_fresh_external_session
+        not context_is_current_fresh_external_session
         or state.origin != "external"
         or state.stop_outcome is not None
     ):

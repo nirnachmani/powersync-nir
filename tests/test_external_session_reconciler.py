@@ -660,6 +660,52 @@ def test_missing_generic_power_remains_unknown_despite_recent_command() -> None:
     assert state.origin == "unknown"
 
 
+@pytest.mark.parametrize(
+    ("binding_id", "active_profile_id", "selected_params", "cycle_context"),
+    [
+        (None, "shared_ev_profile_a", {"charger_type": "generic"}, None),
+        ("unmapped", "shared_ev_profile_a", {"charger_type": "generic"}, None),
+        ("generic_ev", None, {"charger_type": "generic"}, None),
+        ("generic_ev", "shared_ev_profile_a", None, None),
+    ],
+)
+def test_end_of_cycle_invalid_selection_is_a_noop_without_invoking_callbacks(
+    binding_id, active_profile_id, selected_params, cycle_context
+) -> None:
+    """The end-cycle caller supplies no lease callback without a selected binding."""
+    callbacks = []
+
+    async def ensure_external_ownership(_profile_id):
+        callbacks.append("ownership")
+
+    async def stop_and_confirm(**_kwargs):
+        callbacks.append("stop")
+        return True
+
+    async def release_temporary_external_ownership(_lease_token):
+        callbacks.append("release")
+
+    result = asyncio.run(
+        module.resolve_end_of_cycle_external_shared_session(
+            binding_id=binding_id,
+            active_profile_id=active_profile_id,
+            selected_params=selected_params,
+            state=module.ReconciliationState(),
+            cycle_context=cycle_context,
+            now=NOW,
+            external_control_policy="override",
+            cycle_ledger={},
+            get_lease=None,
+            ensure_external_ownership=ensure_external_ownership,
+            stop_and_confirm=stop_and_confirm,
+            release_temporary_external_ownership=release_temporary_external_ownership,
+        )
+    )
+
+    assert result is False
+    assert callbacks == []
+
+
 def test_end_of_cycle_yield_claims_only_an_unowned_external_shared_session() -> None:
     state = module.ReconciliationState(origin="external", physical_active=True)
     claimed = []
