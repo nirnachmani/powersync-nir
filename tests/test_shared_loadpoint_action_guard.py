@@ -132,6 +132,21 @@ def test_selected_logical_generic_id_reaches_canonical_direct_stop_command():
     )
 
 
+def test_shared_runtime_metadata_canonicalizes_action_loadpoint_identity():
+    assert actions._ev_action_loadpoint_id({
+        "charger_type": "generic",
+        "vehicle_id": "shared_ev_profile_a",
+        "logical_vehicle_id": "shared_ev_profile_a",
+        "shared_loadpoint_binding": True,
+    }) == "generic_ev"
+    assert actions._ev_action_loadpoint_id({
+        "charger_type": "sigenergy",
+        "vehicle_id": "shared_ev_profile_b",
+        "active_logical_vehicle_id": "shared_ev_profile_b",
+        "shared_loadpoint_binding": True,
+    }) == "sigenergy_charger"
+
+
 def test_physical_generic_id_cannot_bypass_selected_profile_for_current_write():
     hass = _Hass()
 

@@ -3035,6 +3035,110 @@ def test_ble_only_multi_bridge_charger_lookup_ignores_stale_vin_fallback(
     }
 
 
+@pytest.mark.parametrize(
+    ("options", "charger_type", "expected_loadpoint"),
+    [
+        (
+            {"generic_charger_enabled": True},
+            "generic",
+            "generic_ev",
+        ),
+        (
+            {
+                "sigenergy_charger_enabled": True,
+                "sigenergy_charger_type": "evac",
+            },
+            "sigenergy",
+            "sigenergy_charger",
+        ),
+    ],
+)
+def test_shared_logical_profile_uses_physical_runtime_loadpoint(
+    options,
+    charger_type,
+    expected_loadpoint,
+):
+    entry = SimpleNamespace(
+        data={},
+        options={
+            **options,
+            "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+            "shared_loadpoint_profile_a_name": "Tank",
+            "shared_loadpoint_profile_a_state": "tank",
+            "shared_loadpoint_profile_b_name": "Tesla",
+            "shared_loadpoint_profile_b_state": "tesla",
+        },
+    )
+    profile_id = "shared_ev_profile_a"
+
+    assert ev_planner._canonical_auto_schedule_vehicle_id(
+        _FakeHass(), entry, profile_id
+    ) == expected_loadpoint
+    assert ev_planner._resolve_dynamic_loadpoint_id(
+        charger_type,
+        profile_id,
+        {"charger_type": charger_type},
+        profile_id,
+        config_entry=entry,
+    ) == expected_loadpoint
+
+
+def test_shared_profile_config_lookup_does_not_borrow_other_profile_settings():
+    class SharedEntry(_FakeConfigEntry):
+        options = {
+            "generic_charger_enabled": True,
+            "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+            "shared_loadpoint_profile_a_name": "Tank",
+            "shared_loadpoint_profile_a_state": "tank",
+            "shared_loadpoint_profile_b_name": "Tesla",
+            "shared_loadpoint_profile_b_state": "tesla",
+        }
+
+    hass = _FakeHass()
+    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+        "vehicle_charging_configs"
+    ] = [{
+        "vehicle_id": "shared_ev_profile_a",
+        "charger_type": "generic",
+        "max_charge_amps": 10,
+    }]
+
+    params = ev_planner._get_vehicle_charger_params(
+        hass,
+        "powersync_nir",
+        SharedEntry(),
+        "shared_ev_profile_b",
+    )
+
+    assert params == {
+        "min_charge_amps": 5,
+        "max_charge_amps": 32,
+        "voltage": 230,
+        "phases": 1,
+    }
+
+
+def test_non_shared_profile_lookup_keeps_legacy_first_config_fallback():
+    hass = _FakeHass()
+    hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
+        "vehicle_charging_configs"
+    ] = [{
+        "vehicle_id": "other_vehicle",
+        "charger_type": "generic",
+        "max_charge_amps": 10,
+    }]
+
+    params = ev_planner._get_vehicle_charger_params(
+        hass,
+        "powersync_nir",
+        _FakeConfigEntry(),
+        "unknown_vehicle",
+    )
+
+    assert params["_configured_vehicle_id"] == "other_vehicle"
+    assert params["max_charge_amps"] == 10
+
+
 def test_price_level_sigenergy_start_uses_zero_battery_target(fake_actions):
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
 
@@ -4271,6 +4375,48 @@ def test_auto_schedule_sigenergy_start_uses_modbus_backend(monkeypatch, fake_act
     assert params["sigenergy_charger_host"] == "192.0.2.20"
     assert params["sigenergy_charger_slave_id"] == 1
     assert params["target_battery_charge_kw"] == 0
+
+
+def test_auto_schedule_shared_profile_keeps_logical_attribution(monkeypatch, fake_actions):
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: SimpleNamespace(weekday=lambda: 0),
+    )
+
+    class SharedEntry(_FakeConfigEntry):
+        options = {
+            "generic_charger_enabled": True,
+            "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+            "shared_loadpoint_profile_a_name": "Tank",
+            "shared_loadpoint_profile_a_state": "tank",
+            "shared_loadpoint_profile_b_name": "Tesla",
+            "shared_loadpoint_profile_b_state": "tesla",
+        }
+
+    profile_id = "shared_ev_profile_a"
+    executor = ev_planner.AutoScheduleExecutor(
+        _FakeHass(states={"sensor.connected_vehicle": "tank"}),
+        SharedEntry(),
+        planner=SimpleNamespace(),
+    )
+    settings = ev_planner.AutoScheduleSettings(
+        vehicle_id=profile_id,
+        charger_type="generic",
+    )
+    state = ev_planner.AutoScheduleState(vehicle_id=profile_id)
+
+    assert asyncio.run(
+        executor._start_charging(profile_id, settings, state, "grid_opportunistic")
+    ) is True
+
+    _hass, _entry, params = fake_actions._action_start_ev_charging_dynamic.await_args.args
+    assert params["vehicle_id"] == "generic_ev"
+    assert params["vehicle_vin"] == "generic_ev"
+    assert params["logical_vehicle_id"] == profile_id
+    assert params["active_logical_vehicle_id"] == profile_id
+    assert params["shared_loadpoint_binding"] is True
 
 
 def test_auto_schedule_blank_charger_type_uses_configured_sigenergy(

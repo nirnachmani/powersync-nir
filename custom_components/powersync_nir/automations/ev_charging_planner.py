@@ -7846,9 +7846,26 @@ class AutoScheduleExecutor:
                 vehicle_vin,
                 params,
                 configured_vehicle_id,
+                config_entry=self.config_entry,
             )
             params["vehicle_id"] = loadpoint_id
             params["vehicle_vin"] = loadpoint_id
+            from .shared_loadpoint import resolve_shared_loadpoint_command
+
+            resolved_shared_params = resolve_shared_loadpoint_command(
+                self.hass,
+                self.config_entry,
+                vehicle_id,
+                params,
+            )
+            if not resolved_shared_params:
+                _LOGGER.info(
+                    "Auto-schedule: Start blocked for %s because no selected "
+                    "shared logical EV profile is active",
+                    vehicle_id,
+                )
+                return False
+            params = resolved_shared_params
         if force_max_rate:
             params.update({
                 "start_amps": effective_max_amps,
@@ -8388,6 +8405,12 @@ def _canonical_auto_schedule_vehicle_id(
         **getattr(config_entry, "data", {}),
         **getattr(config_entry, "options", {}),
     }
+    if config_entry is not None:
+        from .shared_loadpoint import canonical_shared_loadpoint_id
+
+        shared_physical_id = canonical_shared_loadpoint_id(config_entry, normalized)
+        if shared_physical_id is not None:
+            return shared_physical_id
     if normalized.startswith("ble_"):
         return canonical_tesla_vehicle_id(
             opts,
@@ -8614,8 +8637,20 @@ def _resolve_dynamic_loadpoint_id(
     vehicle_vin: Optional[str],
     params: Mapping[str, Any],
     configured_vehicle_id: Optional[str] = None,
+    *,
+    config_entry: Any = None,
 ) -> Optional[str]:
     """Return the runtime loadpoint id for a configured charger backend."""
+    if config_entry is not None:
+        from .shared_loadpoint import canonical_shared_loadpoint_id
+
+        shared_physical_id = canonical_shared_loadpoint_id(
+            config_entry,
+            vehicle_vin or configured_vehicle_id,
+            charger_type,
+        )
+        if shared_physical_id is not None:
+            return shared_physical_id
     if vehicle_vin:
         return vehicle_vin
     if charger_type == "zaptec":
@@ -9082,6 +9117,7 @@ def _build_dynamic_charging_params(
         vehicle_vin,
         params,
         configured_vehicle_id,
+        config_entry=config_entry,
     )
     params["vehicle_vin"] = loadpoint_id
     params["vehicle_id"] = loadpoint_id
@@ -9140,6 +9176,7 @@ def _build_dynamic_stop_params(
         vehicle_vin,
         params,
         configured_vehicle_id,
+        config_entry=config_entry,
     )
     params["vehicle_id"] = loadpoint_id
     params["vehicle_vin"] = loadpoint_id
@@ -9552,6 +9589,19 @@ def _get_vehicle_charger_params(
                         if vc.get(key) is not None:
                             params[key] = vc.get(key)
                     return params
+            # A selected shared logical profile must never inherit another
+            # profile's app-owned limits just because it appears first. Runtime
+            # command identity is physical, but profile settings remain logical.
+            from .shared_loadpoint import (
+                PROFILE_A_ID,
+                PROFILE_B_ID,
+                binding_for_entry,
+            )
+            if (
+                vehicle_vin in (PROFILE_A_ID, PROFILE_B_ID)
+                and binding_for_entry(config_entry) is not None
+            ):
+                return defaults
             # No VIN match — use first config
             if configs:
                 vc = configs[0]

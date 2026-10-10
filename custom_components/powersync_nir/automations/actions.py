@@ -3010,12 +3010,23 @@ async def execute_actions(
 
 
 def _ev_action_loadpoint_id(params: Dict[str, Any]) -> str:
-    """Return the loadpoint id for direct EV start/stop automation actions."""
+    """Return the physical loadpoint id for direct EV automation actions."""
+    charger_type = str(params.get("charger_type") or "").lower()
+    if params.get("shared_loadpoint_binding"):
+        logical_vehicle_id = (
+            params.get("active_logical_vehicle_id")
+            or params.get("logical_vehicle_id")
+        )
+        if logical_vehicle_id in ("shared_ev_profile_a", "shared_ev_profile_b"):
+            if charger_type == "generic":
+                return "generic_ev"
+            if charger_type == "sigenergy":
+                return "sigenergy_charger"
+
     vehicle_id = params.get("vehicle_id") or params.get("vehicle_vin")
     if vehicle_id:
         return str(vehicle_id)
 
-    charger_type = params.get("charger_type")
     if charger_type == "generic":
         return "generic_ev"
     if charger_type == "ocpp":

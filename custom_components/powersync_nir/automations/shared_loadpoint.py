@@ -91,6 +91,39 @@ def binding_for_entry(config_entry: Any) -> SharedLoadpointBinding | None:
     )
 
 
+def canonical_shared_loadpoint_id(
+    config_entry: Any,
+    vehicle_id: Any,
+    charger_type: str | None = None,
+) -> str | None:
+    """Map a logical shared profile to its sole physical runtime identity.
+
+    ``None`` deliberately means either that this is not a logical shared
+    profile or that the entry has no unambiguous supported shared backend.
+    Callers can therefore preserve their legacy identity in the former case
+    and fail closed in the latter where appropriate.
+    """
+    binding = binding_for_entry(config_entry)
+    profile_id = str(vehicle_id or "").strip()
+    if binding is None or profile_id not in (PROFILE_A_ID, PROFILE_B_ID):
+        return None
+
+    options = {**getattr(config_entry, "data", {}), **getattr(config_entry, "options", {})}
+    requested_type = str(charger_type or "").strip().lower()
+    generic_enabled = bool(options.get(CONF_GENERIC_CHARGER_ENABLED))
+    sigenergy_evac_enabled = bool(
+        options.get(CONF_SIGENERGY_CHARGER_ENABLED)
+        and options.get(CONF_SIGENERGY_CHARGER_TYPE) == SIGENERGY_CHARGER_EVAC
+    )
+    if generic_enabled == sigenergy_evac_enabled:
+        return None
+    if generic_enabled and requested_type in ("", "generic"):
+        return "generic_ev"
+    if sigenergy_evac_enabled and requested_type in ("", "sigenergy"):
+        return "sigenergy_charger"
+    return None
+
+
 def resolve_active_shared_profile(hass: Any, config_entry: Any) -> str | None:
     """Resolve current selected profile; unknown/unavailable/unmapped fails closed."""
     binding = binding_for_entry(config_entry)
@@ -134,17 +167,12 @@ def resolve_shared_loadpoint_command(
     if active_profile_id != requested_id:
         return None
 
-    options = {**getattr(config_entry, "data", {}), **getattr(config_entry, "options", {})}
     charger_type = str(params.get("charger_type") or "").strip().lower()
-    physical_id: str | None = None
-    if charger_type == "generic" and options.get(CONF_GENERIC_CHARGER_ENABLED):
-        physical_id = "generic_ev"
-    elif (
-        charger_type == "sigenergy"
-        and options.get(CONF_SIGENERGY_CHARGER_ENABLED)
-        and options.get(CONF_SIGENERGY_CHARGER_TYPE) == SIGENERGY_CHARGER_EVAC
-    ):
-        physical_id = "sigenergy_charger"
+    physical_id = canonical_shared_loadpoint_id(
+        config_entry,
+        requested_id,
+        charger_type,
+    )
     if physical_id is None:
         return None
 
