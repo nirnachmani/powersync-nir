@@ -24,7 +24,8 @@ Actions, use `actions/checkout` with `fetch-depth: 0` (and ensure tags are
 available); do not add this gate to a release workflow solely to obtain that
 checkout.
 
-`requirements-test.txt` is test tooling only and exactly pins the `aiohttp` and
-`highspy` versions verified for this optimizer gate. Do not copy `aiohttp` into
-the Home Assistant integration manifest unless it becomes a genuine integration
-runtime requirement.
+`requirements-test.txt` is test tooling only and exactly pins the `aiohttp`,
+`highspy`, and `pytest` versions verified for this optimizer gate. Before it
+runs its corpus, the continuity runner proves that `.venv/bin/python -m pytest
+--version` succeeds. Do not copy `aiohttp` into the Home Assistant integration
+manifest unless it becomes a genuine integration runtime requirement.

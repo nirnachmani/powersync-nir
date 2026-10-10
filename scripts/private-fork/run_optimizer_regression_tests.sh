@@ -23,6 +23,14 @@ if ! "$PYTHON" -c 'import aiohttp; import highspy' >/dev/null 2>&1; then
     exit 1
 fi
 
+printf 'Verifying pytest is available in the project virtual environment.\n'
+if ! "$PYTHON" -m pytest --version; then
+    printf '%s\n' \
+        'Failed to execute pytest from the project test virtual environment.' \
+        "Verify the pinned requirements installed into: $PYTHON" >&2
+    exit 1
+fi
+
 core_tests=(
     tests/test_auto_apply_reserve_relaxed.py
     tests/test_cost_neutral_optimizer.py

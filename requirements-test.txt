@@ -3,3 +3,4 @@
 # Keep Home Assistant integration runtime requirements in manifest.json.
 aiohttp==3.14.4
 highspy==1.15.1
+pytest==8.4.2

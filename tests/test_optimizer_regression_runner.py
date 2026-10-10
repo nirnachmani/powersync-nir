@@ -38,6 +38,7 @@ def test_optimizer_continuity_runner_uses_project_venv_and_complete_core_corpus(
     source = RUNNER.read_text(encoding="utf-8")
 
     assert 'PYTHON="$ROOT/.venv/bin/python"' in source
+    assert '"$PYTHON" -m pytest --version' in source
     assert '"$PYTHON" -m pytest -q' in source
     for test_path in CORE_CORPUS:
         assert test_path in source
@@ -51,8 +52,10 @@ def test_optimizer_gate_test_dependencies_are_exactly_pinned():
 
     assert "aiohttp==3.14.4" in requirements
     assert "highspy==1.15.1" in requirements
+    assert "pytest==8.4.2" in requirements
     assert "aiohttp>=" not in requirements
     assert "highspy>=" not in requirements
+    assert "pytest>=" not in requirements
 
 
 def test_optimizer_continuity_runner_bootstraps_an_isolated_missing_venv(tmp_path):
@@ -61,7 +64,9 @@ def test_optimizer_continuity_runner_bootstraps_an_isolated_missing_venv(tmp_pat
     runner = root / "scripts" / "private-fork" / RUNNER.name
     runner.parent.mkdir(parents=True)
     shutil.copy2(RUNNER, runner)
-    (root / "requirements-test.txt").write_text("aiohttp==3.14.4\nhighspy==1.15.1\n")
+    (root / "requirements-test.txt").write_text(
+        "aiohttp==3.14.4\nhighspy==1.15.1\npytest==8.4.2\n"
+    )
 
     calls = tmp_path / "calls.log"
     fake_bin = tmp_path / "fake-bin"
@@ -90,6 +95,7 @@ fi
         "uv venv .venv",
         f"uv pip install --python {root}/.venv/bin/python -r requirements-test.txt",
         "python -c import aiohttp; import highspy",
+        "python -m pytest --version",
         "python -m pytest -q tests/test_auto_apply_reserve_relaxed.py tests/test_cost_neutral_optimizer.py tests/test_custom_optimizer_telemetry.py tests/test_ev_plan_clock.py tests/test_money_event_manager_optimizer_gate.py tests/test_optimization_enabled_switch.py tests/test_optimizer_ev_cooptimization.py tests/test_optimizer_ev_load_plan.py tests/test_optimizer_hardware_floor_alignment.py tests/test_optimizer_restore_retry.py tests/test_profit_max_charge_hold_capabilities.py tests/test_profit_max_solar_export_guard.py tests/test_quota_optimizer_constraints.py tests/test_run_optimization_atomicity.py tests/test_schedule_soc_export_floor_clamp.py tests/test_solar_export_hold.py tests/test_time_window_slots_flooring.py tests/test_tou_season_boundary_forecast.py tests/test_home_load_telemetry.py tests/test_power_sync_surface_contract.py tests/test_optimizer_regression_runner.py",
     ]
 
@@ -101,7 +107,9 @@ def test_private_runner_bootstraps_an_isolated_missing_venv(tmp_path):
     scripts.mkdir(parents=True)
     shutil.copy2(RUNNER, scripts / RUNNER.name)
     shutil.copy2(ROOT / "scripts" / "private-fork" / "run_private_tests.sh", scripts)
-    (root / "requirements-test.txt").write_text("aiohttp==3.14.4\nhighspy==1.15.1\n")
+    (root / "requirements-test.txt").write_text(
+        "aiohttp==3.14.4\nhighspy==1.15.1\npytest==8.4.2\n"
+    )
 
     calls = tmp_path / "private-calls.log"
     fake_bin = tmp_path / "private-fake-bin"
@@ -130,11 +138,12 @@ fi
     )
 
     assert result.returncode == 0, result.stderr
-    assert calls.read_text(encoding="utf-8").splitlines()[:4] == [
+    assert calls.read_text(encoding="utf-8").splitlines()[:5] == [
         "uv venv .venv",
         "python scripts/private-fork/validate_local_architecture.py",
         f"uv pip install --python {root}/.venv/bin/python -r requirements-test.txt",
         "python -c import aiohttp; import highspy",
+        "python -m pytest --version",
     ]
 
 
@@ -160,3 +169,6 @@ def test_surface_contract_pins_the_immutable_baseline_and_recurses_symmetrically
     assert "import highspy" in (ROOT / "scripts" / "private-fork" / "run_optimizer_regression_tests.sh").read_text(
         encoding="utf-8"
     )
+    assert '"$PYTHON" -m pytest --version' in (
+        ROOT / "scripts" / "private-fork" / "run_optimizer_regression_tests.sh"
+    ).read_text(encoding="utf-8")
