@@ -1393,3 +1393,106 @@ def test_fresh_idle_never_releases_a_conflicting_or_newer_lease(lease) -> None:
     )
     assert released == []
     assert state.temporary_external_lease_token == "resolver-lease-a"
+
+
+def test_restart_with_persisted_external_activity_requires_a_fresh_cycle_observation() -> None:
+    """Restarted runtime state cannot authorize a stop from yesterday's observation."""
+    class Entry:
+        entry_id = "entry-1"
+
+    class Store:
+        def __init__(self) -> None:
+            self._data = {}
+
+        async def async_save(self) -> None:
+            return None
+
+    class Hass:
+        def __init__(self, store) -> None:
+            self.data = {"powersync_nir": {"entry-1": {"automation_store": store}}}
+
+    store = Store()
+    before_restart = Hass(store)
+    asyncio.run(
+        module.persist_reconciliation_state(
+            before_restart,
+            Entry(),
+            "generic_ev",
+            module.ReconciliationState(
+                origin="external",
+                physical_active=True,
+                active_profile_id="shared_ev_profile_a",
+                observed_at=NOW,
+            ),
+        )
+    )
+    after_restart = Hass(store)
+    recovered = module.load_reconciliation_state(after_restart, Entry(), "generic_ev")
+    stopped = []
+
+    async def stop_and_confirm(**_kwargs):
+        stopped.append(True)
+        return True
+
+    assert not asyncio.run(
+        module.resolve_end_of_cycle_external_shared_session(
+            binding_id="generic_ev",
+            active_profile_id="shared_ev_profile_a",
+            selected_params={"charger_type": "generic"},
+            state=recovered,
+            cycle_context=None,
+            now=NOW + timedelta(minutes=1),
+            external_control_policy="override",
+            cycle_ledger={},
+            get_lease=lambda: {"owner": "external"},
+            ensure_external_ownership=lambda _profile: None,
+            stop_and_confirm=stop_and_confirm,
+        )
+    )
+    assert stopped == []
+
+
+def test_restart_with_persisted_stop_pending_needs_fresh_idle_readback() -> None:
+    """Restart recovery retains pending instead of claiming the charger stopped."""
+    class Entry:
+        entry_id = "entry-1"
+
+    class Store:
+        def __init__(self) -> None:
+            self._data = {}
+
+        async def async_save(self) -> None:
+            return None
+
+    class Hass:
+        def __init__(self, store) -> None:
+            self.data = {"powersync_nir": {"entry-1": {"automation_store": store}}}
+
+    store = Store()
+    before_restart = Hass(store)
+    asyncio.run(
+        module.persist_reconciliation_state(
+            before_restart,
+            Entry(),
+            "generic_ev",
+            module.ReconciliationState(
+                origin="settling",
+                physical_active=True,
+                stop_outcome={"status": "pending"},
+                observed_at=NOW,
+            ),
+        )
+    )
+    recovered = module.load_reconciliation_state(Hass(store), Entry(), "generic_ev")
+
+    assert recovered.stop_outcome == {"status": "pending"}
+    assert recovered.physical_active is True
+    assert module.reconcile_shared_external_session(
+        module.generic_power_observation(
+            binding_id="generic_ev",
+            power_kw=0.0,
+            observed_at=NOW + timedelta(seconds=1),
+            now=NOW + timedelta(seconds=1),
+        ),
+        previous=recovered,
+    ).stop_outcome == {"status": "confirmed"}

@@ -16,6 +16,12 @@ ROOT = Path(__file__).resolve().parent.parent / "custom_components"
 
 
 def _install_import_stubs() -> None:
+    aiohttp = sys.modules.setdefault("aiohttp", types.ModuleType("aiohttp"))
+    aiohttp.web = SimpleNamespace(
+        Request=type("Request", (), {}),
+        Response=type("Response", (), {}),
+        json_response=lambda *args, **kwargs: None,
+    )
     ha_root = types.ModuleType("homeassistant")
     ha_components = types.ModuleType("homeassistant.components")
     ha_http = types.ModuleType("homeassistant.components.http")
@@ -108,19 +114,19 @@ def _install_import_stubs() -> None:
     }.items():
         sys.modules[name] = module
 
-    currency = types.ModuleType("power_sync.currency")
+    currency = types.ModuleType("powersync_nir.currency")
     currency.DEFAULT_CURRENCY = "AUD"
     currency.currency_for_entry = lambda *args, **kwargs: "AUD"
     currency.currency_metadata = lambda *args, **kwargs: {}
     currency.normalize_currency = lambda value=None, *args, **kwargs: value or "AUD"
     currency.presentation_currency_metadata_for_entry = lambda *args, **kwargs: {}
-    sys.modules["power_sync.currency"] = currency
+    sys.modules["powersync_nir.currency"] = currency
 
-    inverters = types.ModuleType("power_sync.inverters")
+    inverters = types.ModuleType("powersync_nir.inverters")
     inverters.get_inverter_controller = lambda *args, **kwargs: None
-    sys.modules["power_sync.inverters"] = inverters
+    sys.modules["powersync_nir.inverters"] = inverters
 
-    optimization_coordinator = types.ModuleType("power_sync.optimization.coordinator")
+    optimization_coordinator = types.ModuleType("powersync_nir.optimization.coordinator")
     optimization_coordinator.OptimizationCoordinator = type("OptimizationCoordinator", (), {})
     optimization_coordinator.OptimizationConfig = type("OptimizationConfig", (), {})
     optimization_coordinator.sigenergy_capped_optimizer_limit_w = (
@@ -129,9 +135,9 @@ def _install_import_stubs() -> None:
     optimization_coordinator.battery_specs_source_by_field = (
         lambda *args, **kwargs: {}
     )
-    sys.modules["power_sync.optimization.coordinator"] = optimization_coordinator
+    sys.modules["powersync_nir.optimization.coordinator"] = optimization_coordinator
 
-    coordinator = types.ModuleType("power_sync.coordinator")
+    coordinator = types.ModuleType("powersync_nir.coordinator")
     for class_name in (
         "AmberPriceCoordinator",
         "AmberUsageCoordinator",
@@ -159,15 +165,15 @@ def _install_import_stubs() -> None:
         "LocalvoltsPriceCoordinator",
     ):
         setattr(coordinator, class_name, type(class_name, (), {}))
-    sys.modules["power_sync.coordinator"] = coordinator
+    sys.modules["powersync_nir.coordinator"] = coordinator
 
 
-def _power_sync_module():
+def _powersync_nir_module():
     _install_import_stubs()
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
-    sys.modules.pop("power_sync", None)
-    return importlib.import_module("power_sync")
+    sys.modules.pop("powersync_nir", None)
+    return importlib.import_module("powersync_nir")
 
 
 class _State:
@@ -222,7 +228,7 @@ class _Hass:
         self.states = _States(states)
         self.entity_registry = SimpleNamespace(entities=registry_entities or {})
         self.device_registry = SimpleNamespace(devices=devices or {})
-        self.data = {"power_sync": {"entry-1": entry_data or {}}}
+        self.data = {"powersync_nir": {"entry-1": entry_data or {}}}
         self.config_entries = SimpleNamespace(
             async_entries=lambda domain: config_entries or [],
             async_domains=lambda: [],
@@ -236,7 +242,7 @@ def _fake_site_snapshot(hass) -> dict:
     normalizing the energy coordinator, so the stub has to read the
     coordinator live rather than hand back a frozen dict.
     """
-    entry_data = hass.data.get("power_sync", {}).get("entry-1", {})
+    entry_data = hass.data.get("powersync_nir", {}).get("entry-1", {})
     data = getattr(entry_data.get("tesla_coordinator"), "data", None) or {}
     try:
         load_power_kw = float(data.get("load_power"))
@@ -279,7 +285,7 @@ def _tesla_hass(states: list[_State]) -> _Hass:
 
 
 def test_ev_vehicle_status_ignores_stale_power_when_tesla_is_away_and_disconnected():
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     hass = _tesla_hass([
         _State("sensor.primary_ev_charger_power_2", "0.4", {"unit_of_measurement": "kW"}),
         _State("sensor.primary_ev_charging_2", "disconnected"),
@@ -288,7 +294,7 @@ def test_ev_vehicle_status_ignores_stale_power_when_tesla_is_away_and_disconnect
         _State("sensor.primary_ev_battery_level_2", "72.887", {"unit_of_measurement": "%"}),
     ])
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, _Entry())
 
     assert vehicles == [{
         "vehicle_id": "5YJTEST0000000001",
@@ -299,12 +305,12 @@ def test_ev_vehicle_status_ignores_stale_power_when_tesla_is_away_and_disconnect
         "is_charging": False,
         "site_presence": "away",
     }]
-    assert power_sync._get_external_tesla_ev_power_kw(hass, _Entry()) == 0.0
+    assert powersync_nir._get_external_tesla_ev_power_kw(hass, _Entry()) == 0.0
 
 
 def test_ev_vehicle_status_excludes_named_zone_charging_from_home_site():
     """Ticket #284: a named HA zone is away, not a home EV load."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     hass = _tesla_hass([
         _State("sensor.primary_ev_charger_power_2", "2.0", {"unit_of_measurement": "kW"}),
         _State("sensor.primary_ev_charging_2", "charging"),
@@ -312,7 +318,7 @@ def test_ev_vehicle_status_excludes_named_zone_charging_from_home_site():
         _State("device_tracker.primary_ev_location_2", "amma and appa's"),
         _State("sensor.primary_ev_battery_level_2", "86", {"unit_of_measurement": "%"}),
     ])
-    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
+    hass.data["powersync_nir"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
         data={
             "wall_connectors_raw": [{
                 "din": "1529455-02-E--TEST",
@@ -322,7 +328,7 @@ def test_ev_vehicle_status_excludes_named_zone_charging_from_home_site():
         }
     )
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, _Entry())
 
     away_vehicle = next(
         vehicle for vehicle in vehicles
@@ -337,12 +343,12 @@ def test_ev_vehicle_status_excludes_named_zone_charging_from_home_site():
         "is_charging": False,
         "site_presence": "away",
     }
-    assert power_sync._get_external_tesla_ev_power_kw(hass, _Entry()) == 0.0
+    assert powersync_nir._get_external_tesla_ev_power_kw(hass, _Entry()) == 0.0
 
 
 def test_named_zone_also_excludes_paired_ble_bridge_power():
     """A paired BLE view of the remote charge must not restore site power."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vin = "5YJTEST0000000001"
     states = [
         _State("sensor.primary_ev_charger_power", "2.0", {"unit_of_measurement": "kW"}),
@@ -361,13 +367,13 @@ def test_named_zone_also_excludes_paired_ble_bridge_power():
         entry_id="entry-1",
         data={},
         options={
-            "ev_provider": power_sync.EV_PROVIDER_BOTH,
+            "ev_provider": powersync_nir.EV_PROVIDER_BOTH,
             "tesla_ble_entity_prefix": "remote_ble",
             "tesla_ble_vehicle_mapping": f"{vin}=remote_ble",
         },
     )
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, entry)
 
     assert len(vehicles) == 1
     assert vehicles[0]["vehicle_id"] == vin
@@ -375,7 +381,7 @@ def test_named_zone_also_excludes_paired_ble_bridge_power():
     assert vehicles[0]["is_connected"] is False
     assert vehicles[0]["is_charging"] is False
     assert vehicles[0]["site_presence"] == "away"
-    assert power_sync._get_ev_vehicle_status(hass, entry) == {
+    assert powersync_nir._get_ev_vehicle_status(hass, entry) == {
         "ev_power_kw": 0.0,
         "ev_soc": 86,
     }
@@ -383,7 +389,7 @@ def test_named_zone_also_excludes_paired_ble_bridge_power():
 
 def test_newer_paired_ble_home_presence_overrides_stale_fleet_away():
     """Ticket #56: stale Fleet location cannot erase current BLE site power."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vin = "5YJTEST0000000001"
     now = datetime.now(timezone.utc)
     stale = now - timedelta(minutes=5)
@@ -409,13 +415,13 @@ def test_newer_paired_ble_home_presence_overrides_stale_fleet_away():
         entry_id="entry-1",
         data={},
         options={
-            "ev_provider": power_sync.EV_PROVIDER_BOTH,
+            "ev_provider": powersync_nir.EV_PROVIDER_BOTH,
             "tesla_ble_entity_prefix": "home_ble",
             "tesla_ble_vehicle_mapping": f"{vin}=home_ble",
         },
     )
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, entry)
 
     assert len(vehicles) == 1
     assert vehicles[0]["vehicle_id"] == vin
@@ -423,7 +429,7 @@ def test_newer_paired_ble_home_presence_overrides_stale_fleet_away():
     assert vehicles[0]["is_connected"] is True
     assert vehicles[0]["is_charging"] is True
     assert vehicles[0]["site_presence"] == "home"
-    assert power_sync._get_ev_vehicle_status(hass, entry) == {
+    assert powersync_nir._get_ev_vehicle_status(hass, entry) == {
         "ev_power_kw": 2.0,
         "ev_soc": 86,
     }
@@ -431,7 +437,7 @@ def test_newer_paired_ble_home_presence_overrides_stale_fleet_away():
 
 def test_newer_fleet_away_presence_still_excludes_paired_ble_power():
     """Ticket #56: current remote-location evidence remains fail-closed."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vin = "5YJTEST0000000001"
     now = datetime.now(timezone.utc)
     stale = now - timedelta(minutes=5)
@@ -457,25 +463,25 @@ def test_newer_fleet_away_presence_still_excludes_paired_ble_power():
         entry_id="entry-1",
         data={},
         options={
-            "ev_provider": power_sync.EV_PROVIDER_BOTH,
+            "ev_provider": powersync_nir.EV_PROVIDER_BOTH,
             "tesla_ble_entity_prefix": "remote_ble",
             "tesla_ble_vehicle_mapping": f"{vin}=remote_ble",
         },
     )
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, entry)
 
     assert len(vehicles) == 1
     assert vehicles[0]["ev_power_kw"] == 0.0
     assert vehicles[0]["is_connected"] is False
     assert vehicles[0]["is_charging"] is False
     assert vehicles[0]["site_presence"] == "away"
-    assert power_sync._get_ev_vehicle_status(hass, entry)["ev_power_kw"] == 0.0
+    assert powersync_nir._get_ev_vehicle_status(hass, entry)["ev_power_kw"] == 0.0
 
 
 def test_named_zone_does_not_suppress_unpaired_ble_outside_both_mode():
     """A stale Fleet tracker cannot claim an unrelated BLE-only vehicle."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vin = "5YJTEST0000000001"
     hass = _tesla_hass([
         _State(
@@ -501,23 +507,23 @@ def test_named_zone_does_not_suppress_unpaired_ble_outside_both_mode():
         entry_id="entry-1",
         data={},
         options={
-            "ev_provider": power_sync.EV_PROVIDER_FLEET_API,
+            "ev_provider": powersync_nir.EV_PROVIDER_FLEET_API,
             "tesla_ble_entity_prefix": "remote_ble",
             "tesla_ble_vehicle_mapping": f"{vin}=remote_ble",
         },
     )
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, entry)
 
     assert len(vehicles) == 1
     assert vehicles[0]["ev_power_kw"] == 3.0
-    assert power_sync._get_ev_vehicle_status(hass, entry)["ev_power_kw"] == 3.0
-    assert power_sync._get_external_tesla_ev_power_kw(hass, entry) == 3.0
+    assert powersync_nir._get_ev_vehicle_status(hass, entry)["ev_power_kw"] == 3.0
+    assert powersync_nir._get_external_tesla_ev_power_kw(hass, entry) == 3.0
 
 
 def test_ble_steady_power_uses_its_own_last_reported_timestamp():
     """A steady source report stays fresh without borrowing metadata time."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     now = datetime.now(timezone.utc)
     stale_change = now - timedelta(minutes=5)
     hass = _Hass([
@@ -539,9 +545,9 @@ def test_ble_steady_power_uses_its_own_last_reported_timestamp():
         options={"tesla_ble_entity_prefix": "yf88"},
     )
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, entry)
     vehicle = next(item for item in vehicles if item["vehicle_id"] == "ble_yf88")
-    ev_load = importlib.import_module("power_sync.ev_load")
+    ev_load = importlib.import_module("powersync_nir.ev_load")
     snapshot = ev_load.aggregate_ev_load(
         [
             ev_load.EvLoadObservation(
@@ -571,7 +577,7 @@ def test_ble_steady_power_uses_its_own_last_reported_timestamp():
 
 def test_ble_only_provider_excludes_residual_fleet_registry_observation():
     """Ticket #56: BLE-only status must not absorb charging into Home Load."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     now = datetime.now(timezone.utc)
     vin = "5YJTEST0000000001"
     states = [
@@ -589,12 +595,12 @@ def test_ble_only_provider_excludes_residual_fleet_registry_observation():
         entry_id="entry-1",
         data={},
         options={
-            "ev_provider": power_sync.EV_PROVIDER_TESLA_BLE,
+            "ev_provider": powersync_nir.EV_PROVIDER_TESLA_BLE,
             "tesla_ble_entity_prefix": "ble",
         },
     )
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, entry)
 
     assert len(vehicles) == 1
     vehicle = vehicles[0]
@@ -606,7 +612,7 @@ def test_ble_only_provider_excludes_residual_fleet_registry_observation():
     assert vehicle["is_charging"] is True
     assert vehicle["power_available"] is True
 
-    ev_load = importlib.import_module("power_sync.ev_load")
+    ev_load = importlib.import_module("powersync_nir.ev_load")
     snapshot = ev_load.aggregate_ev_load(
         [
             ev_load.EvLoadObservation(
@@ -629,7 +635,7 @@ def test_ble_only_provider_excludes_residual_fleet_registry_observation():
 
 def test_ble_power_is_not_replaced_by_vinless_wall_connector():
     """Ticket #409: a connector-wide refresh cannot identify a BLE vehicle."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     now = datetime.now(timezone.utc)
     hass = _Hass([
         _State("binary_sensor.yf88_status", "on", last_updated=now),
@@ -642,7 +648,7 @@ def test_ble_power_is_not_replaced_by_vinless_wall_connector():
             last_updated=now,
         ),
     ])
-    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
+    hass.data["powersync_nir"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
         data={
             "wall_connectors_raw": [{
                 "wall_connector_state": 2,
@@ -659,7 +665,7 @@ def test_ble_power_is_not_replaced_by_vinless_wall_connector():
 
     vehicle = next(
         item
-        for item in power_sync._get_ev_vehicles_status(hass, entry)
+        for item in powersync_nir._get_ev_vehicles_status(hass, entry)
         if item["vehicle_id"] == "ble_yf88"
     )
 
@@ -669,8 +675,8 @@ def test_ble_power_is_not_replaced_by_vinless_wall_connector():
 
 def test_ble_metadata_does_not_refresh_stale_power_measurement():
     """Stale BLE watts are withheld consistently from every status surface."""
-    power_sync = _power_sync_module()
-    ev_load = importlib.import_module("power_sync.ev_load")
+    powersync_nir = _powersync_nir_module()
+    ev_load = importlib.import_module("powersync_nir.ev_load")
     now = datetime.now(timezone.utc)
     stale_power = now - timedelta(minutes=5)
     hass = _Hass([
@@ -692,7 +698,7 @@ def test_ble_metadata_does_not_refresh_stale_power_measurement():
 
     vehicle = next(
         item
-        for item in power_sync._get_ev_vehicles_status(hass, entry)
+        for item in powersync_nir._get_ev_vehicles_status(hass, entry)
         if item["vehicle_id"] == "ble_yf88"
     )
     snapshot = ev_load.aggregate_ev_load(
@@ -708,7 +714,7 @@ def test_ble_metadata_does_not_refresh_stale_power_measurement():
         at=now,
     )
     loadpoint_status = importlib.import_module(
-        "power_sync.automations.loadpoint_status"
+        "powersync_nir.automations.loadpoint_status"
     )
     observed_loadpoint = loadpoint_status.build_loadpoint_status({}, [vehicle])[0]
     dynamic_loadpoint = loadpoint_status.build_loadpoint_status(
@@ -738,9 +744,9 @@ def test_ble_metadata_does_not_refresh_stale_power_measurement():
 
 def test_ble_unknown_power_reaches_the_loadpoint_as_unknown_not_idle_zero():
     """Ticket 36: unavailable BLE power must not masquerade as an observation."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     loadpoint_status = importlib.import_module(
-        "power_sync.automations.loadpoint_status"
+        "powersync_nir.automations.loadpoint_status"
     )
     hass = _Hass([
         _State("binary_sensor.yf88_status", "on"),
@@ -755,7 +761,7 @@ def test_ble_unknown_power_reaches_the_loadpoint_as_unknown_not_idle_zero():
 
     vehicle = next(
         item
-        for item in power_sync._get_ev_vehicles_status(hass, entry)
+        for item in powersync_nir._get_ev_vehicles_status(hass, entry)
         if item["vehicle_id"] == "ble_yf88"
     )
     vehicle["include_idle"] = True
@@ -768,7 +774,7 @@ def test_ble_unknown_power_reaches_the_loadpoint_as_unknown_not_idle_zero():
 
 
 def test_ev_vehicle_status_keeps_real_charging_power_when_charging():
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     hass = _tesla_hass([
         _State("sensor.primary_ev_charger_power_2", "6.8", {"unit_of_measurement": "kW"}),
         _State("sensor.primary_ev_charging_2", "charging"),
@@ -777,7 +783,7 @@ def test_ev_vehicle_status_keeps_real_charging_power_when_charging():
         _State("sensor.primary_ev_battery_level_2", "73", {"unit_of_measurement": "%"}),
     ])
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, _Entry())
 
     assert vehicles[0]["ev_power_kw"] == 6.8
     assert vehicles[0]["is_connected"] is True
@@ -787,9 +793,9 @@ def test_ev_vehicle_status_keeps_real_charging_power_when_charging():
 
 def test_fleet_stale_active_power_is_unavailable_across_status_surfaces():
     """Ticket #49: stale Fleet watts cannot be rendered as a live EV draw."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     loadpoint_status = importlib.import_module(
-        "power_sync.automations.loadpoint_status"
+        "powersync_nir.automations.loadpoint_status"
     )
     now = datetime.now(timezone.utc)
     hass = _tesla_hass([
@@ -802,7 +808,7 @@ def test_fleet_stale_active_power_is_unavailable_across_status_surfaces():
         _State("device_tracker.primary_ev_location", "home", last_updated=now),
     ])
 
-    vehicle = power_sync._get_ev_vehicles_status(hass, _Entry())[0]
+    vehicle = powersync_nir._get_ev_vehicles_status(hass, _Entry())[0]
     loadpoint = loadpoint_status.build_loadpoint_status({}, [vehicle])[0]
 
     assert vehicle["ev_power_kw"] == 7.0
@@ -814,10 +820,10 @@ def test_fleet_stale_active_power_is_unavailable_across_status_surfaces():
 
 def test_fleet_active_unavailable_power_stays_active_and_incomplete(monkeypatch):
     """Ticket #49: Fleet charging state must not turn missing watts into idle."""
-    power_sync = _power_sync_module()
-    ev_load = importlib.import_module("power_sync.ev_load")
+    powersync_nir = _powersync_nir_module()
+    ev_load = importlib.import_module("powersync_nir.ev_load")
     loadpoint_status = importlib.import_module(
-        "power_sync.automations.loadpoint_status"
+        "powersync_nir.automations.loadpoint_status"
     )
     now = datetime.now(timezone.utc)
     hass = _tesla_hass([
@@ -836,12 +842,12 @@ def test_fleet_active_unavailable_power_stays_active_and_incomplete(monkeypatch)
         return None
 
     monkeypatch.setattr(
-        power_sync, "_read_sigenergy_charger_state_for_entry", no_sigenergy_charger
+        powersync_nir, "_read_sigenergy_charger_state_for_entry", no_sigenergy_charger
     )
 
-    vehicle = power_sync._get_ev_vehicles_status(hass, _Entry())[0]
+    vehicle = powersync_nir._get_ev_vehicles_status(hass, _Entry())[0]
     observations = asyncio.run(
-        power_sync._get_ev_load_observations(hass, _Entry(), [vehicle])
+        powersync_nir._get_ev_load_observations(hass, _Entry(), [vehicle])
     )
     snapshot = ev_load.aggregate_ev_load(observations, at=now)
     loadpoint = loadpoint_status.build_loadpoint_status({}, [vehicle])[0]
@@ -858,7 +864,7 @@ def test_fleet_active_unavailable_power_stays_active_and_incomplete(monkeypatch)
 
 
 def test_both_provider_ble_bridge_coalesces_without_hiding_fleet_only_vehicle():
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     primary_vin = "5YJTEST0000000001"
     secondary_vin = "5YJTEST0000000002"
     states = [
@@ -901,13 +907,13 @@ def test_both_provider_ble_bridge_coalesces_without_hiding_fleet_only_vehicle():
         entry_id="entry-1",
         data={},
         options={
-            "ev_provider": power_sync.EV_PROVIDER_BOTH,
+            "ev_provider": powersync_nir.EV_PROVIDER_BOTH,
             "tesla_ble_entity_prefix": "primary_ev_bridge",
             "tesla_ble_vehicle_mapping": f"{primary_vin}=primary_ev_bridge",
         },
     )
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, entry)
 
     assert [vehicle["vehicle_name"] for vehicle in vehicles] == ["PRIMARY EV", "Secondary EV"]
     assert [vehicle["vehicle_id"] for vehicle in vehicles] == [primary_vin, secondary_vin]
@@ -918,7 +924,7 @@ def test_both_provider_ble_bridge_coalesces_without_hiding_fleet_only_vehicle():
 
 def test_overlapping_ble_prefixes_keep_both_vehicle_observations():
     """A longer BLE prefix must not be hidden by a shorter substring prefix."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     tessy_vin = "5YJTEST0000000001"
     w3_vin = "5YJTEST0000000002"
     stale = datetime(2026, 8, 20, 3, 28, tzinfo=timezone.utc)
@@ -1001,7 +1007,7 @@ def test_overlapping_ble_prefixes_keep_both_vehicle_observations():
         entry_id="entry-1",
         data={},
         options={
-            "ev_provider": power_sync.EV_PROVIDER_BOTH,
+            "ev_provider": powersync_nir.EV_PROVIDER_BOTH,
             "tesla_ble_entity_prefix": f"{short_prefix},{long_prefix}",
             "tesla_ble_vehicle_mapping": (
                 f"{tessy_vin}={short_prefix},{w3_vin}={long_prefix}"
@@ -1009,7 +1015,7 @@ def test_overlapping_ble_prefixes_keep_both_vehicle_observations():
         },
     )
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, entry)
     by_id = {vehicle["vehicle_id"]: vehicle for vehicle in vehicles}
 
     assert set(by_id) == {tessy_vin, w3_vin}
@@ -1021,7 +1027,7 @@ def test_overlapping_ble_prefixes_keep_both_vehicle_observations():
 
 
 def test_ble_disconnected_state_overrides_open_charge_flap():
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     now = datetime.now(timezone.utc)
     prefix = "garage_ble"
     hass = _Hass([
@@ -1049,7 +1055,7 @@ def test_ble_disconnected_state_overrides_open_charge_flap():
         options={"tesla_ble_entity_prefix": prefix},
     )
 
-    vehicle = power_sync._get_ev_vehicles_status(hass, entry)[0]
+    vehicle = powersync_nir._get_ev_vehicles_status(hass, entry)[0]
 
     assert vehicle["is_connected"] is False
     assert vehicle["is_charging"] is False
@@ -1057,7 +1063,7 @@ def test_ble_disconnected_state_overrides_open_charge_flap():
 
 
 def test_ble_newer_stopped_state_suppresses_re_reported_stale_power():
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     now = datetime.now(timezone.utc)
     prefix = "garage_ble"
     hass = _Hass([
@@ -1083,7 +1089,7 @@ def test_ble_newer_stopped_state_suppresses_re_reported_stale_power():
         options={"tesla_ble_entity_prefix": prefix},
     )
 
-    vehicle = power_sync._get_ev_vehicles_status(hass, entry)[0]
+    vehicle = powersync_nir._get_ev_vehicles_status(hass, entry)[0]
 
     assert vehicle["is_connected"] is True
     assert vehicle["is_charging"] is False
@@ -1127,7 +1133,7 @@ def test_ble_persisted_stopped_state_suppresses_newer_stale_power_value():
     EV load survived every poll and pinned Home Load to 0.0 kW until the
     integration was reloaded.
     """
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     now = datetime.now(timezone.utc)
     hass, entry = _stopped_ble_vehicle(
         power_last_updated=now - timedelta(minutes=5),
@@ -1135,7 +1141,7 @@ def test_ble_persisted_stopped_state_suppresses_newer_stale_power_value():
         now=now,
     )
 
-    vehicle = power_sync._get_ev_vehicles_status(hass, entry)[0]
+    vehicle = powersync_nir._get_ev_vehicles_status(hass, entry)[0]
 
     assert vehicle["ev_power_kw"] == 0.0
     assert vehicle["is_charging"] is False
@@ -1144,7 +1150,7 @@ def test_ble_persisted_stopped_state_suppresses_newer_stale_power_value():
 
 def test_ble_equal_timestamp_stopped_state_suppresses_stale_power_value():
     """The strict ``>`` comparison also leaked when both stamps matched."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     now = datetime.now(timezone.utc)
     stamp = now - timedelta(minutes=10)
     hass, entry = _stopped_ble_vehicle(
@@ -1153,7 +1159,7 @@ def test_ble_equal_timestamp_stopped_state_suppresses_stale_power_value():
         now=now,
     )
 
-    vehicle = power_sync._get_ev_vehicles_status(hass, entry)[0]
+    vehicle = powersync_nir._get_ev_vehicles_status(hass, entry)[0]
 
     assert vehicle["ev_power_kw"] == 0.0
     assert vehicle["is_charging"] is False
@@ -1166,7 +1172,7 @@ def test_ble_recent_stopped_state_still_allows_a_newer_power_value():
     Guards against over-correcting: a bridge that reports the watt value a
     moment before flipping the state to Charging keeps its reading.
     """
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     now = datetime.now(timezone.utc)
     hass, entry = _stopped_ble_vehicle(
         power_last_updated=now,
@@ -1174,7 +1180,7 @@ def test_ble_recent_stopped_state_still_allows_a_newer_power_value():
         now=now,
     )
 
-    vehicle = power_sync._get_ev_vehicles_status(hass, entry)[0]
+    vehicle = powersync_nir._get_ev_vehicles_status(hass, entry)[0]
 
     assert vehicle["ev_power_kw"] == 7.0
     assert vehicle["is_charging"] is True
@@ -1183,7 +1189,7 @@ def test_ble_recent_stopped_state_still_allows_a_newer_power_value():
 
 def test_ble_silent_state_entity_cannot_veto_a_live_power_value():
     """A bridge that stopped reporting its state must not veto the meter."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     now = datetime.now(timezone.utc)
     prefix = "garage_ble"
     hass = _Hass([
@@ -1208,7 +1214,7 @@ def test_ble_silent_state_entity_cannot_veto_a_live_power_value():
         options={"tesla_ble_entity_prefix": prefix},
     )
 
-    vehicle = power_sync._get_ev_vehicles_status(hass, entry)[0]
+    vehicle = powersync_nir._get_ev_vehicles_status(hass, entry)[0]
 
     assert vehicle["ev_power_kw"] == 7.0
     assert vehicle["power_available"] is True
@@ -1216,7 +1222,7 @@ def test_ble_silent_state_entity_cannot_veto_a_live_power_value():
 
 def test_ble_expired_power_does_not_assert_charging_activity(monkeypatch):
     """Expired watts cannot claim an active EV or external ownership."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     now = datetime.now(timezone.utc)
     prefix = "garage_ble"
     hass = _Hass([
@@ -1240,7 +1246,7 @@ def test_ble_expired_power_does_not_assert_charging_activity(monkeypatch):
         options={"tesla_ble_entity_prefix": prefix},
     )
 
-    vehicle = power_sync._get_ev_vehicles_status(hass, entry)[0]
+    vehicle = powersync_nir._get_ev_vehicles_status(hass, entry)[0]
 
     assert vehicle["ev_power_kw"] == 0.0
     assert vehicle["power_available"] is False
@@ -1251,16 +1257,16 @@ def test_ble_expired_power_does_not_assert_charging_activity(monkeypatch):
         return None
 
     monkeypatch.setattr(
-        power_sync,
+        powersync_nir,
         "_read_sigenergy_charger_state_for_entry",
         no_sigenergy_state,
     )
     observations = asyncio.run(
-        power_sync._get_ev_load_observations(hass, entry, [vehicle])
+        powersync_nir._get_ev_load_observations(hass, entry, [vehicle])
     )
     assert observations[0].power_kw is None
     assert observations[0].active is True
-    ev_load = importlib.import_module("power_sync.ev_load")
+    ev_load = importlib.import_module("powersync_nir.ev_load")
     snapshot = ev_load.aggregate_ev_load(
         observations,
         at=now,
@@ -1278,7 +1284,7 @@ def test_ble_expired_power_does_not_assert_charging_activity(monkeypatch):
 
 
 def test_autodetected_ble_bridge_pairs_with_single_fleet_vehicle_and_commands():
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vin = "5YJTEST0000000001"
     states = [
         _State("sensor.primary_ev_battery_level", "75"),
@@ -1307,20 +1313,20 @@ def test_autodetected_ble_bridge_pairs_with_single_fleet_vehicle_and_commands():
         entry_id="entry-1",
         data={},
         options={
-            "ev_provider": power_sync.EV_PROVIDER_BOTH,
+            "ev_provider": powersync_nir.EV_PROVIDER_BOTH,
             "tesla_ble_entity_prefix": "tesla_ble",
         },
     )
     config = {**entry.data, **entry.options}
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, entry)
 
     assert [vehicle["vehicle_id"] for vehicle in vehicles] == [vin]
-    assert power_sync._ble_prefix_for_vehicle(hass, config, vin) == "garage_ble"
+    assert powersync_nir._ble_prefix_for_vehicle(hass, config, vin) == "garage_ble"
 
 
 def test_mobile_command_identity_and_ble_pairing_deduplicate_provider_devices():
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     primary_vin = "5YJTEST0000000001"
     secondary_vin = "5YJTEST0000000002"
     hass = _Hass(
@@ -1344,7 +1350,7 @@ def test_mobile_command_identity_and_ble_pairing_deduplicate_provider_devices():
         },
     )
     one_bridge = {
-        "ev_provider": power_sync.EV_PROVIDER_BOTH,
+        "ev_provider": powersync_nir.EV_PROVIDER_BOTH,
         "tesla_ble_entity_prefix": "primary_ev_bridge",
         "tesla_ble_vehicle_mapping": f"{primary_vin}=primary_ev_bridge",
     }
@@ -1355,15 +1361,15 @@ def test_mobile_command_identity_and_ble_pairing_deduplicate_provider_devices():
             f"{primary_vin}=bridge_beta,{secondary_vin}=bridge_alpha"
         ),
     }
-    view = power_sync.EVVehicleCommandView(hass)
+    view = powersync_nir.EVVehicleCommandView(hass)
     view._get_powersync_config = lambda: one_bridge
 
     assert view._get_vin_from_vehicle_id("1") == primary_vin
     assert view._get_vin_from_vehicle_id("2") == secondary_vin
-    assert power_sync._ble_prefix_for_vehicle(hass, one_bridge, primary_vin) == "primary_ev_bridge"
-    assert power_sync._ble_prefix_for_vehicle(hass, one_bridge, secondary_vin) is None
-    assert power_sync._ble_prefix_for_vehicle(hass, two_bridges, primary_vin) == "bridge_beta"
-    assert power_sync._ble_prefix_for_vehicle(hass, two_bridges, secondary_vin) == "bridge_alpha"
+    assert powersync_nir._ble_prefix_for_vehicle(hass, one_bridge, primary_vin) == "primary_ev_bridge"
+    assert powersync_nir._ble_prefix_for_vehicle(hass, one_bridge, secondary_vin) is None
+    assert powersync_nir._ble_prefix_for_vehicle(hass, two_bridges, primary_vin) == "bridge_beta"
+    assert powersync_nir._ble_prefix_for_vehicle(hass, two_bridges, secondary_vin) == "bridge_alpha"
 
     partially_mapped = {
         **two_bridges,
@@ -1374,10 +1380,10 @@ def test_mobile_command_identity_and_ble_pairing_deduplicate_provider_devices():
 
 
 def test_mobile_ble_telemetry_merges_by_vin_mapping_not_prefix_order():
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vin_a = "5YJTEST0000000001"
     vin_b = "5YJTEST0000000002"
-    view = power_sync.EVVehiclesView(_Hass([]))
+    view = powersync_nir.EVVehiclesView(_Hass([]))
     ble_vehicles = {
         "bridge_alpha": {
             "battery_level": 41,
@@ -1398,7 +1404,7 @@ def test_mobile_ble_telemetry_merges_by_vin_mapping_not_prefix_order():
         {"vin": vin_b, "battery_level": 70, "charging_state": "Stopped"},
     ]
     config = {
-        "ev_provider": power_sync.EV_PROVIDER_BOTH,
+        "ev_provider": powersync_nir.EV_PROVIDER_BOTH,
         "tesla_ble_entity_prefix": "bridge_alpha,bridge_beta",
         "tesla_ble_vehicle_mapping": (
             f"{vin_a}=bridge_beta,{vin_b}=bridge_alpha"
@@ -1418,7 +1424,7 @@ def test_mobile_ble_telemetry_merges_by_vin_mapping_not_prefix_order():
 
 
 def test_external_tesla_power_uses_coalesced_charging_vehicle():
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     hass = _tesla_hass([
         _State("sensor.primary_ev_charger_power_2", "7.0", {"unit_of_measurement": "kW"}),
         _State("sensor.primary_ev_charging_2", "charging"),
@@ -1426,12 +1432,12 @@ def test_external_tesla_power_uses_coalesced_charging_vehicle():
         _State("device_tracker.primary_ev_location_2", "home"),
     ])
 
-    assert power_sync._get_external_tesla_ev_power_kw(hass, _Entry()) == 7.0
+    assert powersync_nir._get_external_tesla_ev_power_kw(hass, _Entry()) == 7.0
 
 
 def test_external_tesla_power_excludes_other_charger_types():
-    power_sync = _power_sync_module()
-    power_sync._get_ev_vehicles_status = lambda hass, entry: [
+    powersync_nir = _powersync_nir_module()
+    powersync_nir._get_ev_vehicles_status = lambda hass, entry: [
         {
             "vehicle_id": "generic_ev",
             "brand": "generic",
@@ -1463,12 +1469,12 @@ def test_external_tesla_power_excludes_other_charger_types():
         },
     ]
 
-    assert power_sync._get_external_tesla_ev_power_kw(_Hass([]), _Entry()) == 10.0
+    assert powersync_nir._get_external_tesla_ev_power_kw(_Hass([]), _Entry()) == 10.0
 
 
 def test_external_tesla_power_honors_fleet_provider_with_ble_duplicate():
-    power_sync = _power_sync_module()
-    power_sync._get_ev_vehicles_status = lambda hass, entry: [
+    powersync_nir = _powersync_nir_module()
+    powersync_nir._get_ev_vehicles_status = lambda hass, entry: [
         {
             "vehicle_id": "5YJTEST0000000001",
             "ev_power_kw": 7.0,
@@ -1486,12 +1492,12 @@ def test_external_tesla_power_honors_fleet_provider_with_ble_duplicate():
         },
     ]
 
-    assert power_sync._get_external_tesla_ev_power_kw(_Hass([]), _Entry()) == 7.0
+    assert powersync_nir._get_external_tesla_ev_power_kw(_Hass([]), _Entry()) == 7.0
 
 
 def test_external_tesla_power_coalesces_reversed_fleet_and_ble_in_both_mode():
-    power_sync = _power_sync_module()
-    power_sync._get_ev_vehicles_status = lambda hass, entry: [
+    powersync_nir = _powersync_nir_module()
+    powersync_nir._get_ev_vehicles_status = lambda hass, entry: [
         {
             "vehicle_id": "5YJTEST0000000001",
             "ev_power_kw": 7.0,
@@ -1521,15 +1527,15 @@ def test_external_tesla_power_coalesces_reversed_fleet_and_ble_in_both_mode():
     entry = SimpleNamespace(
         entry_id="entry-1",
         data={},
-        options={"ev_provider": power_sync.EV_PROVIDER_BOTH},
+        options={"ev_provider": powersync_nir.EV_PROVIDER_BOTH},
     )
 
-    assert power_sync._get_external_tesla_ev_power_kw(_Hass([]), entry) == 10.0
+    assert powersync_nir._get_external_tesla_ev_power_kw(_Hass([]), entry) == 10.0
 
 
 def test_external_tesla_power_uses_conservative_total_for_partial_both_mode():
-    power_sync = _power_sync_module()
-    power_sync._get_ev_vehicles_status = lambda hass, entry: [
+    powersync_nir = _powersync_nir_module()
+    powersync_nir._get_ev_vehicles_status = lambda hass, entry: [
         {
             "vehicle_id": "5YJTEST0000000001",
             "ev_power_kw": 3.0,
@@ -1544,22 +1550,22 @@ def test_external_tesla_power_uses_conservative_total_for_partial_both_mode():
     entry = SimpleNamespace(
         entry_id="entry-1",
         data={},
-        options={"ev_provider": power_sync.EV_PROVIDER_BOTH},
+        options={"ev_provider": powersync_nir.EV_PROVIDER_BOTH},
     )
 
-    assert power_sync._get_external_tesla_ev_power_kw(_Hass([]), entry) == 7.0
+    assert powersync_nir._get_external_tesla_ev_power_kw(_Hass([]), entry) == 7.0
 
 
 def test_mobile_ble_vehicle_accepts_connection_status_without_optional_node_status():
     """Mobile Sync must show a configured BLE bridge that exposes BLE Status."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     hass = _Hass([
         _State("binary_sensor.tesla_flinn_ble_status", "off"),
         _State("sensor.tesla_flinn_charging_state", "Unknown"),
         _State("sensor.tesla_flinn_charge_level", "79"),
     ])
 
-    vehicle = power_sync.EVVehiclesView(hass)._get_tesla_ble_vehicle("tesla_flinn")
+    vehicle = powersync_nir.EVVehiclesView(hass)._get_tesla_ble_vehicle("tesla_flinn")
 
     assert vehicle is not None
     assert vehicle["id"] == "ble_tesla_flinn"
@@ -1570,7 +1576,7 @@ def test_mobile_ble_vehicle_accepts_connection_status_without_optional_node_stat
         _State("binary_sensor.tesla_flinn_status", "off"),
         _State("binary_sensor.tesla_flinn_ble_status", "on"),
     ])
-    canonical_vehicle = power_sync.EVVehiclesView(
+    canonical_vehicle = powersync_nir.EVVehiclesView(
         canonical_hass
     )._get_tesla_ble_vehicle("tesla_flinn")
 
@@ -1580,10 +1586,10 @@ def test_mobile_ble_vehicle_accepts_connection_status_without_optional_node_stat
 
 def test_mobile_ble_views_merge_legacy_entry_data_with_options():
     """A legacy BLE provider setting must reach every mobile EV entry point."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     entry = SimpleNamespace(
         data={
-            "ev_provider": power_sync.EV_PROVIDER_TESLA_BLE,
+            "ev_provider": powersync_nir.EV_PROVIDER_TESLA_BLE,
             "tesla_ble_entity_prefix": "legacy_ble",
         },
         options={"tesla_ble_entity_prefix": "current_ble"},
@@ -1594,13 +1600,13 @@ def test_mobile_ble_views_merge_legacy_entry_data_with_options():
     )
 
     expected_config = {
-        "ev_provider": power_sync.EV_PROVIDER_TESLA_BLE,
+        "ev_provider": powersync_nir.EV_PROVIDER_TESLA_BLE,
         "tesla_ble_entity_prefix": "current_ble",
     }
-    assert power_sync.EVStatusView(hass)._get_powersync_config() == expected_config
-    assert power_sync.EVVehiclesView(hass)._get_powersync_config() == expected_config
-    assert power_sync.EVVehicleCommandView(hass)._get_powersync_config() == expected_config
-    assert power_sync._get_available_ev_vehicles(hass) == [{
+    assert powersync_nir.EVStatusView(hass)._get_powersync_config() == expected_config
+    assert powersync_nir.EVVehiclesView(hass)._get_powersync_config() == expected_config
+    assert powersync_nir.EVVehicleCommandView(hass)._get_powersync_config() == expected_config
+    assert powersync_nir._get_available_ev_vehicles(hass) == [{
         "id": "ble_current_ble",
         "display_name": "Tesla BLE (Current Ble)",
         "source": "tesla_ble",
@@ -1608,7 +1614,7 @@ def test_mobile_ble_views_merge_legacy_entry_data_with_options():
 
 
 def test_ev_vehicle_status_prefers_wall_connector_power_for_single_charging_tesla():
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     hass = _tesla_hass([
         _State("sensor.primary_ev_charger_power_2", "7.0", {"unit_of_measurement": "kW"}),
         _State("sensor.primary_ev_charging_2", "charging"),
@@ -1616,7 +1622,7 @@ def test_ev_vehicle_status_prefers_wall_connector_power_for_single_charging_tesl
         _State("device_tracker.primary_ev_location_2", "home"),
         _State("sensor.primary_ev_battery_level_2", "70", {"unit_of_measurement": "%"}),
     ])
-    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
+    hass.data["powersync_nir"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
         data={
             "wall_connectors_raw": [
                 {
@@ -1627,7 +1633,7 @@ def test_ev_vehicle_status_prefers_wall_connector_power_for_single_charging_tesl
         }
     )
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, _Entry())
 
     assert vehicles == [{
         "vehicle_id": "5YJTEST0000000001",
@@ -1638,11 +1644,11 @@ def test_ev_vehicle_status_prefers_wall_connector_power_for_single_charging_tesl
         "is_charging": True,
         "site_presence": "home",
     }]
-    assert power_sync._get_external_tesla_ev_power_kw(hass, _Entry()) == 3.4
+    assert powersync_nir._get_external_tesla_ev_power_kw(hass, _Entry()) == 3.4
 
 
 def test_ev_vehicle_status_drops_stale_power_for_connected_idle_state():
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     hass = _tesla_hass([
         _State("sensor.primary_ev_charger_power", "0.4", {"unit_of_measurement": "kW"}),
         _State("sensor.primary_ev_charging", "stopped"),
@@ -1650,7 +1656,7 @@ def test_ev_vehicle_status_drops_stale_power_for_connected_idle_state():
         _State("device_tracker.primary_ev_location", "home"),
     ])
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, _Entry())
 
     assert vehicles[0]["ev_power_kw"] == 0.0
     assert vehicles[0]["is_connected"] is True
@@ -1658,7 +1664,7 @@ def test_ev_vehicle_status_drops_stale_power_for_connected_idle_state():
 
 
 def test_ev_vehicle_status_keeps_wall_connector_auxiliary_draw_idle():
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vin = "5YJTEST0000000001"
     hass = _tesla_hass([
         _State("sensor.primary_ev_charger_power", "1", {"unit_of_measurement": "kW"}),
@@ -1667,7 +1673,7 @@ def test_ev_vehicle_status_keeps_wall_connector_auxiliary_draw_idle():
         _State("device_tracker.primary_ev_location", "home"),
         _State("sensor.primary_ev_battery_level", "72", {"unit_of_measurement": "%"}),
     ])
-    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
+    hass.data["powersync_nir"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
         data={
             "wall_connectors_raw": [
                 {
@@ -1679,7 +1685,7 @@ def test_ev_vehicle_status_keeps_wall_connector_auxiliary_draw_idle():
         }
     )
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, _Entry())
 
     assert vehicles == [{
         "vehicle_id": vin,
@@ -1695,24 +1701,24 @@ def test_ev_vehicle_status_keeps_wall_connector_auxiliary_draw_idle():
     async def no_sigenergy_charger(*args, **kwargs):
         return None
 
-    power_sync._read_sigenergy_charger_state_for_entry = no_sigenergy_charger
+    powersync_nir._read_sigenergy_charger_state_for_entry = no_sigenergy_charger
     observations = asyncio.run(
-        power_sync._get_ev_load_observations(hass, _Entry(), vehicles)
+        powersync_nir._get_ev_load_observations(hass, _Entry(), vehicles)
     )
     assert len(observations) == 1
     assert observations[0].power_kw == 0.5795
     assert observations[0].active is False
-    assert power_sync._get_external_tesla_ev_power_kw(hass, _Entry()) == 0.5795
+    assert powersync_nir._get_external_tesla_ev_power_kw(hass, _Entry()) == 0.5795
 
 
 def test_ev_vehicle_status_uses_wall_connector_power_without_vehicle_sensors():
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     hass = _Hass([
         _State("sensor.tesla_wall_connector_total_power", "3.4", {"unit_of_measurement": "kW"}),
         _State("sensor.wall_connector_vehicle_2", "connected"),
     ])
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, _Entry())
 
     assert vehicles == [{
         "vehicle_id": "wall_connector_ha",
@@ -1723,11 +1729,11 @@ def test_ev_vehicle_status_uses_wall_connector_power_without_vehicle_sensors():
         "is_connected": True,
         "is_charging": True,
     }]
-    assert power_sync._get_external_tesla_ev_power_kw(hass, _Entry()) == 3.4
+    assert powersync_nir._get_external_tesla_ev_power_kw(hass, _Entry()) == 3.4
 
 
 def test_aggregate_ev_status_ignores_teslemetry_bt_power_when_not_charging():
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vin = "5YJTEST0000000001"
     hass = _Hass([
         _State(f"sensor.{vin}_charging_state", "Stopped"),
@@ -1736,14 +1742,14 @@ def test_aggregate_ev_status_ignores_teslemetry_bt_power_when_not_charging():
         _State(f"sensor.{vin}_battery_level", "72", {"unit_of_measurement": "%"}),
     ])
 
-    status = power_sync._get_ev_vehicle_status(hass, _Entry())
+    status = powersync_nir._get_ev_vehicle_status(hass, _Entry())
 
     assert status == {"ev_power_kw": 0.0, "ev_soc": 72}
 
 
 def test_aggregate_ev_status_excludes_named_zone_power_from_site_fallback():
     """Ticket #284: the no-Wall-Connector fallback must retain Home Load."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     hass = _tesla_hass([
         _State(
             "sensor.primary_ev_charger_power_2",
@@ -1760,7 +1766,7 @@ def test_aggregate_ev_status_excludes_named_zone_power_from_site_fallback():
         ),
     ])
 
-    status = power_sync._get_ev_vehicle_status(hass, _Entry())
+    status = powersync_nir._get_ev_vehicle_status(hass, _Entry())
 
     assert status == {"ev_power_kw": 0.0, "ev_soc": None}
     assert max(0.0, 0.206 - status["ev_power_kw"]) == 0.206
@@ -1768,7 +1774,7 @@ def test_aggregate_ev_status_excludes_named_zone_power_from_site_fallback():
 
 def test_aggregate_ev_status_keeps_home_zone_power_in_site_fallback():
     """The shared presence gate must retain literal-home charging power."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     hass = _tesla_hass([
         _State(
             "sensor.primary_ev_charger_power_2",
@@ -1785,13 +1791,13 @@ def test_aggregate_ev_status_keeps_home_zone_power_in_site_fallback():
         ),
     ])
 
-    status = power_sync._get_ev_vehicle_status(hass, _Entry())
+    status = powersync_nir._get_ev_vehicle_status(hass, _Entry())
 
     assert status == {"ev_power_kw": 2.0, "ev_soc": 86}
 
 
 def test_aggregate_ev_status_uses_configured_generic_charger_soc():
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     entry = SimpleNamespace(
         entry_id="entry-1",
         data={},
@@ -1804,13 +1810,13 @@ def test_aggregate_ev_status_uses_configured_generic_charger_soc():
         _State("sensor.solaredge_ev_soc", "64"),
     ])
 
-    status = power_sync._get_ev_vehicle_status(hass, entry)
+    status = powersync_nir._get_ev_vehicle_status(hass, entry)
 
     assert status == {"ev_power_kw": 0.0, "ev_soc": 64}
 
 
 def test_aggregate_ev_status_uses_configured_generic_charger_power():
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     entry = SimpleNamespace(
         entry_id="entry-1",
         data={},
@@ -1825,13 +1831,13 @@ def test_aggregate_ev_status_uses_configured_generic_charger_power():
         _State("sensor.generic_ev_soc", "64"),
     ])
 
-    status = power_sync._get_ev_vehicle_status(hass, entry)
+    status = powersync_nir._get_ev_vehicle_status(hass, entry)
 
     assert status == {"ev_power_kw": 3.5, "ev_soc": 64}
 
 
 def test_generic_charger_vehicle_reports_connected_idle_status():
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     entry = SimpleNamespace(
         entry_id="entry-1",
         data={},
@@ -1848,7 +1854,7 @@ def test_generic_charger_vehicle_reports_connected_idle_status():
         _State("sensor.generic_ev_soc", "64"),
     ])
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, entry)
 
     assert vehicles == [{
         "vehicle_id": "generic_ev",
@@ -1861,7 +1867,7 @@ def test_generic_charger_vehicle_reports_connected_idle_status():
 
 
 def test_generic_charger_vehicle_reports_measured_charging_power():
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     entry = SimpleNamespace(
         entry_id="entry-1",
         data={},
@@ -1878,7 +1884,7 @@ def test_generic_charger_vehicle_reports_measured_charging_power():
         _State("sensor.generic_ev_soc", "64"),
     ])
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, entry)
 
     assert vehicles == [{
         "vehicle_id": "generic_ev",
@@ -1892,7 +1898,7 @@ def test_generic_charger_vehicle_reports_measured_charging_power():
 
 def test_generic_and_native_wall_connector_same_device_are_one_loadpoint():
     """A generic entity sourced from a Wall Connector must not be summed twice."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     generic_power = "sensor.tesla_wall_connector_single_phase_load"
     generic_status = "sensor.tesla_wall_connector_vehicle"
     native_power = "sensor.tesla_wall_connector_total_power"
@@ -1916,7 +1922,7 @@ def test_generic_and_native_wall_connector_same_device_are_one_loadpoint():
         {state.entity_id: _entity(state.entity_id, device_id) for state in states},
     )
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, entry)
 
     assert vehicles == [{
         "vehicle_id": "generic_ev",
@@ -1930,7 +1936,7 @@ def test_generic_and_native_wall_connector_same_device_are_one_loadpoint():
 
 def test_generic_and_native_wall_connector_same_device_stay_one_idle_loadpoint():
     """The duplicate must not return when the connected charger is idle."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     generic_power = "sensor.tesla_wall_connector_single_phase_load"
     generic_status = "sensor.tesla_wall_connector_vehicle"
     native_power = "sensor.tesla_wall_connector_total_power"
@@ -1954,7 +1960,7 @@ def test_generic_and_native_wall_connector_same_device_stay_one_idle_loadpoint()
         {state.entity_id: _entity(state.entity_id, device_id) for state in states},
     )
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, entry)
 
     assert vehicles == [{
         "vehicle_id": "generic_ev",
@@ -1968,7 +1974,7 @@ def test_generic_and_native_wall_connector_same_device_stay_one_idle_loadpoint()
 
 def test_generic_and_native_wall_connector_distinct_devices_remain_separate():
     """Device identity, not matching power or connection text, joins a charger."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     generic_power = "sensor.generic_ev_power"
     generic_status = "sensor.generic_ev_status"
     native_power = "sensor.tesla_wall_connector_total_power"
@@ -1998,7 +2004,7 @@ def test_generic_and_native_wall_connector_distinct_devices_remain_separate():
         },
     )
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, entry)
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, entry)
 
     assert [(vehicle["vehicle_id"], vehicle["ev_power_kw"]) for vehicle in vehicles] == [
         ("generic_ev", 6.96),
@@ -2007,7 +2013,7 @@ def test_generic_and_native_wall_connector_distinct_devices_remain_separate():
 
 
 def test_aggregate_ev_status_uses_generic_charger_fallback_soc():
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     entry = SimpleNamespace(
         entry_id="entry-1",
         data={},
@@ -2022,13 +2028,13 @@ def test_aggregate_ev_status_uses_generic_charger_fallback_soc():
         _State("sensor.fallback_ev_soc", "68"),
     ])
 
-    status = power_sync._get_ev_vehicle_status(hass, entry)
+    status = powersync_nir._get_ev_vehicle_status(hass, entry)
 
     assert status == {"ev_power_kw": 0.0, "ev_soc": 68}
 
 
 def test_aggregate_ev_status_prefers_configured_generic_soc_over_vehicle_fallback():
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vin = "5YJTEST0000000001"
     entry = SimpleNamespace(
         entry_id="entry-1",
@@ -2045,20 +2051,20 @@ def test_aggregate_ev_status_prefers_configured_generic_soc_over_vehicle_fallbac
         _State(f"sensor.{vin}_battery_level", "72", {"unit_of_measurement": "%"}),
     ])
 
-    status = power_sync._get_ev_vehicle_status(hass, entry)
+    status = powersync_nir._get_ev_vehicle_status(hass, entry)
 
     assert status == {"ev_power_kw": 0.0, "ev_soc": 64}
 
 
 def test_app_managed_sequential_tesla_id_deduplicates_with_vehicle_vin(monkeypatch):
-    power_sync = _power_sync_module()
-    planner = importlib.import_module("power_sync.automations.ev_charging_planner")
+    powersync_nir = _powersync_nir_module()
+    planner = importlib.import_module("powersync_nir.automations.ev_charging_planner")
 
     async def no_sigenergy_state(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(
-        power_sync,
+        powersync_nir,
         "_read_sigenergy_charger_state_for_entry",
         no_sigenergy_state,
     )
@@ -2088,9 +2094,9 @@ def test_app_managed_sequential_tesla_id_deduplicates_with_vehicle_vin(monkeypat
     }]
 
     observations = asyncio.run(
-        power_sync._get_ev_load_observations(hass, _Entry(), vehicles)
+        powersync_nir._get_ev_load_observations(hass, _Entry(), vehicles)
     )
-    ev_load = importlib.import_module("power_sync.ev_load")
+    ev_load = importlib.import_module("powersync_nir.ev_load")
     snapshot = ev_load.aggregate_ev_load(observations)
 
     assert snapshot.power_kw == 7.2
@@ -2100,14 +2106,14 @@ def test_app_managed_sequential_tesla_id_deduplicates_with_vehicle_vin(monkeypat
 
 def test_app_managed_tesla_power_is_zeroed_when_vehicle_is_in_named_zone(monkeypatch):
     """Ticket #284: configured vehicle power cannot restore a remote EV draw."""
-    power_sync = _power_sync_module()
-    planner = importlib.import_module("power_sync.automations.ev_charging_planner")
+    powersync_nir = _powersync_nir_module()
+    planner = importlib.import_module("powersync_nir.automations.ev_charging_planner")
 
     async def no_sigenergy_state(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(
-        power_sync,
+        powersync_nir,
         "_read_sigenergy_charger_state_for_entry",
         no_sigenergy_state,
     )
@@ -2138,9 +2144,9 @@ def test_app_managed_tesla_power_is_zeroed_when_vehicle_is_in_named_zone(monkeyp
     }]
 
     observations = asyncio.run(
-        power_sync._get_ev_load_observations(hass, _Entry(), vehicles)
+        powersync_nir._get_ev_load_observations(hass, _Entry(), vehicles)
     )
-    ev_load = importlib.import_module("power_sync.ev_load")
+    ev_load = importlib.import_module("powersync_nir.ev_load")
     snapshot = ev_load.aggregate_ev_load(observations)
 
     assert snapshot.power_kw == 0.0
@@ -2150,8 +2156,8 @@ def test_app_managed_tesla_power_is_zeroed_when_vehicle_is_in_named_zone(monkeyp
 
 def test_display_snapshot_timestamp_follows_active_zero_power_observation(monkeypatch):
     """Fresh active telemetry must not become unavailable due to clock ordering."""
-    power_sync = _power_sync_module()
-    ev_load = importlib.import_module("power_sync.ev_load")
+    powersync_nir = _powersync_nir_module()
+    ev_load = importlib.import_module("powersync_nir.ev_load")
     base = datetime(2026, 8, 15, 5, 42, 14, tzinfo=timezone.utc)
     clock_calls = 0
 
@@ -2161,7 +2167,7 @@ def test_display_snapshot_timestamp_follows_active_zero_power_observation(monkey
         clock_calls += 1
         return current
 
-    monkeypatch.setattr(power_sync.dt_util, "utcnow", utcnow)
+    monkeypatch.setattr(powersync_nir.dt_util, "utcnow", utcnow)
 
     async def get_ev_load_observations(hass, entry, vehicles):
         return [
@@ -2169,7 +2175,7 @@ def test_display_snapshot_timestamp_follows_active_zero_power_observation(monkey
                 physical_load_key="vehicle:5yjtest0000000001",
                 source_key="5YJTEST0000000001",
                 power_kw=0.0,
-                observed_at=power_sync.dt_util.utcnow(),
+                observed_at=powersync_nir.dt_util.utcnow(),
                 active=True,
                 measurement_kind=ev_load.EvMeasurementKind.VEHICLE,
             )
@@ -2196,24 +2202,24 @@ def test_display_snapshot_timestamp_follows_active_zero_power_observation(monkey
             )
 
     monkeypatch.setattr(
-        power_sync,
+        powersync_nir,
         "_get_ev_load_observations",
         get_ev_load_observations,
     )
-    monkeypatch.setattr(power_sync, "EVLoadpointStatusView", LoadpointStatusView)
+    monkeypatch.setattr(powersync_nir, "EVLoadpointStatusView", LoadpointStatusView)
     tesla_coordinator = SimpleNamespace(
         data={"load_power": 0.617, "ev_power": 0.0}
     )
     hass = _Hass([], entry_data={"tesla_coordinator": tesla_coordinator})
 
     snapshot = asyncio.run(
-        power_sync._get_ev_display_coordinator(
+        powersync_nir._get_ev_display_coordinator(
             hass,
             _Entry(),
         ).async_refresh(force=True)
     )
 
-    observed = hass.data["power_sync"]["entry-1"][
+    observed = hass.data["powersync_nir"]["entry-1"][
         "observed_ev_load_snapshot"
     ]
     assert snapshot["site"]["ev_power_kw"] == 0.0
@@ -2227,8 +2233,8 @@ def test_display_snapshot_keeps_unknown_ev_power_out_of_surplus_arithmetic(
     monkeypatch,
 ):
     """An active unknown loadpoint must not make the canonical EV API fail."""
-    power_sync = _power_sync_module()
-    ev_load = importlib.import_module("power_sync.ev_load")
+    powersync_nir = _powersync_nir_module()
+    ev_load = importlib.import_module("powersync_nir.ev_load")
     observed_at = datetime(2026, 9, 9, 2, 55, tzinfo=timezone.utc)
 
     async def get_ev_load_observations(hass, entry, vehicles):
@@ -2270,11 +2276,11 @@ def test_display_snapshot_keeps_unknown_ev_power_out_of_surplus_arithmetic(
             )
 
     monkeypatch.setattr(
-        power_sync,
+        powersync_nir,
         "_get_ev_load_observations",
         get_ev_load_observations,
     )
-    monkeypatch.setattr(power_sync, "EVLoadpointStatusView", LoadpointStatusView)
+    monkeypatch.setattr(powersync_nir, "EVLoadpointStatusView", LoadpointStatusView)
     hass = _Hass(
         [],
         entry_data={
@@ -2291,7 +2297,7 @@ def test_display_snapshot_keeps_unknown_ev_power_out_of_surplus_arithmetic(
     )
 
     snapshot = asyncio.run(
-        power_sync._get_ev_display_coordinator(hass, _Entry()).async_refresh(force=True)
+        powersync_nir._get_ev_display_coordinator(hass, _Entry()).async_refresh(force=True)
     )
 
     assert snapshot["site"]["ev_power_kw"] is None
@@ -2301,7 +2307,7 @@ def test_display_snapshot_keeps_unknown_ev_power_out_of_surplus_arithmetic(
 
 def test_wall_connector_same_vehicle_edges_follow_source_timestamp():
     """Ticket #204: source time decides same-VIN stop/restart ordering."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
 
@@ -2314,7 +2320,7 @@ def test_wall_connector_same_vehicle_edges_follow_source_timestamp():
         "_observed_at": current - timedelta(seconds=60),
     }
     stale_duplicate = dict(stale_vehicle)
-    assert power_sync._apply_wall_connector_observation(
+    assert powersync_nir._apply_wall_connector_observation(
         [stale_vehicle, stale_duplicate],
         0.0,
         True,
@@ -2337,7 +2343,7 @@ def test_wall_connector_same_vehicle_edges_follow_source_timestamp():
         "_charging_state_known": True,
         "_observed_at": current,
     }
-    assert power_sync._apply_wall_connector_observation(
+    assert powersync_nir._apply_wall_connector_observation(
         [current_vehicle],
         11.0,
         True,
@@ -2352,7 +2358,7 @@ def test_wall_connector_same_vehicle_edges_follow_source_timestamp():
 
 def test_ev_vehicle_status_rejects_older_same_vin_wall_connector_power():
     """Ticket #204: stale site telemetry cannot revive stopped EV power."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
     hass = _tesla_hass([
@@ -2366,7 +2372,7 @@ def test_ev_vehicle_status_rejects_older_same_vin_wall_connector_power():
         _State("binary_sensor.primary_ev_charge_cable_2", "on", last_updated=current),
         _State("device_tracker.primary_ev_location_2", "home", last_updated=current),
     ])
-    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
+    hass.data["powersync_nir"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
         data={
             "wall_connectors_raw": [
                 {
@@ -2379,7 +2385,7 @@ def test_ev_vehicle_status_rejects_older_same_vin_wall_connector_power():
         }
     )
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, _Entry())
 
     assert len(vehicles) == 1
     assert vehicles[0]["ev_power_kw"] == 0.0
@@ -2389,7 +2395,7 @@ def test_ev_vehicle_status_rejects_older_same_vin_wall_connector_power():
 
 def test_ev_vehicle_status_home_metadata_does_not_retimestamp_power_edges():
     """Ticket #204: unrelated home/cable updates cannot hide direct edges."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
 
@@ -2422,7 +2428,7 @@ def test_ev_vehicle_status_home_metadata_does_not_retimestamp_power_edges():
                 last_updated=current,
             ),
         ])
-        hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
+        hass.data["powersync_nir"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
             data={
                 "wall_connectors_raw": [{
                     "wall_connector_state": 11 if direct_power == 0.0 else 2,
@@ -2433,7 +2439,7 @@ def test_ev_vehicle_status_home_metadata_does_not_retimestamp_power_edges():
             }
         )
 
-        vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+        vehicles = powersync_nir._get_ev_vehicles_status(hass, _Entry())
 
         assert len(vehicles) == 1
         assert vehicles[0]["ev_power_kw"] == direct_power
@@ -2443,9 +2449,9 @@ def test_ev_vehicle_status_home_metadata_does_not_retimestamp_power_edges():
 
 def test_same_vin_coalescing_uses_newer_stop_and_restart_in_both_orders():
     """Ticket #204: duplicate providers cannot revive stale same-VIN state."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     loadpoint_status = importlib.import_module(
-        "power_sync.automations.loadpoint_status"
+        "powersync_nir.automations.loadpoint_status"
     )
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
@@ -2479,9 +2485,9 @@ def test_same_vin_coalescing_uses_newer_stop_and_restart_in_both_orders():
 
 def test_same_vin_coalescing_orders_power_and_charging_state_separately():
     """A newer state edge must not restamp an older same-VIN power sample."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     loadpoint_status = importlib.import_module(
-        "power_sync.automations.loadpoint_status"
+        "powersync_nir.automations.loadpoint_status"
     )
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
@@ -2519,9 +2525,9 @@ def test_same_vin_coalescing_orders_power_and_charging_state_separately():
 
 def test_same_vin_equal_timestamp_positive_power_clears_stale_auxiliary():
     """Replacing zero with measured charging power cannot double-count aux load."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     loadpoint_status = importlib.import_module(
-        "power_sync.automations.loadpoint_status"
+        "powersync_nir.automations.loadpoint_status"
     )
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
@@ -2552,10 +2558,10 @@ def test_same_vin_equal_timestamp_positive_power_clears_stale_auxiliary():
 
 def test_multiple_vinless_wall_connectors_keep_distinct_physical_loads():
     """Distinct unidentified Wall Connectors must not overwrite one Tesla."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     current = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
     hass = _tesla_hass([])
-    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
+    hass.data["powersync_nir"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
         data={
             "wall_connectors_raw": [
                 {
@@ -2573,7 +2579,7 @@ def test_multiple_vinless_wall_connectors_keep_distinct_physical_loads():
         }
     )
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, _Entry())
     connector_rows = [
         vehicle for vehicle in vehicles
         if str(vehicle.get("charger_id") or "").startswith("wall_connector_")
@@ -2588,7 +2594,7 @@ def test_multiple_vinless_wall_connectors_keep_distinct_physical_loads():
 
 def test_away_vin_match_keeps_home_wall_connector_as_separate_loadpoint():
     """A named-zone vehicle cannot be revived by conflicting site telemetry."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
     hass = _tesla_hass([
@@ -2609,7 +2615,7 @@ def test_away_vin_match_keeps_home_wall_connector_as_separate_loadpoint():
             last_updated=current,
         ),
     ])
-    hass.data["power_sync"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
+    hass.data["powersync_nir"]["entry-1"]["tesla_coordinator"] = SimpleNamespace(
         data={
             "wall_connectors_raw": [{
                 "wall_connector_state": 2,
@@ -2621,7 +2627,7 @@ def test_away_vin_match_keeps_home_wall_connector_as_separate_loadpoint():
         }
     )
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, _Entry())
     away = next(vehicle for vehicle in vehicles if vehicle.get("site_presence") == "away")
     connector = next(
         vehicle for vehicle in vehicles
@@ -2636,7 +2642,7 @@ def test_away_vin_match_keeps_home_wall_connector_as_separate_loadpoint():
 
 def test_duplicate_same_vin_away_tracker_fences_exact_wall_connector():
     """Ticket #204: an unlocated duplicate cannot bypass the away VIN fence."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 1, 9, tzinfo=timezone.utc)
 
@@ -2681,7 +2687,7 @@ def test_duplicate_same_vin_away_tracker_fences_exact_wall_connector():
                 },
             )
 
-            vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+            vehicles = powersync_nir._get_ev_vehicles_status(hass, _Entry())
             away = next(
                 vehicle
                 for vehicle in vehicles
@@ -2705,11 +2711,11 @@ def test_duplicate_same_vin_away_tracker_fences_exact_wall_connector():
 
 def test_away_vehicle_fences_zero_power_charging_connector_display_contract():
     """Ticket #204: a stale state-2 connector cannot render an away EV onsite."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     loadpoint_status = importlib.import_module(
-        "power_sync.automations.loadpoint_status"
+        "powersync_nir.automations.loadpoint_status"
     )
-    ev_display = importlib.import_module("power_sync.ev_display")
+    ev_display = importlib.import_module("powersync_nir.ev_display")
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 5, 26, tzinfo=timezone.utc)
 
@@ -2754,7 +2760,7 @@ def test_away_vehicle_fences_zero_power_charging_connector_display_contract():
         },
     )
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, _Entry())
     loadpoints = loadpoint_status.build_loadpoint_status({}, vehicles)
     snapshot = {
         "site": {
@@ -2777,11 +2783,11 @@ def test_away_vehicle_fences_zero_power_charging_connector_display_contract():
 
 def test_vinless_zero_power_connector_cannot_revive_only_away_vehicle():
     """Ticket #204: a DIN-only idle connector cannot invent onsite presence."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     loadpoint_status = importlib.import_module(
-        "power_sync.automations.loadpoint_status"
+        "powersync_nir.automations.loadpoint_status"
     )
-    ev_display = importlib.import_module("power_sync.ev_display")
+    ev_display = importlib.import_module("powersync_nir.ev_display")
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 5, 47, 19, tzinfo=timezone.utc)
 
@@ -2827,7 +2833,7 @@ def test_vinless_zero_power_connector_cannot_revive_only_away_vehicle():
             },
         )
 
-        vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+        vehicles = powersync_nir._get_ev_vehicles_status(hass, _Entry())
         loadpoints = loadpoint_status.build_loadpoint_status({}, vehicles)
         sensor = ev_display.display_snapshot_to_sensor_data({
             "site": {
@@ -2851,7 +2857,7 @@ def test_vinless_zero_power_connector_cannot_revive_only_away_vehicle():
 
 def test_vinless_positive_connector_remains_distinct_from_away_vehicle():
     """A measured unidentified connector remains a separate physical load."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 5, 47, 19, tzinfo=timezone.utc)
     tracker = _State(
@@ -2881,7 +2887,7 @@ def test_vinless_positive_connector_remains_distinct_from_away_vehicle():
         },
     )
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, _Entry())
     connector = next(
         vehicle for vehicle in vehicles
         if vehicle.get("charger_id")
@@ -2895,7 +2901,7 @@ def test_vinless_positive_connector_remains_distinct_from_away_vehicle():
 
 def test_vinless_connector_accepts_newer_home_presence_for_same_vehicle():
     """A newer home transition must reopen the DIN-only attribution path."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 5, 47, 19, tzinfo=timezone.utc)
     states = []
@@ -2934,7 +2940,7 @@ def test_vinless_connector_accepts_newer_home_presence_for_same_vehicle():
         },
     )
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, _Entry())
 
     assert len(vehicles) == 1
     assert vehicles[0]["vehicle_id"] == vehicle_id
@@ -2945,7 +2951,7 @@ def test_vinless_connector_accepts_newer_home_presence_for_same_vehicle():
 
 def test_duplicate_same_vin_newer_home_tracker_allows_exact_wall_connector():
     """A newer home observation restores exact-VIN attribution after travel."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 1, 9, tzinfo=timezone.utc)
 
@@ -2988,7 +2994,7 @@ def test_duplicate_same_vin_newer_home_tracker_allows_exact_wall_connector():
             },
         )
 
-        vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+        vehicles = powersync_nir._get_ev_vehicles_status(hass, _Entry())
 
         assert len(vehicles) == 1
         assert vehicles[0]["vehicle_id"] == vehicle_id
@@ -3003,7 +3009,7 @@ def test_duplicate_same_vin_newer_home_tracker_allows_exact_wall_connector():
 
 def test_duplicate_same_vin_untimestamped_away_presence_fails_closed():
     """An unknown-age away observation needs a comparable home transition."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 1, 9, tzinfo=timezone.utc)
     away_vehicle = {
@@ -3022,7 +3028,7 @@ def test_duplicate_same_vin_untimestamped_away_presence_fails_closed():
         "is_charging": False,
     }
 
-    matched = power_sync._apply_wall_connector_observation(
+    matched = powersync_nir._apply_wall_connector_observation(
         [home_vehicle, away_vehicle],
         11.0,
         True,
@@ -3038,7 +3044,7 @@ def test_duplicate_same_vin_untimestamped_away_presence_fails_closed():
 
 def test_legacy_ev_status_applies_away_tracker_to_duplicate_physical_vin():
     """The aggregate fallback cannot count an unlocated duplicate as home."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 1, 9, tzinfo=timezone.utc)
 
@@ -3076,14 +3082,14 @@ def test_legacy_ev_status_applies_away_tracker_to_duplicate_physical_vin():
         }
         hass = _Hass(states, entities, devices)
 
-        status = power_sync._get_ev_vehicle_status(hass, _Entry())
+        status = powersync_nir._get_ev_vehicle_status(hass, _Entry())
 
         assert status["ev_power_kw"] == 0.0
 
 
 def test_legacy_ev_status_accepts_newer_home_for_duplicate_physical_vin():
     """A newer home tracker re-enables physical-VIN aggregate telemetry."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vehicle_id = "5YJTEST0000000001"
     current = datetime(2026, 8, 17, 1, 9, tzinfo=timezone.utc)
 
@@ -3144,14 +3150,14 @@ def test_legacy_ev_status_accepts_newer_home_for_duplicate_physical_vin():
         entities[power.entity_id] = _entity(power.entity_id, "device-home")
         hass = _Hass(states, entities, devices)
 
-        status = power_sync._get_ev_vehicle_status(hass, _Entry())
+        status = powersync_nir._get_ev_vehicle_status(hass, _Entry())
 
         assert status["ev_power_kw"] == 7.0
 
 
 def test_unmatched_explicit_vin_never_falls_through_to_another_vehicle():
     """A connector's VIN cannot be heuristically assigned to a different car."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     current = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
     away_vehicle = {
         "vehicle_id": "5YJTEST0000000001",
@@ -3169,7 +3175,7 @@ def test_unmatched_explicit_vin_never_falls_through_to_another_vehicle():
         "_observed_at": current,
     }
 
-    matched = power_sync._apply_wall_connector_observation(
+    matched = powersync_nir._apply_wall_connector_observation(
         [away_vehicle, home_vehicle],
         11.0,
         True,
@@ -3185,7 +3191,7 @@ def test_unmatched_explicit_vin_never_falls_through_to_another_vehicle():
 
 def test_exact_vin_zero_state_clears_stale_power_and_connection():
     """An explicit VIN-scoped state-0 sample is still authoritative telemetry."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     current = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
     vehicle = {
         "vehicle_id": "5YJTEST0000000001",
@@ -3195,7 +3201,7 @@ def test_exact_vin_zero_state_clears_stale_power_and_connection():
         "_observed_at": current - timedelta(seconds=60),
     }
 
-    matched = power_sync._apply_wall_connector_observation(
+    matched = powersync_nir._apply_wall_connector_observation(
         [vehicle],
         0.0,
         False,
@@ -3213,7 +3219,7 @@ def test_exact_vin_zero_state_clears_stale_power_and_connection():
 
 def test_unmatched_disconnected_wall_connector_stays_disconnected():
     """An idle connector row must retain its real disconnected state."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     current = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
     hass = _Hass([], entry_data={
         "tesla_coordinator": SimpleNamespace(data={
@@ -3226,7 +3232,7 @@ def test_unmatched_disconnected_wall_connector_stays_disconnected():
         })
     })
 
-    vehicles = power_sync._get_ev_vehicles_status(hass, _Entry())
+    vehicles = powersync_nir._get_ev_vehicles_status(hass, _Entry())
 
     assert len(vehicles) == 1
     assert vehicles[0]["charger_id"] == "wall_connector_garage"
@@ -3237,15 +3243,15 @@ def test_unmatched_disconnected_wall_connector_stays_disconnected():
 
 def test_display_snapshot_reconciles_direct_same_vehicle_stop_and_restart(monkeypatch):
     """Ticket #204: the canonical cache follows direct VIN-scoped edges."""
-    power_sync = _power_sync_module()
-    ev_load = importlib.import_module("power_sync.ev_load")
+    powersync_nir = _powersync_nir_module()
+    ev_load = importlib.import_module("powersync_nir.ev_load")
     now = datetime(2026, 8, 17, 0, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(power_sync.dt_util, "utcnow", lambda: now)
+    monkeypatch.setattr(powersync_nir.dt_util, "utcnow", lambda: now)
     vehicle_key = "vehicle:5yjtest0000000001"
     case = {}
 
     async def get_ev_load_observations(hass, entry, vehicles):
-        observed_at = power_sync.dt_util.utcnow()
+        observed_at = powersync_nir.dt_util.utcnow()
         return [
             ev_load.EvLoadObservation(
                 physical_load_key=vehicle_key,
@@ -3278,11 +3284,11 @@ def test_display_snapshot_reconciles_direct_same_vehicle_stop_and_restart(monkey
             )
 
     monkeypatch.setattr(
-        power_sync,
+        powersync_nir,
         "_get_ev_load_observations",
         get_ev_load_observations,
     )
-    monkeypatch.setattr(power_sync, "EVLoadpointStatusView", LoadpointStatusView)
+    monkeypatch.setattr(powersync_nir, "EVLoadpointStatusView", LoadpointStatusView)
 
     for case in (
         {
@@ -3312,12 +3318,12 @@ def test_display_snapshot_reconciles_direct_same_vehicle_stop_and_restart(monkey
         hass = _Hass([], entry_data={"tesla_coordinator": tesla_coordinator})
 
         snapshot = asyncio.run(
-            power_sync._get_ev_display_coordinator(
+            powersync_nir._get_ev_display_coordinator(
                 hass,
                 _Entry(),
             ).async_refresh(force=True)
         )
-        observed = hass.data["power_sync"]["entry-1"][
+        observed = hass.data["powersync_nir"]["entry-1"][
             "observed_ev_load_snapshot"
         ]
 
@@ -3334,9 +3340,9 @@ def test_display_snapshot_direct_meter_keeps_distinct_missing_ev_incomplete(
     monkeypatch,
 ):
     """A direct Tesla meter must not hide a different unmeasured charger."""
-    power_sync = _power_sync_module()
-    ev_load = importlib.import_module("power_sync.ev_load")
-    observed_at = power_sync.dt_util.utcnow()
+    powersync_nir = _powersync_nir_module()
+    ev_load = importlib.import_module("powersync_nir.ev_load")
+    observed_at = powersync_nir.dt_util.utcnow()
     vehicle_key = "vehicle:5yjtest0000000001"
 
     async def get_ev_load_observations(hass, entry, vehicles):
@@ -3373,11 +3379,11 @@ def test_display_snapshot_direct_meter_keeps_distinct_missing_ev_incomplete(
             )
 
     monkeypatch.setattr(
-        power_sync,
+        powersync_nir,
         "_get_ev_load_observations",
         get_ev_load_observations,
     )
-    monkeypatch.setattr(power_sync, "EVLoadpointStatusView", LoadpointStatusView)
+    monkeypatch.setattr(powersync_nir, "EVLoadpointStatusView", LoadpointStatusView)
     tesla_coordinator = SimpleNamespace(
         data={
             "load_power": None,
@@ -3390,12 +3396,12 @@ def test_display_snapshot_direct_meter_keeps_distinct_missing_ev_incomplete(
     hass = _Hass([], entry_data={"tesla_coordinator": tesla_coordinator})
 
     asyncio.run(
-        power_sync._get_ev_display_coordinator(
+        powersync_nir._get_ev_display_coordinator(
             hass,
             _Entry(),
         ).async_refresh(force=True)
     )
-    observed = hass.data["power_sync"]["entry-1"][
+    observed = hass.data["powersync_nir"]["entry-1"][
         "observed_ev_load_snapshot"
     ]
 
@@ -3448,9 +3454,9 @@ def test_one_car_registered_by_two_integrations_is_one_vehicle():
     Discovery yielded both rows, so a two-car household reported three
     vehicles and the duplicate became a phantom Smart Schedule loadpoint.
     """
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     planner = importlib.import_module(
-        "power_sync.automations.ev_charging_planner"
+        "powersync_nir.automations.ev_charging_planner"
     )
     hass = _Hass([], {}, _dual_registered_devices())
 
@@ -3470,9 +3476,9 @@ def test_a_powerwall_never_supplies_an_ev_battery_level():
     as "matches every vehicle", so the home battery's state of charge could be
     returned as a car's SoC.
     """
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     planner = importlib.import_module(
-        "power_sync.automations.ev_charging_planner"
+        "powersync_nir.automations.ev_charging_planner"
     )
     devices = _dual_registered_devices()
     states = [
@@ -3494,7 +3500,7 @@ def test_a_powerwall_never_supplies_an_ev_battery_level():
     )
     executor.hass = hass
     executor.config_entry = _Entry()
-    executor._domain = "power_sync"
+    executor._domain = "powersync_nir"
 
     soc = asyncio.run(executor._get_ev_soc("LRWYHCEK3PC907290"))
 
@@ -3504,7 +3510,7 @@ def test_a_powerwall_never_supplies_an_ev_battery_level():
 
 def test_manual_start_uses_healthy_suffixed_provider_for_same_vehicle():
     """TESSY: unknown Fleet entities must not mask Teslemetry's plugged car."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vin, other_vin = "5YJTEST0000000001", "5YJTEST0000000002"
     devices = {
         name: SimpleNamespace(id=name, name=name, identifiers={(provider, identity)})
@@ -3529,7 +3535,7 @@ def test_manual_start_uses_healthy_suffixed_provider_for_same_vehicle():
             states.append(_State(entity_id, value))
             registry[entity_id] = SimpleNamespace(entity_id=entity_id, device_id=device)
     hass = _Hass(states, registry, devices)
-    view = power_sync.EVVehicleCommandView(hass)
+    view = powersync_nir.EVVehicleCommandView(hass)
     view._get_powersync_config = lambda: {}
     assert asyncio.run(view._is_vehicle_plugged_in(vin)) is True
     assert asyncio.run(view._is_vehicle_at_home(vin)) is True
@@ -3538,16 +3544,16 @@ def test_manual_start_uses_healthy_suffixed_provider_for_same_vehicle():
 
 
 def test_manual_start_cannot_borrow_other_vehicles_ble_plug_cache():
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vin, other_vin = "5YJTEST0000000001", "5YJTEST0000000002"
     hass = _Hass([])
-    hass.data["power_sync"]["_ev_cache"] = {
+    hass.data["powersync_nir"]["_ev_cache"] = {
         "ev_ble_plug_cache_other_bridge": {
             "is_plugged_in": True,
             "cached_at": datetime.now(timezone.utc),
         }
     }
-    view = power_sync.EVVehicleCommandView(hass)
+    view = powersync_nir.EVVehicleCommandView(hass)
     view._get_powersync_config = lambda: {
         "ev_provider": "both",
         "tesla_ble_entity_prefix": "target_bridge,other_bridge",
@@ -3558,7 +3564,7 @@ def test_manual_start_cannot_borrow_other_vehicles_ble_plug_cache():
     # The exact mapped bridge can supply fresh positive evidence, but neither
     # a stale entry nor a future timestamp may authorize a start.
     for age, expected in [(60, True), (7201, False), (-60, False)]:
-        hass.data["power_sync"]["_ev_cache"]["ev_ble_plug_cache_target_bridge"] = {
+        hass.data["powersync_nir"]["_ev_cache"]["ev_ble_plug_cache_target_bridge"] = {
             "is_plugged_in": True,
             "cached_at": datetime.now(timezone.utc) - timedelta(seconds=age),
         }
@@ -3567,7 +3573,7 @@ def test_manual_start_cannot_borrow_other_vehicles_ble_plug_cache():
 
 def test_manual_start_accepts_current_exact_vin_wall_connector_status():
     """Ticket-57: manual readiness matches the connected loadpoint card."""
-    power_sync = _power_sync_module()
+    powersync_nir = _powersync_nir_module()
     vin = "5YJTEST0000000001"
     observed_at = datetime.now(timezone.utc)
     charger = _State(
@@ -3601,9 +3607,9 @@ def test_manual_start_accepts_current_exact_vin_wall_connector_status():
         config_entries=[_Entry()],
     )
 
-    status = power_sync._get_ev_vehicles_status(hass, _Entry())
+    status = powersync_nir._get_ev_vehicles_status(hass, _Entry())
     assert status[0]["is_connected"] is True
 
-    view = power_sync.EVVehicleCommandView(hass)
+    view = powersync_nir.EVVehicleCommandView(hass)
     view._get_powersync_config = lambda: {}
     assert asyncio.run(view._is_vehicle_plugged_in(vin)) is True

@@ -10,17 +10,17 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "power_sync"
+ROOT = Path(__file__).resolve().parent.parent / "custom_components" / "powersync_nir"
 
-_ps = types.ModuleType("power_sync")
+_ps = types.ModuleType("powersync_nir")
 _ps.__path__ = [str(ROOT)]
-sys.modules["power_sync"] = _ps
+sys.modules["powersync_nir"] = _ps
 
-_automations = types.ModuleType("power_sync.automations")
+_automations = types.ModuleType("powersync_nir.automations")
 _automations.__path__ = [str(ROOT / "automations")]
-sys.modules["power_sync.automations"] = _automations
+sys.modules["powersync_nir.automations"] = _automations
 
-ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
+ev_ownership = importlib.import_module("powersync_nir.automations.ev_ownership")
 
 
 class _Entry:
@@ -39,7 +39,7 @@ class _MappedEntry(_Entry):
 
 class _Hass:
     def __init__(self) -> None:
-        self.data = {"power_sync": {"entry-1": {}}}
+        self.data = {"powersync_nir": {"entry-1": {}}}
         self.created_tasks = []
 
     def async_create_task(self, coro):
@@ -66,7 +66,7 @@ def _set_external_policy(hass, vehicle_id, policy):
             ]
         }
     )
-    hass.data["power_sync"]["entry-1"]["automation_store"] = store
+    hass.data["powersync_nir"]["entry-1"]["automation_store"] = store
     return store
 
 
@@ -195,7 +195,7 @@ def test_effective_owner_ignores_stale_external_lease_under_override():
 def test_persist_ev_runtime_state_saves_ownership_and_last_commands():
     hass = _Hass()
     store = _Store()
-    hass.data["power_sync"]["entry-1"]["automation_store"] = store
+    hass.data["powersync_nir"]["entry-1"]["automation_store"] = store
 
     ev_ownership.claim_ev_ownership(
         hass,
@@ -219,7 +219,7 @@ def test_persist_ev_runtime_state_saves_ownership_and_last_commands():
 def test_capability_probe_record_survives_restart_for_bounded_recovery():
     hass = _Hass()
     store = _Store()
-    entry_data = hass.data["power_sync"]["entry-1"]
+    entry_data = hass.data["powersync_nir"]["entry-1"]
     entry_data["automation_store"] = store
     entry_data["ev_capability_refresh_records"] = {
         "VIN123|WC-A|1": {
@@ -233,10 +233,10 @@ def test_capability_probe_record_survives_restart_for_bounded_recovery():
 
     asyncio.run(ev_ownership.persist_ev_runtime_state(hass, _Entry(), store))
     restored_hass = _Hass()
-    restored_hass.data["power_sync"]["entry-1"]["automation_store"] = store
+    restored_hass.data["powersync_nir"]["entry-1"]["automation_store"] = store
     ev_ownership.restore_ev_runtime_state(restored_hass, _Entry(), store)
 
-    restored = restored_hass.data["power_sync"]["entry-1"][
+    restored = restored_hass.data["powersync_nir"]["entry-1"][
         "ev_capability_refresh_records"
     ]
     assert restored["VIN123|WC-A|1"]["start_confirmed"] is True
@@ -273,7 +273,7 @@ def test_restore_ev_runtime_state_clears_stale_active_ownership():
         }
     )
     hass = _Hass()
-    hass.data["power_sync"]["entry-1"]["automation_store"] = store
+    hass.data["powersync_nir"]["entry-1"]["automation_store"] = store
 
     result = ev_ownership.restore_ev_runtime_state(hass, _Entry(), store)
     for task in hass.created_tasks:
@@ -283,10 +283,10 @@ def test_restore_ev_runtime_state_clears_stale_active_ownership():
     assert result["restored_commands"] == 1
     assert result["resumable_manual_sessions"] == {}
     assert result["expired_manual_sessions"] == {}
-    assert hass.data["power_sync"]["entry-1"]["ev_ownership"] == {}
-    recovered = hass.data["power_sync"]["entry-1"]["ev_recovered_ownership"]
+    assert hass.data["powersync_nir"]["entry-1"]["ev_ownership"] == {}
+    recovered = hass.data["powersync_nir"]["entry-1"]["ev_recovered_ownership"]
     assert recovered["VIN123"]["owner_mode"] == "manual"
-    last_command = hass.data["power_sync"]["entry-1"]["ev_last_command"]["VIN123"]
+    last_command = hass.data["powersync_nir"]["entry-1"]["ev_last_command"]["VIN123"]
     assert last_command["command"] == "ha_restart_recovery"
     assert last_command["success"] is True
     assert "manual ownership" in last_command["reason"]
@@ -304,7 +304,7 @@ def test_restore_ev_runtime_state_resaves_cleared_snapshot():
         }
     )
     hass = _Hass()
-    hass.data["power_sync"]["entry-1"]["automation_store"] = store
+    hass.data["powersync_nir"]["entry-1"]["automation_store"] = store
 
     ev_ownership.restore_ev_runtime_state(hass, _Entry(), store)
     for task in hass.created_tasks:
@@ -336,7 +336,7 @@ def test_consume_recovered_ev_ownership_is_fresh_exact_and_one_shot():
         }
     )
     hass = _Hass()
-    hass.data["power_sync"]["entry-1"]["automation_store"] = store
+    hass.data["powersync_nir"]["entry-1"]["automation_store"] = store
 
     ev_ownership.restore_ev_runtime_state(hass, _Entry(), store)
     for task in hass.created_tasks:
@@ -393,7 +393,7 @@ def test_consume_recovered_ev_ownership_rejects_stale_snapshot():
         }
     )
     hass = _Hass()
-    hass.data["power_sync"]["entry-1"]["automation_store"] = store
+    hass.data["powersync_nir"]["entry-1"]["automation_store"] = store
 
     ev_ownership.restore_ev_runtime_state(hass, _Entry(), store)
     for task in hass.created_tasks:
@@ -408,7 +408,7 @@ def test_consume_recovered_ev_ownership_rejects_stale_snapshot():
         )
         is None
     )
-    assert hass.data["power_sync"]["entry-1"]["ev_recovered_ownership"] == {}
+    assert hass.data["powersync_nir"]["entry-1"]["ev_recovered_ownership"] == {}
 
 
 def test_restore_ev_runtime_state_returns_unexpired_manual_quick_session():
@@ -434,7 +434,7 @@ def test_restore_ev_runtime_state_returns_unexpired_manual_quick_session():
         }
     )
     hass = _Hass()
-    hass.data["power_sync"]["entry-1"]["automation_store"] = store
+    hass.data["powersync_nir"]["entry-1"]["automation_store"] = store
 
     result = ev_ownership.restore_ev_runtime_state(hass, _Entry(), store)
     for task in hass.created_tasks:
@@ -477,7 +477,7 @@ def test_restore_ev_runtime_state_does_not_resume_expired_manual_quick_session()
         }
     )
     hass = _Hass()
-    hass.data["power_sync"]["entry-1"]["automation_store"] = store
+    hass.data["powersync_nir"]["entry-1"]["automation_store"] = store
 
     result = ev_ownership.restore_ev_runtime_state(hass, _Entry(), store)
     for task in hass.created_tasks:
@@ -764,7 +764,7 @@ def test_fresh_recovered_powersync_session_blocks_external_claim():
     hass = _Hass()
     vehicle_id = "5YJTEST0000000001"
     _set_external_policy(hass, vehicle_id, "yield")
-    entry = hass.data["power_sync"][_Entry.entry_id]
+    entry = hass.data["powersync_nir"][_Entry.entry_id]
     entry["ev_recovered_ownership"] = {
         vehicle_id: {"owner": "powersync", "owner_mode": "solar_surplus"}
     }
