@@ -1245,3 +1245,31 @@ def test_active_cycle_budget_blocks_competing_direct_shared_command_before_io(
         hass.services.async_call.assert_not_awaited()
     else:
         write.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("charger_type", "physical_id"), (("generic", "generic_ev"), ("sigenergy", "sigenergy_charger")))
+def test_external_session_guarded_stop_uses_selected_profile_route(monkeypatch, charger_type, physical_id):
+    hass = _Hass()
+    entry = _Entry()
+    params = {"charger_type": charger_type, "vehicle_id": "shared_ev_profile_a"}
+    if charger_type == "generic":
+        params["charger_switch_entity"] = "switch.shared_ev"
+    else:
+        entry.options = {**entry.options, "generic_charger_enabled": False, "sigenergy_charger_enabled": True, "sigenergy_charger_type": "evac"}
+        write = AsyncMock(return_value=True)
+        monkeypatch.setattr(actions, "_stop_sigenergy_charger", write)
+    ownership.claim_ev_ownership(
+        hass,
+        entry,
+        physical_id,
+        owner="external",
+        owner_mode="external",
+        extra={"active_profile_id": "shared_ev_profile_a"},
+    )
+
+    assert asyncio.run(actions._stop_external_shared_session_guarded(hass, entry, params)) is True
+    if charger_type == "generic":
+        hass.services.async_call.assert_awaited_once_with("switch", "turn_off", {"entity_id": "switch.shared_ev"}, blocking=True)
+    else:
+        assert write.await_args.args[2]["vehicle_id"] == physical_id
+        assert write.await_args.args[2]["active_logical_vehicle_id"] == "shared_ev_profile_a"

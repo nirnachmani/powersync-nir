@@ -569,3 +569,51 @@ def reconcile_shared_external_session(
         return state
     state.origin = "powersync" if powersync_command_observed else "external"
     return state
+
+
+async def resolve_end_of_cycle_external_shared_session(
+    *,
+    binding_id: str | None,
+    active_profile_id: str | None,
+    selected_params: Mapping[str, Any] | None,
+    state: ReconciliationState,
+    external_control_policy: str,
+    cycle_ledger: Mapping[str, Any] | None,
+    get_lease: Callable[[], Mapping[str, Any] | None],
+    ensure_external_ownership: Callable[[str], Awaitable[None]],
+    stop_and_confirm: Callable[..., Awaitable[bool]],
+) -> bool:
+    """Resolve one proven external selected shared session after a cycle.
+
+    Physical I/O and ownership mechanics are injected so this policy boundary
+    stays independent from action dispatch and runtime/session state.
+    """
+    if (
+        binding_id not in {"generic_ev", "sigenergy_charger"}
+        or not active_profile_id
+        or not isinstance(selected_params, Mapping)
+        or state.origin != "external"
+        or state.physical_active is not True
+        or state.stop_outcome is not None
+    ):
+        return False
+
+    lease = get_lease()
+    if external_control_policy == "yield":
+        if lease is None or lease.get("owner") == "external":
+            await ensure_external_ownership(active_profile_id)
+        return False
+
+    records = cycle_ledger.get(binding_id, {}) if isinstance(cycle_ledger, Mapping) else {}
+    if isinstance(records, Mapping) and any(
+        isinstance(record, Mapping) and record.get("allowed") is True
+        for record in records.values()
+    ):
+        return False
+
+    return await stop_and_confirm(
+        binding_id=binding_id,
+        active_profile_id=active_profile_id,
+        selected_params=dict(selected_params),
+        state=state,
+    )

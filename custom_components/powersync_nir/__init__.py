@@ -43339,9 +43339,114 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             try:
                 await _auto_evaluate_automations_unlocked(now)
             finally:
-                from .automations.actions import _clear_automated_shared_loadpoint_cycle
+                from .automations.actions import (
+                    _clear_automated_shared_loadpoint_cycle,
+                    _observe_shared_loadpoint_for_direct_lease,
+                    _stop_external_shared_session_guarded,
+                )
+                from .automations.ev_ownership import (
+                    claim_ev_ownership,
+                    get_ev_ownership,
+                    get_external_control_policy,
+                )
+                from .automations.external_session_reconciler import (
+                    load_reconciliation_state,
+                    persist_reconciliation_state,
+                    resolve_end_of_cycle_external_shared_session,
+                    stop_and_confirm_shared_handoff,
+                )
+                from .automations.shared_loadpoint import (
+                    canonical_shared_loadpoint_id,
+                    resolve_active_shared_profile,
+                )
 
-                _clear_automated_shared_loadpoint_cycle(hass, entry)
+                active_profile_id = resolve_active_shared_profile(hass, entry)
+                binding_id = (
+                    canonical_shared_loadpoint_id(entry, active_profile_id)
+                    if active_profile_id is not None
+                    else None
+                )
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                store = entry_data.get("automation_store") if isinstance(entry_data, dict) else None
+                stored_configs = getattr(store, "_data", {}).get("vehicle_charging_configs", [])
+                selected_params = next(
+                    (
+                        dict(candidate)
+                        for candidate in stored_configs
+                        if isinstance(candidate, Mapping)
+                        and candidate.get("vehicle_id") == active_profile_id
+                    ),
+                    None,
+                )
+                if isinstance(selected_params, dict) and not selected_params.get("charger_power_entity"):
+                    selected_params["charger_power_entity"] = entry.options.get(
+                        "generic_charger_power_entity"
+                    )
+
+                async def ensure_external_ownership(profile_id):
+                    claim_ev_ownership(
+                        hass,
+                        entry,
+                        binding_id,
+                        owner="external",
+                        owner_mode="external",
+                        reason="Observed external selected shared charging",
+                        extra={"active_profile_id": profile_id, "observed": True},
+                    )
+
+                async def stop_and_confirm(**kwargs):
+                    async def stop():
+                        return await _stop_external_shared_session_guarded(
+                            hass, entry, kwargs["selected_params"]
+                        )
+
+                    async def observe():
+                        return await _observe_shared_loadpoint_for_direct_lease(
+                            hass, entry, kwargs["binding_id"], kwargs["selected_params"]
+                        )
+
+                    async def persist(updated_state):
+                        await persist_reconciliation_state(
+                            hass, entry, kwargs["binding_id"], updated_state
+                        )
+
+                    async def finalize():
+                        return None
+
+                    return await stop_and_confirm_shared_handoff(
+                        kwargs["state"],
+                        active_profile_id=kwargs["active_profile_id"],
+                        stop=stop,
+                        observe=observe,
+                        persist=persist,
+                        finalize=finalize,
+                        sleep=asyncio.sleep,
+                    )
+
+                try:
+                    await resolve_end_of_cycle_external_shared_session(
+                        binding_id=binding_id,
+                        active_profile_id=active_profile_id,
+                        selected_params=selected_params,
+                        state=load_reconciliation_state(hass, entry, binding_id or ""),
+                        external_control_policy=(
+                            get_external_control_policy(hass, entry, active_profile_id)
+                            if active_profile_id is not None
+                            else "override"
+                        ),
+                        cycle_ledger=(
+                            entry_data.get("_automated_shared_loadpoint_decision_ledger", {})
+                            if isinstance(entry_data, dict)
+                            else {}
+                        ),
+                        get_lease=lambda: get_ev_ownership(hass, entry, binding_id)[1]
+                        if binding_id is not None
+                        else None,
+                        ensure_external_ownership=ensure_external_ownership,
+                        stop_and_confirm=stop_and_confirm,
+                    )
+                finally:
+                    _clear_automated_shared_loadpoint_cycle(hass, entry)
 
     automation_cancel_timer = async_track_utc_time_change(
         hass,

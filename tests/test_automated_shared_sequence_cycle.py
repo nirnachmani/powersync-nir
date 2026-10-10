@@ -72,3 +72,10 @@ def test_solar_periodic_evaluation_does_not_depend_on_previous_cycle_ledger():
     source = ast.get_source_segment(SOURCE.read_text(), _unlocked_auto_evaluator()) or ""
 
     assert "_automated_shared_loadpoint_decision_ledger" not in source
+
+
+def test_end_of_cycle_external_session_resolution_precedes_shared_cycle_cleanup():
+    source = ast.get_source_segment(SOURCE.read_text(), _auto_evaluator()) or ""
+
+    assert "resolve_end_of_cycle_external_shared_session" in source
+    assert source.index("resolve_end_of_cycle_external_shared_session") < source.index("_clear_automated_shared_loadpoint_cycle(hass, entry)")

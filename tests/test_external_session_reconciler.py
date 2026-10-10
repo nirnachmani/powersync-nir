@@ -658,3 +658,90 @@ def test_missing_generic_power_remains_unknown_despite_recent_command() -> None:
 
     assert state.physical_active is None
     assert state.origin == "unknown"
+
+
+def test_end_of_cycle_yield_claims_only_an_unowned_external_shared_session() -> None:
+    state = module.ReconciliationState(origin="external", physical_active=True)
+    claimed = []
+    stopped = []
+
+    async def claim_external(profile_id):
+        claimed.append(profile_id)
+
+    async def stop_and_confirm(**_kwargs):
+        stopped.append(True)
+        return True
+
+    result = asyncio.run(
+        module.resolve_end_of_cycle_external_shared_session(
+            binding_id="generic_ev",
+            active_profile_id="shared_ev_profile_a",
+            selected_params={"charger_type": "generic"},
+            state=state,
+            external_control_policy="yield",
+            cycle_ledger={},
+            get_lease=lambda: None,
+            ensure_external_ownership=claim_external,
+            stop_and_confirm=stop_and_confirm,
+        )
+    )
+
+    assert result is False
+    assert claimed == ["shared_ev_profile_a"]
+    assert stopped == []
+
+
+def test_end_of_cycle_override_stops_once_only_without_an_allowed_cycle_decision() -> None:
+    state = module.ReconciliationState(origin="external", physical_active=True)
+    calls = []
+
+    async def stop_and_confirm(**kwargs):
+        calls.append(kwargs)
+        return False
+
+    result = asyncio.run(
+        module.resolve_end_of_cycle_external_shared_session(
+            binding_id="sigenergy_charger",
+            active_profile_id="shared_ev_profile_b",
+            selected_params={"charger_type": "sigenergy"},
+            state=state,
+            external_control_policy="override",
+            cycle_ledger={"sigenergy_charger": {"shared_ev_profile_b": {"allowed": False}}},
+            get_lease=lambda: {"owner": "external"},
+            ensure_external_ownership=lambda _profile: None,
+            stop_and_confirm=stop_and_confirm,
+        )
+    )
+
+    assert result is False
+    assert calls == [{
+        "binding_id": "sigenergy_charger",
+        "active_profile_id": "shared_ev_profile_b",
+        "selected_params": {"charger_type": "sigenergy"},
+        "state": state,
+    }]
+
+
+def test_end_of_cycle_does_not_stop_when_allowed_or_already_resolved() -> None:
+    stopped = []
+
+    async def stop_and_confirm(**_kwargs):
+        stopped.append(True)
+        return True
+
+    for state, ledger in (
+        (module.ReconciliationState(origin="external", physical_active=True), {"generic_ev": {"a": {"allowed": True}}}),
+        (module.ReconciliationState(origin="settling", physical_active=True), {}),
+        (module.ReconciliationState(origin="external", physical_active=True, stop_outcome={"status": "failed"}), {}),
+    ):
+        assert not asyncio.run(
+            module.resolve_end_of_cycle_external_shared_session(
+                binding_id="generic_ev", active_profile_id="a",
+                selected_params={"charger_type": "generic"}, state=state,
+                external_control_policy="override", cycle_ledger=ledger,
+                get_lease=lambda: None, ensure_external_ownership=lambda _profile: None,
+                stop_and_confirm=stop_and_confirm,
+            )
+        )
+
+    assert stopped == []

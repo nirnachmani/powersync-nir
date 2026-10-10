@@ -5461,6 +5461,19 @@ async def _action_start_ev_charging(
     return True
 
 
+async def _stop_external_shared_session_guarded(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    params: Mapping[str, Any],
+) -> bool:
+    """Stop a proven external selected shared session through the normal guard."""
+    return await _action_stop_ev_charging(
+        hass,
+        config_entry,
+        {**params, "_external_session_stop_authorization": _EXTERNAL_SESSION_STOP_AUTHORIZATION},
+    )
+
+
 async def _action_stop_ev_charging(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -5495,7 +5508,14 @@ async def _action_stop_ev_charging(
                 params.get("_shared_handoff_stop_authorization")
                 is _SHARED_HANDOFF_STOP_AUTHORIZATION
             ),
-            acquire_shared_lease=True,
+            allow_external_session_stop=(
+                params.get("_external_session_stop_authorization")
+                is _EXTERNAL_SESSION_STOP_AUTHORIZATION
+            ),
+            acquire_shared_lease=(
+                params.get("_external_session_stop_authorization")
+                is not _EXTERNAL_SESSION_STOP_AUTHORIZATION
+            ),
         )
         if resolved_command is None:
             return False
@@ -6096,6 +6116,7 @@ _phase_load_management_targets: Dict[str, Dict[str, Dict[str, Any]]] = {}
 _AUTOMATED_SHARED_SEQUENCE_BUDGET_KEY = "_automated_shared_loadpoint_sequence_budget"
 _AUTOMATED_SHARED_DECISION_LEDGER_KEY = "_automated_shared_loadpoint_decision_ledger"
 _AUTOMATED_SHARED_SEQUENCE_TOKEN_KEY = "_automated_shared_sequence_token"
+_EXTERNAL_SESSION_STOP_AUTHORIZATION = object()
 
 
 def _automated_shared_sequence_entry_data(
@@ -7652,6 +7673,7 @@ async def _resolve_shared_loadpoint_direct_command(
     params: Mapping[str, Any],
     *,
     allow_shared_handoff_stop: bool = False,
+    allow_external_session_stop: bool = False,
     acquire_shared_lease: bool = False,
 ) -> tuple[str, dict[str, Any]] | None:
     """Authorise direct Generic/EVAC writes through the logical profile gate."""
@@ -7666,6 +7688,31 @@ async def _resolve_shared_loadpoint_direct_command(
         canonical_shared_loadpoint_id,
         resolve_shared_loadpoint_command,
     )
+
+    # Only the private end-of-cycle resolver may stop a selected externally
+    # owned loadpoint. It still resolves the current selector and canonical
+    # binding, so a physical pseudo-ID or a stale profile cannot bypass this.
+    if allow_external_session_stop and (
+        params.get("_external_session_stop_authorization")
+        is _EXTERNAL_SESSION_STOP_AUTHORIZATION
+    ):
+        from .ev_ownership import get_ev_ownership
+
+        requested_profile_id = (
+            params.get("active_logical_vehicle_id")
+            or params.get("logical_vehicle_id")
+            or vehicle_id
+        )
+        resolved_params = resolve_shared_loadpoint_command(
+            hass, config_entry, requested_profile_id, params
+        )
+        if resolved_params is None:
+            return None
+        physical_vehicle_id = str(resolved_params["vehicle_id"])
+        _lease_id, lease = get_ev_ownership(hass, config_entry, physical_vehicle_id)
+        if not isinstance(lease, dict) or lease.get("owner") != "external":
+            return None
+        return physical_vehicle_id, resolved_params
 
     # During an active A -> B handoff the selector already names B, but the
     # fenced outgoing A controller alone may issue its physical stop. The
