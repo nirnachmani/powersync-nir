@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import re
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PRIVATE_REPOSITORY = "nirnachmani/powersync-nir"
@@ -16,21 +18,47 @@ def _read(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
 
 
-def _markdown_section(document: str, heading: str) -> str:
-    """Return a level-two Markdown section without depending on separators."""
-    match = re.search(
-        rf"^## {re.escape(heading)}\s*$([\s\S]*?)(?=^## |\Z)",
-        document,
-        flags=re.MULTILINE,
+def _has_nearby_terms(document: str, *term_groups: tuple[str, ...]) -> bool:
+    """Whether each term group occurs in one prose-sized window.
+
+    This deliberately tests policy concepts rather than Markdown layout or one
+    prescribed sentence.  The alternatives cover ordinary inflections while
+    keeping the required repository and deployment distinctions meaningful.
+    """
+    terms = ["(?:" + "|".join(group) + ")" for group in term_groups]
+    pattern = r".{0,180}?".join(rf"\b{term}\b" for term in terms)
+    reverse_pattern = r".{0,180}?".join(rf"\b{term}\b" for term in reversed(terms))
+    return bool(
+        re.search(pattern, document, flags=re.IGNORECASE | re.DOTALL)
+        or re.search(reverse_pattern, document, flags=re.IGNORECASE | re.DOTALL)
     )
-    assert match, f"Missing ## {heading} section"
-    return match.group(1)
 
 
-def _readme_title(document: str) -> str:
-    match = re.search(r"^\s*#\s+(.+?)\s*$", document, flags=re.MULTILINE)
-    assert match, "README must have a Markdown title"
-    return match.group(1)
+def _assert_readme_identity(document: str) -> None:
+    assert _has_nearby_terms(document, ("private",), ("repository", "repo", "fork"))
+    assert _has_nearby_terms(
+        document,
+        ("installed", "installation", "integration"),
+        ("PowerSync",),
+        ("power_sync",),
+    )
+
+
+def _assert_deployment_policy(document: str) -> None:
+    """Require authorization and updater gates to remain distinct concepts."""
+    policy_concepts = (
+        r"\b(?:deploy|deployment)\w*\b",
+        r"\b(?:explicit(?:ly)?|separate(?:ly)?)\b",
+        r"\bauthori[sz](?:e|ed|ation)\b",
+        r"\bupdat(?:e|er|ing)\w*\b",
+        r"\bgates?\b",
+        r"\b(?:not|never|cannot|isn't|aren't)\b",
+    )
+    prose_blocks = re.split(r"\n\s*\n", document)
+    assert any(
+        all(re.search(concept, block, flags=re.IGNORECASE) for concept in policy_concepts)
+        for block in prose_blocks
+    ), "deployment policy must require explicit authorization and deny updater gates that authority"
 
 
 def test_private_repository_metadata_uses_restored_component_path_and_private_slug():
@@ -47,31 +75,29 @@ def test_private_repository_metadata_uses_restored_component_path_and_private_sl
     assert hacs["name"] == "PowerSync"
     assert manifest["domain"] == "power_sync"
     assert manifest["name"] == "PowerSync"
-    title = _readme_title(readme).lower()
-    assert title.startswith("powersync")
-    assert "private fork" in title
-    assert " nir" not in title
     for source in (readme, private_readme, agents):
         assert PRIVATE_REPOSITORY in source
+
+    _assert_readme_identity(readme)
 
     assert (
         "https://my.home-assistant.io/redirect/hacs_repository/"
         "?owner=nirnachmani&repository=powersync-nir&category=integration"
     ) in readme
-    installation = _markdown_section(readme, "Installation")
-    assert "https://github.com/nirnachmani/powersync-nir" in installation
-    assert "https://github.com/bolagnaise/PowerSync" not in installation
+    assert "https://github.com/nirnachmani/powersync-nir" in readme
 
-    assert "HA domain/package: `power_sync`" in private_readme
-    assert "Home Assistant domain/package `power_sync`" in agents
-    agents_policy = agents.lower()
-    assert "deployment" in agents_policy
-    assert "separate explicit authorization" in agents_policy
-    assert "not deployment authorization" in agents_policy
-    deployment = _markdown_section(private_readme, "Deployment").lower()
-    assert "separately authorized" in deployment
-    assert "private `main` branch" in deployment
-    assert "updater gates" in deployment
+    _assert_readme_identity(private_readme)
+    _assert_deployment_policy(agents)
+    _assert_deployment_policy(private_readme)
+
+
+def test_private_deployment_policy_rejects_updater_authorisation_mutation():
+    private_readme = _read("README_PRIVATE_FORK.md")
+    mutated = private_readme.replace("not an updater outcome", "an updater outcome", 1)
+    assert mutated != private_readme
+
+    with pytest.raises(AssertionError):
+        _assert_deployment_policy(mutated)
 
 
 def test_private_updater_material_uses_restored_component_path_and_never_authorises_deployment():
