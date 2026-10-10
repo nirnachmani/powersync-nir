@@ -24,11 +24,34 @@ def test_private_repository_metadata_uses_restored_component_path_and_private_sl
 
     assert f"{COMPONENT_PATH}/manifest.json" in workflow
     assert "custom_components/powersync_nir" not in workflow
+    manifest = json.loads(_read(f"{COMPONENT_PATH}/manifest.json"))
+
     assert hacs["name"] == "PowerSync"
+    assert manifest["domain"] == "power_sync"
+    assert manifest["name"] == "PowerSync"
     for source in (readme, private_readme, agents):
         assert PRIVATE_REPOSITORY in source
+
+    assert (
+        "https://my.home-assistant.io/redirect/hacs_repository/"
+        "?owner=nirnachmani&repository=powersync-nir&category=integration"
+    ) in readme
+    installation = readme[readme.index("## Installation"):]
+    installation = installation[:installation.index("\n---")]
+    assert "https://github.com/nirnachmani/powersync-nir" in installation
+    assert "https://github.com/bolagnaise/PowerSync" not in installation
+
     assert "HA domain/package: `power_sync`" in private_readme
     assert "Home Assistant domain/package `power_sync`" in agents
+    assert (
+        "Deployment requires separate explicit authorization. Defined updater gates "
+        "and a verified rollback path are prerequisites, not deployment authorization."
+    ) in agents
+    assert "Deployment is separately authorized work, not an updater outcome." in private_readme
+    assert (
+        "After explicit authorization, deploy only the private `main` branch through "
+        "the documented updater gates."
+    ) in private_readme
 
 
 def test_private_updater_material_uses_restored_component_path_and_never_authorises_deployment():
