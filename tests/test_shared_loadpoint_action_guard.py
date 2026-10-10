@@ -1631,6 +1631,104 @@ def test_active_shared_handoff_stops_outgoing_profile_before_incoming_profile_ca
     )
 
 
+@pytest.mark.parametrize(
+    ("outgoing_soc", "expected_end_soc"),
+    (("46", 46), ("unavailable", None)),
+)
+def test_live_physical_handoff_ends_only_outgoing_profile_with_its_soc(
+    monkeypatch, outgoing_soc, expected_end_soc
+):
+    """Confirmed physical handoff writes A's final live SoC, never B's sample."""
+    hass = _Hass(selector_state="tesla", profile_a_soc=outgoing_soc)
+    entry = _Entry()
+    entry.options = {
+        **entry.options,
+        "shared_loadpoint_profile_a_soc_entity": "sensor.tank_soc",
+        "shared_loadpoint_profile_b_soc_entity": "sensor.tesla_soc",
+    }
+    states = {
+        "sensor.connected_vehicle": _State("tesla"),
+        "sensor.tank_soc": _State(outgoing_soc),
+        "sensor.tesla_soc": _State("88"),
+        "switch.shared_ev": _State("on"),
+        "number.shared_ev_amps": _State("6"),
+    }
+    states["number.shared_ev_amps"].attributes = {"min": 6, "max": 32}
+    hass.states = SimpleNamespace(get=states.get)
+    old_params = {
+        **_generic_params(),
+        "vehicle_id": "generic_ev",
+        "vehicle_vin": "generic_ev",
+        "logical_vehicle_id": "shared_ev_profile_a",
+        "active_logical_vehicle_id": "shared_ev_profile_a",
+        "shared_loadpoint_binding": True,
+        "dynamic_mode": "battery_target",
+        "owner_mode": "scheduled",
+    }
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state[entry.entry_id] = {
+        "generic_ev": {
+            "active": True,
+            "active_profile_id": "shared_ev_profile_a",
+            "params": old_params,
+            "current_amps": 8,
+            "session_id": "outgoing-session",
+        }
+    }
+    _claim_shared_loadpoint(hass, profile_id="shared_ev_profile_a")
+    reconciler = importlib.import_module("power_sync.automations.external_session_reconciler")
+    monkeypatch.setattr(
+        reconciler,
+        "generic_observation_from_hass",
+        lambda *_args, **_kwargs: SimpleNamespace(fresh=True, charging=True),
+    )
+    monkeypatch.setattr(
+        reconciler,
+        "reconcile_shared_external_session",
+        lambda *_args, **_kwargs: SimpleNamespace(active_profile_id="shared_ev_profile_a"),
+    )
+
+    async def stop_and_finalize(_reconciliation, *, stop, finalize, **_kwargs):
+        assert await stop() is True
+        await finalize()
+        return False
+
+    monkeypatch.setattr(reconciler, "stop_and_confirm_shared_handoff", stop_and_finalize)
+    manager = SimpleNamespace(end_session=AsyncMock())
+    sessions = types.ModuleType("power_sync.automations.ev_charging_session")
+    sessions.get_session_manager = lambda: manager
+    monkeypatch.setitem(sys.modules, sessions.__name__, sessions)
+
+    assert asyncio.run(actions._action_start_ev_charging_dynamic(
+        hass,
+        entry,
+        {
+            **_generic_params(),
+            "vehicle_id": "shared_ev_profile_b",
+            "dynamic_mode": "battery_target",
+            "owner_mode": "scheduled",
+        },
+    )) is False
+
+    ended = manager.end_session.await_args.kwargs
+    assert ended["vehicle_id"] == "generic_ev"
+    assert ended["reason"] == "profile handoff"
+    assert ended["end_soc"] == expected_end_soc
+    if expected_end_soc is None:
+        assert ended == {
+            "vehicle_id": "generic_ev",
+            "reason": "profile handoff",
+            "end_soc": None,
+            "end_soc_entity": None,
+            "end_soc_time": None,
+            "end_soc_source": None,
+        }
+    else:
+        assert ended["end_soc_entity"] == "sensor.tank_soc"
+        assert ended["end_soc_time"] == states["sensor.tank_soc"].last_updated.isoformat()
+        assert ended["end_soc_source"] == "state"
+
+
 def test_shared_dynamic_session_keeps_logical_identity_for_periodic_rate_and_stop(monkeypatch):
     """A shared runtime carries its selected profile through later physical writes."""
     hass = _Hass()

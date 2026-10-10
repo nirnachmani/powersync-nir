@@ -13909,8 +13909,20 @@ async def _action_start_ev_charging_dynamic_locked(
 
                     session_manager = get_session_manager()
                     if session_manager and existing_state.get("session_id"):
+                        end_soc_kwargs = _shared_session_end_soc_provenance(
+                            hass,
+                            config_entry,
+                            {
+                                "shared_loadpoint_binding": True,
+                                "active_logical_vehicle_id": existing_state.get(
+                                    "active_profile_id"
+                                ),
+                            },
+                        )
                         await session_manager.end_session(
-                            vehicle_id=vehicle_id, reason="profile handoff"
+                            vehicle_id=vehicle_id,
+                            reason="profile handoff",
+                            **end_soc_kwargs,
                         )
                 except Exception as err:
                     _LOGGER.warning(
