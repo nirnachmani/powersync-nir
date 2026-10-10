@@ -6473,7 +6473,8 @@ async def record_manual_ev_charging_session(
         session_manager = get_session_manager()
         if session_manager:
             session = await session_manager.start_session(
-                vehicle_id=resolved_vehicle_id,
+                vehicle_id=full_params.get("active_logical_vehicle_id", resolved_vehicle_id),
+                loadpoint_id=resolved_vehicle_id,
                 mode="manual",
             )
             session_id = session.id
@@ -6511,6 +6512,7 @@ async def record_manual_ev_charging_session(
         reason=reason,
         command="start",
         extra={
+            "active_profile_id": full_params.get("active_logical_vehicle_id"),
             "charger_type": full_params.get("charger_type", "tesla"),
             "source_mode": full_params.get("source_mode"),
             "duration_minutes": full_params.get("duration_minutes"),
@@ -13728,6 +13730,7 @@ async def _action_start_ev_charging_dynamic_locked(
             else f"start_{owner_mode}"
         ),
         extra={
+            "active_profile_id": params.get("active_logical_vehicle_id"),
             "charger_type": charger_type,
             # A fresh physical observation is runtime truth, not a command.
             # Keep the deferred LP directive as the last commanded value so
