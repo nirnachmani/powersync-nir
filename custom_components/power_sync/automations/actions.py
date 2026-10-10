@@ -5118,6 +5118,7 @@ async def _action_start_ev_charging(
             requested_vehicle_id,
             params,
             acquire_shared_lease=True,
+            require_live_shared_profile_soc=True,
         )
         if resolved_command is None:
             return False
@@ -5820,6 +5821,7 @@ async def _action_set_ev_charging_amps(
             requested_vehicle_id,
             params,
             acquire_shared_lease=True,
+            require_live_shared_profile_soc=int(amps) > 0,
         )
         if resolved_command is None:
             return False
@@ -8077,6 +8079,7 @@ async def _resolve_shared_loadpoint_direct_command(
     allow_shared_handoff_stop: bool = False,
     allow_external_session_stop: bool = False,
     acquire_shared_lease: bool = False,
+    require_live_shared_profile_soc: bool = False,
 ) -> tuple[str, dict[str, Any]] | None:
     """Authorise direct Generic/EVAC writes through the logical profile gate."""
     charger_type = str(params.get("charger_type") or "tesla").strip().lower()
@@ -8198,6 +8201,38 @@ async def _resolve_shared_loadpoint_direct_command(
     if not resolved_params.get("shared_loadpoint_binding"):
         return str(vehicle_id), resolved_params
 
+    selected_profile_id = str(
+        resolved_params.get("active_logical_vehicle_id")
+        or resolved_params.get("logical_vehicle_id")
+        or ""
+    )
+    owner_mode = str(
+        resolved_params.get("owner_mode") or resolved_params.get("dynamic_mode") or ""
+    )
+    # A fresh same-profile SoC cache remains a Smart Schedule forecast input,
+    # but is never evidence that a vehicle is presently safe to command.  Read
+    # the selected profile's state again at the physical action boundary.
+    if require_live_shared_profile_soc and owner_mode == "smart_schedule":
+        from .ev_ownership import record_ev_command
+        from .shared_loadpoint import resolve_shared_profile_soc
+
+        if resolve_shared_profile_soc(hass, config_entry, selected_profile_id) is None:
+            reason = "current valid live selected profile SoC is unavailable"
+            _LOGGER.info(
+                "Shared Smart Schedule command blocked for %s: %s",
+                selected_profile_id,
+                reason,
+            )
+            record_ev_command(
+                hass,
+                config_entry,
+                selected_profile_id,
+                command="authorize_smart_schedule",
+                success=False,
+                reason=reason,
+            )
+            return None
+
     # A logical selector proves which profile is active, but direct hardware
     # commands must also respect the single physical lease. Starts and current
     # writes acquire that canonical lease synchronously, so a selector change
@@ -8296,7 +8331,12 @@ async def _set_vehicle_amps(
 ) -> bool:
     """Apply the final per-phase clamp to an owned rate command."""
     resolved_command = await _resolve_shared_loadpoint_direct_command(
-        hass, config_entry, vehicle_id, params, acquire_shared_lease=True
+        hass,
+        config_entry,
+        vehicle_id,
+        params,
+        acquire_shared_lease=True,
+        require_live_shared_profile_soc=amps > 0,
     )
     if resolved_command is None:
         return False
@@ -8368,7 +8408,11 @@ async def _set_vehicle_amps_unchecked(
         True if successful
     """
     resolved_command = await _resolve_shared_loadpoint_direct_command(
-        hass, config_entry, vehicle_id, params
+        hass,
+        config_entry,
+        vehicle_id,
+        params,
+        require_live_shared_profile_soc=amps > 0,
     )
     if resolved_command is None:
         return False

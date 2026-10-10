@@ -1143,6 +1143,39 @@ def test_shared_logical_profile_cache_is_same_profile_and_fresh_only():
     assert executor._get_cached_soc("shared_ev_profile_b") is None
 
 
+def test_shared_logical_profile_uses_fresh_cache_for_forecast_only():
+    """A same-profile cache remains available to the planner after live loss."""
+    entry = types.SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "generic_charger_enabled": True,
+            "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+            "shared_loadpoint_profile_a_name": "Tank",
+            "shared_loadpoint_profile_a_state": "tank",
+            "shared_loadpoint_profile_a_soc_entity": "sensor.tank_soc",
+            "shared_loadpoint_profile_b_name": "Tesla",
+            "shared_loadpoint_profile_b_state": "tesla",
+        },
+    )
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor.hass = types.SimpleNamespace(
+        states=types.SimpleNamespace(get=lambda _entity_id: None)
+    )
+    executor.config_entry = entry
+    executor._state = {}
+    executor._store = None
+    executor._cached_soc = {
+        "shared_ev_profile_a": {
+            "soc": 31,
+            "updated": datetime.now().isoformat(),
+        }
+    }
+
+    assert asyncio.run(executor._get_vehicle_soc("shared_ev_profile_a")) == 31
+    assert executor._shared_profile_soc_metadata["shared_ev_profile_a"]["source"] == "cache"
+
+
 def test_shared_profile_without_soc_clears_existing_forecast_plan():
     entry = types.SimpleNamespace(
         entry_id="entry-1",

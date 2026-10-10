@@ -78,13 +78,18 @@ class _State:
 
 
 class _Hass:
-    def __init__(self, selector_state: str = "tank") -> None:
-        self.states = SimpleNamespace(
-            get=lambda entity_id: {
-                "sensor.connected_vehicle": _State(selector_state),
-                "switch.shared_ev": _State("on"),
-            }.get(entity_id)
-        )
+    def __init__(
+        self, selector_state: str = "tank", profile_a_soc: str | None = None
+    ) -> None:
+        states = {
+            "sensor.connected_vehicle": _State(selector_state),
+            "switch.shared_ev": _State("on"),
+        }
+        if profile_a_soc is not None:
+            states["sensor.tank_soc"] = _State(profile_a_soc)
+        states["number.shared_ev_amps"] = _State("6")
+        states["number.shared_ev_amps"].attributes = {"min": 6, "max": 32}
+        self.states = SimpleNamespace(get=states.get)
         self.services = SimpleNamespace(async_call=AsyncMock())
         self.data = {"power_sync": {"entry-1": {}}}
 
@@ -106,7 +111,66 @@ def _generic_params() -> dict:
     return {
         "charger_type": "generic",
         "charger_switch_entity": "switch.shared_ev",
+        "charger_amps_entity": "number.shared_ev_amps",
     }
+
+
+def test_shared_smart_schedule_cached_soc_cannot_authorize_current_write():
+    """A fresh forecast cache is not live telemetry for a physical command."""
+    hass = _Hass(profile_a_soc="unavailable")
+    entry = _Entry()
+    entry.options = {
+        **entry.options,
+        "shared_loadpoint_profile_a_soc_entity": "sensor.tank_soc",
+    }
+    # This deliberately fresh cache may support the profile forecast, but not I/O.
+    hass.data["power_sync"]["entry-1"]["shared_profile_soc_metadata"] = {
+        "shared_ev_profile_a": {
+            "source": "cache",
+            "cache_age_seconds": 1,
+            "stale": True,
+        }
+    }
+
+    assert asyncio.run(actions._action_set_ev_charging_amps(
+        hass,
+        entry,
+        {
+            **_generic_params(),
+            "vehicle_id": "shared_ev_profile_a",
+            "logical_vehicle_id": "shared_ev_profile_a",
+            "owner_mode": "smart_schedule",
+            "amps": 16,
+        },
+    )) is False
+
+    assert hass.services.async_call.await_count == 0
+    command = ownership.get_ev_last_commands(hass, entry)["shared_ev_profile_a"]
+    assert command["success"] is False
+    assert command["reason"] == "current valid live selected profile SoC is unavailable"
+
+
+def test_shared_smart_schedule_live_soc_authorizes_current_write():
+    hass = _Hass(profile_a_soc="42")
+    entry = _Entry()
+    entry.options = {
+        **entry.options,
+        "shared_loadpoint_profile_a_soc_entity": "sensor.tank_soc",
+    }
+
+    assert asyncio.run(actions._action_set_ev_charging_amps(
+        hass,
+        entry,
+        {
+            **_generic_params(),
+            "vehicle_id": "shared_ev_profile_a",
+            "logical_vehicle_id": "shared_ev_profile_a",
+            "owner_mode": "smart_schedule",
+            "amps": 16,
+        },
+    )) is True
+
+    assert hass.services.async_call.await_count == 1
 
 
 def _shared_solar_preflight_setup(*, charger_type="generic", physical_id="generic_ev"):
