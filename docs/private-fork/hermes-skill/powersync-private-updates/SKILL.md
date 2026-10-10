@@ -1,0 +1,116 @@
+---
+name: powersync-private-updates
+description: "Use when maintaining the PowerSync Nir private fork against upstream."
+version: 1.0.0
+---
+
+# PowerSync Nir private-fork upstream maintenance
+
+## When to use
+
+Use this skill in the dedicated `powersync-maintainer` Hermes profile on the
+maintainer server to review, integrate, and validate upstream PowerSync changes
+for the private `powersync-nir` fork.
+
+## Scope and safety boundary
+
+- Work only in the configured private-fork checkout and a disposable candidate
+  worktree; never edit a deployed checkout directly.
+- Confirm the target Git remote/repository is private before any push. Never
+  publish to the public `upstream` remote.
+- Preserve the architecture in `docs/private-fork/local-change-inventory.md`.
+- Do not widen scope to Tesla, EVDC, OCPP, Zaptec, or other excluded backends.
+- Do not weaken, delete, bypass, or misreport a failing validator or test.
+- Never expose secrets, tokens, device addresses, or captures in commits or
+  reports.
+- Deployment is a separate gated phase. Never deploy, reload/restart Home
+  Assistant, or control a physical charger without separate authorisation and
+  the server's approved deployment procedure.
+
+## Required inputs
+
+Before work, establish:
+
+1. The private-fork checkout, branch, and private deploy remote.
+2. A clean worktree or explicitly recorded local changes.
+3. The last reviewed upstream SHA/tag and target upstream range.
+4. The current local-change inventory.
+5. A working Python environment for the fork.
+
+## Required gates
+
+Run from the private-fork root before and after every candidate integration:
+
+```bash
+python scripts/private-fork/validate_local_architecture.py
+scripts/private-fork/run_private_tests.sh
+```
+
+The focused runner includes Android-contract and private shared-loadpoint/
+reconciliation tests. Use `--broader` only when required; report every failure
+and do not suppress baseline failures.
+
+## Workflow
+
+1. Record `git status --short`, private starting SHA, last reviewed upstream
+   SHA/tag, and target upstream SHA/tag.
+2. Read `docs/private-fork/local-change-inventory.md` and
+   `docs/private-fork/powersync-private-updates-reference.md`.
+3. Fetch and compare the explicit upstream range deterministically using the
+   repository tools; identify changed paths, symbols, tests, and release notes.
+4. Classify the delta as one of:
+   - **No overlap:** no private modules/direct tests touched.
+   - **Mechanical overlap:** same file, separable hunks.
+   - **Compatible semantic overlap:** private invariants can be preserved with
+     test-backed adaptation.
+   - **Redundant:** the private fork already covers the upstream behaviour.
+   - **Incompatible:** private behavioural invariants cannot be preserved
+     safely.
+5. Create a disposable candidate worktree and branch.
+6. For no-overlap, mechanical, or compatible changes, integrate minimally and
+   run every required gate. Commit only if they pass.
+7. For redundant changes, record the upstream SHA and equivalence rationale;
+   retain the private implementation.
+8. For incompatible changes or failed gates, retain the candidate untouched and
+   report the precise conflict/failure. Do not push it as a release or deploy.
+
+## Private invariants
+
+Keep these true:
+
+- Shared profile selection fails closed; there is no first-profile fallback.
+- Generic and Sigenergy EVAC physical start/stop/current commands pass the
+  shared guard and physical ownership path.
+- Reconciliation observes/categorises state; it does not replace charging-mode
+  calculations.
+- Existing Solar Surplus, Smart Schedule, Scheduled Charging, and Price-Level
+  decisions remain authoritative.
+- Shared physical sessions, leases, and runtime keys preserve logical-profile
+  attribution.
+- Android existing routes and payload fields remain compatible; shared
+  diagnostics is an optional separate endpoint.
+
+## Report
+
+Use this exact structure:
+
+```text
+Scope: <private revision and upstream range>
+Start state: <private SHA>; working tree <clean/recorded changes>
+Classification: <no overlap/mechanical/compatible/redundant/incompatible>
+Changed: <files and one-line purpose>
+Gates:
+- validate_local_architecture.py: <pass/fail>
+- run_private_tests.sh: <pass/fail>
+- broader suite, if requested: <pass/fail; all failures counted>
+Commit/candidate: <SHA or retained worktree>
+Deployment: <not attempted / separately authorised result>
+Blockers / follow-up: <none or factual items>
+```
+
+## Deployment handoff
+
+A maintenance integration is not deployment proof. Deployment needs separate
+authorisation, a fresh backup, a manual stop capability, staging prerequisites,
+and post-deployment verification. If any are absent, report deployment as
+deferred and continue only with safe source-maintenance work.
