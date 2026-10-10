@@ -916,7 +916,6 @@ from .tesla_ble_mapping import (
 )
 from .history_migration import (
     apply_history_relink,
-    history_relink_applied_for_key,
     preview_history_relink,
 )
 from .currency import (
@@ -20709,70 +20708,6 @@ class HomePowerSettingsView(HomeAssistantView):
             }, status=500)
 
 
-def _migrate_entity_ids(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Migrate entity IDs to canonical power_sync_<key> format.
-
-    Uses the unique_id (which contains the sensor key) to compute the
-    correct entity ID, so entities like sensor.optimizer_current_action
-    get renamed to sensor.power_sync_optimization_status (matching the key).
-    """
-    ent_reg = er.async_get(hass)
-    entry_prefix = f"{entry.entry_id}_"
-
-    # Migrate renamed unique_ids so HA reuses existing entities
-    _UNIQUE_ID_RENAMES = {
-        "gateway_firmware": "firmware",
-    }
-    for old_suffix, new_suffix in _UNIQUE_ID_RENAMES.items():
-        old_uid = f"{entry_prefix}{old_suffix}"
-        new_uid = f"{entry_prefix}{new_suffix}"
-        entity_entry = ent_reg.async_get_entity_id("sensor", DOMAIN, old_uid)
-        if entity_entry and not ent_reg.async_get_entity_id("sensor", DOMAIN, new_uid):
-            ent_reg.async_update_entity(entity_entry, new_unique_id=new_uid)
-            _LOGGER.info("Migrated unique_id: %s -> %s", old_uid, new_uid)
-
-    migrated = 0
-
-    for entity_entry in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
-        uid = entity_entry.unique_id or ""
-        if not uid.startswith(entry_prefix):
-            continue
-
-        # Extract the sensor key from unique_id: "{entry_id}_{key}" → "key"
-        key = uid[len(entry_prefix):]
-        if not key:
-            continue
-        if history_relink_applied_for_key(entry.options, key):
-            _LOGGER.debug(
-                "Skipping canonical entity ID migration for history-relinked sensor %s",
-                entity_entry.entity_id,
-            )
-            continue
-
-        domain = entity_entry.entity_id.partition(".")[0]
-        canonical_id = f"{domain}.power_sync_{key}"
-
-        if entity_entry.entity_id == canonical_id:
-            continue
-
-        # Don't overwrite an existing entity
-        if ent_reg.async_get(canonical_id):
-            _LOGGER.debug(
-                "Skipping migration %s -> %s (target already exists)",
-                entity_entry.entity_id, canonical_id,
-            )
-            continue
-
-        ent_reg.async_update_entity(
-            entity_entry.entity_id, new_entity_id=canonical_id
-        )
-        migrated += 1
-        _LOGGER.info("Migrated entity ID: %s -> %s", entity_entry.entity_id, canonical_id)
-
-    if migrated:
-        _LOGGER.info("Entity ID migration complete: %d entities renamed", migrated)
-
-
 async def _ensure_lovelace_resource(hass: HomeAssistant) -> None:
     """Register the PowerSync strategy JS as a Lovelace resource (storage mode only).
 
@@ -25460,9 +25395,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         finally:
             if inverter_control_lock is not None:
                 inverter_control_lock.release()
-
-    # Migrate legacy entity IDs to power_sync_ prefix
-    _migrate_entity_ids(hass, entry)
 
     # Set up platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
