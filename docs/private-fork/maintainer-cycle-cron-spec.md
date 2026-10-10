@@ -1,16 +1,18 @@
 # Read-only maintainer-cycle cron specification
 
 This is a reusable remote-server specification for the isolated
-`powersync-maintainer` profile. It does not create a cron job, alter a profile,
-or contact a server from this repository.
+`powersync-maintainer` profile. The companion portable installer creates a
+paused job only when a remote operator explicitly passes `--apply`; it does not
+contact a server or enable the job by itself.
 
 ## Schedule contract
 
-Run **every 3 days** with bounded **jitter** (for example, choose one execution
-time uniformly within the first 90 minutes after the three-day interval). The
-remote operator owns scheduling and must retain the concrete schedule outside
-this repository. The job must use the `powersync-maintainer` profile and the
-private-fork checkout only.
+Run **every 3 days**. The portable installer encodes this as the Hermes `3d`
+schedule, creates the named job paused, attaches `powersync-private-updates`,
+fixes its workdir to the explicit checkout root, and uses `local` delivery for
+both normal and failure output. Hermes owns any scheduler jitter; the installer
+adds no unbounded delay or secondary scheduler. The job must use the
+`powersync-maintainer` profile and the private-fork checkout only.
 
 Pass all artifact locations and endpoints explicitly. A remote operator may add
 `--fetch` only when updating the named read-only upstream tracking reference is
@@ -52,3 +54,14 @@ Keep the JSON and Markdown artifacts for review. The state JSON records only the
 reviewed resolved range and normalized classification. A malformed state file, a
 missing remote, or missing endpoint must fail the run without replacing reports
 or state. The cycle makes no candidate change regardless of classification.
+
+## Paused installer contract
+
+`scripts/private-fork/install_maintainer_cron.sh` requires all of `--apply`,
+`--repo`, `--profile-home`, `--state`, and `--reports-dir`; `--dry-run` is the
+non-mutating alternative to `--apply`. It refuses the default or wrong profile,
+paths outside the supplied checkout/profile boundaries, a missing installed
+skill, an origin that `gh` cannot verify as private, and an existing active job
+with the fixed name `powersync-private-upstream-review`. It never resumes the
+job. Its report-only prompt invokes `maintainer_cycle.py` with the explicit
+repository, state, and report locations and forbids delivery to origin.

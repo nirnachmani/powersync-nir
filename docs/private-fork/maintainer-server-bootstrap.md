@@ -102,3 +102,41 @@ they do not authorise a candidate merge, push, release, or deployment. Review
 `docs/private-fork/hermes-skill/powersync-private-updates/SKILL.md` before any
 maintenance run. Deployment remains prohibited until a separate operator
 authorisation and the approved server procedure are both present.
+
+## Install the paused review cron explicitly
+
+The repository supplies a portable installer, but it does nothing unless the
+operator passes `--apply`. Run it only on the dedicated remote server after the
+skill installation and private-origin checks above. All artifact paths are
+explicit and must remain inside the named profile home; the checkout root is
+the job's fixed work directory.
+
+```bash
+PROFILE_HOME="$HOME/.hermes/profiles/powersync-maintainer"
+cd /path/to/private-fork
+scripts/private-fork/install_maintainer_cron.sh --dry-run \
+  --repo "$PWD" \
+  --profile-home "$PROFILE_HOME" \
+  --state "$PROFILE_HOME/state/review-state.json" \
+  --reports-dir "$PROFILE_HOME/reports"
+
+scripts/private-fork/install_maintainer_cron.sh --apply \
+  --repo "$PWD" \
+  --profile-home "$PROFILE_HOME" \
+  --state "$PROFILE_HOME/state/review-state.json" \
+  --reports-dir "$PROFILE_HOME/reports"
+```
+
+Create the `state/` and `reports/` directories first. The installer verifies
+that `origin` is a private GitHub repository with `gh`, that the installed
+`powersync-private-updates` skill exists, and that no active job with the same
+name exists. It creates `powersync-private-upstream-review` **paused**, every
+`3d`, with local/suppressed delivery only. It prints, but never runs, this
+resume command:
+
+```bash
+hermes --profile powersync-maintainer cron resume powersync-private-upstream-review
+```
+
+Review the rendered dry-run command and the paused job before resuming it. Do
+not change delivery to `origin`; review artifacts remain local.

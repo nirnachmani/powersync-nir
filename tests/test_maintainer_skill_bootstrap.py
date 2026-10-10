@@ -74,3 +74,4 @@ def test_private_fork_runner_includes_maintainer_bootstrap_and_cycle_tests():
 
     assert "tests/test_maintainer_skill_bootstrap.py" in runner
     assert "tests/test_maintainer_cycle.py" in runner
+    assert "tests/test_maintainer_cron_installer.py" in runner
