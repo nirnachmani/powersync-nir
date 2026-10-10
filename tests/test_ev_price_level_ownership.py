@@ -2301,6 +2301,151 @@ def test_price_level_shared_evac_denial_is_logged(monkeypatch):
     }
 
 
+def _shared_smart_schedule_executor(monkeypatch, *, options, charger_type, decision):
+    """Build one ready Smart Schedule executor for a final-decision assertion."""
+    now = datetime(2026, 5, 27, 12, tzinfo=timezone.utc)
+    hass = _FakeHass(states={"sensor.connected_vehicle": "tank"})
+    entry = _FakeConfigEntry()
+    entry.options = {
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Tesla",
+        "shared_loadpoint_profile_b_state": "tesla",
+        **options,
+    }
+    planner = SimpleNamespace(
+        should_charge_now=AsyncMock(return_value=decision),
+        _is_grid_charging_blocked_at=lambda _now: False,
+    )
+    executor = ev_planner.AutoScheduleExecutor(hass, entry, planner)
+    settings = ev_planner.AutoScheduleSettings(
+        enabled=True,
+        vehicle_id="shared_ev_profile_a",
+        charger_type=charger_type,
+        target_soc=80,
+    )
+    state = executor.get_state(settings.vehicle_id)
+    state.current_plan = SimpleNamespace(windows=[])
+    state.last_plan_update = ev_planner._ha_local_now_naive()
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        ev_planner.AutoScheduleExecutor, "_get_vehicle_soc", AsyncMock(return_value=40)
+    )
+    monkeypatch.setattr(
+        ev_planner.AutoScheduleExecutor,
+        "_resolve_effective_charger_capability",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    return hass, entry, executor, settings, state
+
+
+def test_smart_schedule_shared_generic_decision_is_logged_before_start(monkeypatch):
+    reason = "Smart Schedule: cheap window"
+    source = "grid_offpeak"
+    hass, entry, executor, settings, state = _shared_smart_schedule_executor(
+        monkeypatch,
+        options={"generic_charger_enabled": True},
+        charger_type="generic",
+        decision=(True, reason, source),
+    )
+    actions = importlib.import_module("powersync_nir.automations.actions")
+    actions._begin_automated_shared_loadpoint_cycle(hass, entry)
+
+    async def start_after_ledger(*args, **kwargs):
+        assert hass.data["powersync_nir"]["entry-1"][
+            "_automated_shared_loadpoint_decision_ledger"
+        ]["generic_ev"]["shared_ev_profile_a"] == {
+            "allowed": True,
+            "responsible_mode": "smart_schedule",
+            "reason": reason,
+            "source": source,
+        }
+        state.is_charging = True
+        return True
+
+    executor._start_charging = AsyncMock(side_effect=start_after_ledger)
+
+    asyncio.run(
+        executor._evaluate_vehicle(
+            settings.vehicle_id,
+            settings,
+            {"battery_soc": 75, "solar_power": 0, "load_power": 1000, "grid_power": 0},
+            current_price_cents=10,
+        )
+    )
+
+    executor._start_charging.assert_awaited_once()
+
+
+def test_smart_schedule_shared_evac_final_denial_is_logged(monkeypatch):
+    reason = "Smart Schedule: waiting for lower price"
+    source = "grid_opportunistic"
+    hass, entry, executor, settings, state = _shared_smart_schedule_executor(
+        monkeypatch,
+        options={"sigenergy_charger_enabled": True, "sigenergy_charger_type": "evac"},
+        charger_type="sigenergy",
+        decision=(False, reason, source),
+    )
+    actions = importlib.import_module("powersync_nir.automations.actions")
+    actions._begin_automated_shared_loadpoint_cycle(hass, entry)
+    executor._start_charging = AsyncMock()
+
+    asyncio.run(
+        executor._evaluate_vehicle(
+            settings.vehicle_id,
+            settings,
+            {"battery_soc": 75, "solar_power": 0, "load_power": 1000, "grid_power": 0},
+            current_price_cents=10,
+        )
+    )
+
+    executor._start_charging.assert_not_awaited()
+    assert hass.data["powersync_nir"]["entry-1"][
+        "_automated_shared_loadpoint_decision_ledger"
+    ]["sigenergy_charger"]["shared_ev_profile_a"] == {
+        "allowed": False,
+        "responsible_mode": "smart_schedule",
+        "reason": reason,
+        "source": source,
+    }
+
+
+@pytest.mark.parametrize(
+    ("options", "charger_type"),
+    [
+        ({}, "tesla"),
+        ({"sigenergy_charger_enabled": True, "sigenergy_charger_type": "evdc"}, "sigenergy"),
+    ],
+)
+def test_smart_schedule_omits_tesla_and_non_evac_shared_decisions(
+    monkeypatch, options, charger_type
+):
+    hass, entry, executor, settings, _state = _shared_smart_schedule_executor(
+        monkeypatch,
+        options=options,
+        charger_type=charger_type,
+        decision=(False, "Smart Schedule: wait", "grid_offpeak"),
+    )
+    actions = importlib.import_module("powersync_nir.automations.actions")
+    actions._begin_automated_shared_loadpoint_cycle(hass, entry)
+
+    asyncio.run(
+        executor._evaluate_vehicle(
+            settings.vehicle_id,
+            settings,
+            {"battery_soc": 75, "solar_power": 0, "load_power": 1000, "grid_power": 0},
+            current_price_cents=10,
+        )
+    )
+
+    assert hass.data["powersync_nir"]["entry-1"][
+        "_automated_shared_loadpoint_decision_ledger"
+    ] == {}
+
+
 def _scheduled_price_hass(schedule: dict | None) -> _FakeHass:
     hass = _FakeHass()
     hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[

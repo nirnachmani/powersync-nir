@@ -6521,6 +6521,30 @@ class AutoScheduleExecutor:
         # Publish the effective, post-policy decision separately from the
         # stored optimizer envelope. A bounded exact-VIN free-grid signal is
         # the only authority dynamic control may use to disregard an LP zero.
+        opts = {**self.config_entry.data, **self.config_entry.options}
+        effective_charger_type = _effective_auto_schedule_charger_type(
+            settings,
+            opts,
+        )
+        if (
+            effective_charger_type == "generic"
+            or (
+                effective_charger_type == "sigenergy"
+                and str(opts.get("sigenergy_charger_type") or "evac").lower()
+                == "evac"
+            )
+        ):
+            from .actions import _record_automated_shared_loadpoint_decision
+
+            _record_automated_shared_loadpoint_decision(
+                self.hass,
+                self.config_entry,
+                allowed=should_charge,
+                responsible_mode="smart_schedule",
+                reason=reason,
+                source=source,
+            )
+
         from . import actions as actions_module
 
         record_authorization = getattr(
