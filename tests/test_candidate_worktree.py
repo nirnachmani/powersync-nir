@@ -221,5 +221,7 @@ def test_focused_runner_and_policy_document_candidate_preparation():
     policy = (ROOT / "docs/private-fork/upstream-update-policy.md").read_text(encoding="utf-8")
 
     assert "tests/test_candidate_worktree.py" in runner
+    assert "tests/test_candidate_integration.py" in runner
     assert "candidate_worktree.py" in policy
+    assert "integrate_candidate.py" in policy
     assert "cleanup" in policy.lower()

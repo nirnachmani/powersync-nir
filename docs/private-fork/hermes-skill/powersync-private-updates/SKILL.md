@@ -72,11 +72,17 @@ and do not suppress baseline failures.
    `origin`, creates only a detached disposable worktree, and records that no
    integration occurred. Use its separate `cleanup` command only with the exact
    registered path beneath the candidate root.
-6. For no-overlap, mechanical, or compatible changes, integrate minimally and
-   run every required gate. Commit only if they pass.
-7. For redundant changes, record the upstream SHA and equivalence rationale;
+6. Only for an exact `no_overlap` classifier result, use
+   `scripts/private-fork/integrate_candidate.py` with the unchanged manifest,
+   exact candidate path, target SHA, classification, and report path. It merges
+   locally only in the registered candidate, runs every required gate, and
+   commits only there after they pass. It must never publish, deploy, or control
+   infrastructure.
+7. For every overlap classification, stop with a report requiring
+   compatible-resolution work; do not attempt an automatic merge.
+8. For redundant changes, record the upstream SHA and equivalence rationale;
    retain the private implementation.
-8. For incompatible changes or failed gates, retain the candidate untouched and
+9. For incompatible changes or failed gates, retain the candidate untouched and
    report the precise conflict/failure. Do not push it as a release or deploy.
 
 ## Private invariants

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -98,6 +99,13 @@ def _atomic_write(path: Path, contents: str) -> None:
             temporary.unlink()
 
 
+def _manifest_digest(manifest: dict[str, Any]) -> str:
+    """Return a stable integrity digest without the digest field itself."""
+    contents = {key: value for key, value in manifest.items() if key != "manifest_digest"}
+    encoded = json.dumps(contents, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _registered_worktrees(repo: Path) -> set[Path]:
     worktrees: set[Path] = set()
     for line in _git(repo, "worktree", "list", "--porcelain").splitlines():
@@ -139,6 +147,7 @@ def prepare_candidate(args: argparse.Namespace) -> dict[str, Any]:
             "candidate_head_sha": source_sha,
             "head_mode": "detached",
         }
+        manifest["manifest_digest"] = _manifest_digest(manifest)
         _atomic_write(args.manifest.resolve(), json.dumps(manifest, indent=2, sort_keys=True) + "\n")
         return manifest
     except Exception:

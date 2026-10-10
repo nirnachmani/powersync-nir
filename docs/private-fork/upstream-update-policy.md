@@ -91,7 +91,7 @@ python scripts/private-fork/candidate_worktree.py prepare \
 
 The manifest is written atomically and records starting/source/target SHAs,
 the exact candidate path, and the `candidate-prepared-no-integration`
-classification. If preflight or manifest writing fails after creation, the
+classification, with an integrity digest. If preflight or manifest writing fails after creation, the
 script removes that disposable candidate. Removal is separate and requires the
 exact registered candidate path directly beneath the supplied candidate root:
 
@@ -101,6 +101,29 @@ python scripts/private-fork/candidate_worktree.py cleanup \
   --candidate-root /path/to/disposable-candidates \
   --worktree /path/to/disposable-candidates/<exact-candidate-name>
 ```
+
+### Isolated no-overlap integration
+
+Only a reviewed classifier result of `no_overlap` may be merged automatically.
+Run `integrate_candidate.py` with the unchanged manifest, its exact candidate
+path, and the exact recorded target SHA:
+
+```bash
+python scripts/private-fork/integrate_candidate.py \
+  --manifest /path/to/candidate-manifest.json \
+  --candidate-worktree /path/to/disposable-candidates/<exact-candidate-name> \
+  --upstream-target-ref <recorded-upstream-sha> \
+  --classification no_overlap \
+  --report /path/to/candidate-report.txt
+```
+
+The tool refuses a missing or altered manifest, a path outside the registered
+candidate, target/ref disagreement, a dirty source or candidate, and an origin
+outside the explicit private policy. It performs a local no-commit merge only
+inside that candidate, runs the architecture validator and focused runner, and
+creates a local candidate commit only after both succeed. Merge or gate failure
+aborts and resets only the candidate. Every non-`no_overlap` result stops with a
+report requiring compatible-resolution work; it never attempts a merge.
 
 Do not weaken those gates or claim a semantic resolution from classification
 output. Deployment, releases, public-repository updates, and remote publishing

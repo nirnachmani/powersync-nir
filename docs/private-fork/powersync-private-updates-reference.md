@@ -23,6 +23,13 @@ deploy, install an update agent, or change a public upstream repository.
    conflicts and before creating a commit.
 5. Record the exact commands, commit(s), and pass/fail output in the report.
 
+For an isolated candidate whose reviewed classification is exactly
+`no_overlap`, use `scripts/private-fork/integrate_candidate.py` with the
+unchanged candidate manifest, expected candidate path, exact upstream target,
+classification, and report path. It may merge and commit only in that registered
+candidate after both gates pass. Any other classification requires a report and
+compatible-resolution work; no automatic merge is permitted.
+
 The validator is read-only and checks explicit selection/no first-profile
 fallback, Generic/EVAC guard seams, reconciler isolation from hardware and mode
 calculation, Android contract coverage, and the diagnostics route.
