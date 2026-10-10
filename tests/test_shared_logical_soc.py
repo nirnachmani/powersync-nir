@@ -103,6 +103,35 @@ def test_profile_soc_resolver_is_disabled_without_a_complete_shared_binding():
     assert resolver(FakeHass({"sensor.a_soc": "55"}), entry, PROFILE_A_ID) is None
 
 
+def test_profile_soc_resolver_fails_closed_for_persisted_evdc_only_binding():
+    resolver = getattr(shared_loadpoint, "resolve_shared_profile_soc", None)
+    assert resolver is not None
+    entry = _entry(
+        **_options(
+            generic_charger_enabled=False,
+            sigenergy_charger_enabled=True,
+            sigenergy_charger_type="evdc",
+            shared_loadpoint_profile_a_soc_entity="sensor.a_soc",
+        )
+    )
+
+    assert resolver(FakeHass({"sensor.a_soc": "55"}), entry, PROFILE_A_ID) is None
+
+
+def test_profile_soc_resolver_fails_closed_for_persisted_multiple_backends_binding():
+    resolver = getattr(shared_loadpoint, "resolve_shared_profile_soc", None)
+    assert resolver is not None
+    entry = _entry(
+        **_options(
+            sigenergy_charger_enabled=True,
+            sigenergy_charger_type="evac",
+            shared_loadpoint_profile_a_soc_entity="sensor.a_soc",
+        )
+    )
+
+    assert resolver(FakeHass({"sensor.a_soc": "55"}), entry, PROFILE_A_ID) is None
+
+
 def test_shared_binding_validation_requires_one_supported_backend_and_unique_soc_entities():
     validate = getattr(shared_loadpoint, "validate_shared_loadpoint_options", None)
     assert validate is not None

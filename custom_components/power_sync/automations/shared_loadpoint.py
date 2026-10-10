@@ -210,6 +210,9 @@ def resolve_shared_profile_soc(
     This is deliberately state-machine-only: it never reads charger telemetry,
     calls a service, or consults the sibling/legacy Generic entities.
     """
+    options = {**getattr(config_entry, "data", {}), **getattr(config_entry, "options", {})}
+    if validate_shared_loadpoint_options(options) is not None:
+        return None
     binding = binding_for_entry(config_entry)
     if binding is None:
         return None
