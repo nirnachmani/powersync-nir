@@ -69,7 +69,8 @@ def test_skill_requires_separate_authorisation_before_deployment():
     assert "never deploy" in skill
 
 
-def test_private_fork_runner_includes_maintainer_bootstrap_tests():
+def test_private_fork_runner_includes_maintainer_bootstrap_and_cycle_tests():
     runner = (ROOT / "scripts/private-fork/run_private_tests.sh").read_text(encoding="utf-8")
 
     assert "tests/test_maintainer_skill_bootstrap.py" in runner
+    assert "tests/test_maintainer_cycle.py" in runner
