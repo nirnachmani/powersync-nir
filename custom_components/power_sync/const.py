@@ -188,8 +188,10 @@ CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY = (
 )
 CONF_SHARED_LOADPOINT_PROFILE_A_NAME = "shared_loadpoint_profile_a_name"
 CONF_SHARED_LOADPOINT_PROFILE_A_STATE = "shared_loadpoint_profile_a_state"
+CONF_SHARED_LOADPOINT_PROFILE_A_SOC_ENTITY = "shared_loadpoint_profile_a_soc_entity"
 CONF_SHARED_LOADPOINT_PROFILE_B_NAME = "shared_loadpoint_profile_b_name"
 CONF_SHARED_LOADPOINT_PROFILE_B_STATE = "shared_loadpoint_profile_b_state"
+CONF_SHARED_LOADPOINT_PROFILE_B_SOC_ENTITY = "shared_loadpoint_profile_b_soc_entity"
 
 # Sigenergy EV Charger configuration
 CONF_SIGENERGY_CHARGER_ENABLED = "sigenergy_charger_enabled"

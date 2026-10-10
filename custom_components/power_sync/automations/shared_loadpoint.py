@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, Mapping
 
 from ..const import (
     CONF_GENERIC_CHARGER_ENABLED,
     CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY,
     CONF_SHARED_LOADPOINT_PROFILE_A_NAME,
+    CONF_SHARED_LOADPOINT_PROFILE_A_SOC_ENTITY,
     CONF_SHARED_LOADPOINT_PROFILE_A_STATE,
     CONF_SHARED_LOADPOINT_PROFILE_B_NAME,
+    CONF_SHARED_LOADPOINT_PROFILE_B_SOC_ENTITY,
     CONF_SHARED_LOADPOINT_PROFILE_B_STATE,
     CONF_SIGENERGY_CHARGER_ENABLED,
     CONF_SIGENERGY_CHARGER_TYPE,
@@ -33,8 +36,10 @@ class SharedLoadpointBinding:
     connected_vehicle_entity: str
     profile_a_name: str
     profile_a_state: str
+    profile_a_soc_entity: str
     profile_b_name: str
     profile_b_state: str
+    profile_b_soc_entity: str
 
     @classmethod
     def from_options(cls, options: Mapping[str, Any]) -> "SharedLoadpointBinding | None":
@@ -48,12 +53,18 @@ class SharedLoadpointBinding:
             profile_a_state=_normalise_state(
                 options.get(CONF_SHARED_LOADPOINT_PROFILE_A_STATE)
             ),
+            profile_a_soc_entity=str(
+                options.get(CONF_SHARED_LOADPOINT_PROFILE_A_SOC_ENTITY) or ""
+            ).strip(),
             profile_b_name=str(
                 options.get(CONF_SHARED_LOADPOINT_PROFILE_B_NAME) or ""
             ).strip(),
             profile_b_state=_normalise_state(
                 options.get(CONF_SHARED_LOADPOINT_PROFILE_B_STATE)
             ),
+            profile_b_soc_entity=str(
+                options.get(CONF_SHARED_LOADPOINT_PROFILE_B_SOC_ENTITY) or ""
+            ).strip(),
         )
         if (
             not binding.connected_vehicle_entity
@@ -82,6 +93,62 @@ class SharedLoadpointBinding:
         if profile_id == PROFILE_B_ID:
             return self.profile_b_name
         return None
+
+    def profile_soc_entity(self, profile_id: str) -> str | None:
+        """Return only the configured SoC entity for this logical profile."""
+        if profile_id == PROFILE_A_ID:
+            return self.profile_a_soc_entity or None
+        if profile_id == PROFILE_B_ID:
+            return self.profile_b_soc_entity or None
+        return None
+
+
+@dataclass(frozen=True)
+class SharedProfileSocSample:
+    """A valid logical-profile SoC read from the HA state machine."""
+
+    value: float
+    entity_id: str
+    source: str
+    timestamp: Any
+
+
+def validate_shared_loadpoint_options(options: Mapping[str, Any]) -> str | None:
+    """Return a form error for an attempted shared binding, otherwise ``None``."""
+    binding_keys = (
+        CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY,
+        CONF_SHARED_LOADPOINT_PROFILE_A_NAME,
+        CONF_SHARED_LOADPOINT_PROFILE_A_STATE,
+        CONF_SHARED_LOADPOINT_PROFILE_B_NAME,
+        CONF_SHARED_LOADPOINT_PROFILE_B_STATE,
+    )
+    values = {key: str(options.get(key) or "").strip() for key in binding_keys}
+    soc_a = str(options.get(CONF_SHARED_LOADPOINT_PROFILE_A_SOC_ENTITY) or "").strip()
+    soc_b = str(options.get(CONF_SHARED_LOADPOINT_PROFILE_B_SOC_ENTITY) or "").strip()
+    if not any(values.values()) and not (soc_a or soc_b):
+        return None
+    if not all(values.values()):
+        return "incomplete_shared_loadpoint_binding"
+    if values[CONF_SHARED_LOADPOINT_PROFILE_A_NAME].casefold() == values[
+        CONF_SHARED_LOADPOINT_PROFILE_B_NAME
+    ].casefold():
+        return "duplicate_shared_loadpoint_name"
+    if _normalise_state(values[CONF_SHARED_LOADPOINT_PROFILE_A_STATE]) == _normalise_state(
+        values[CONF_SHARED_LOADPOINT_PROFILE_B_STATE]
+    ):
+        return "duplicate_shared_loadpoint_state"
+    if soc_a and soc_a.casefold() == soc_b.casefold():
+        return "duplicate_shared_loadpoint_soc_entity"
+    generic_enabled = bool(options.get(CONF_GENERIC_CHARGER_ENABLED))
+    sigenergy_evac_enabled = bool(
+        options.get(CONF_SIGENERGY_CHARGER_ENABLED)
+        and options.get(CONF_SIGENERGY_CHARGER_TYPE) == SIGENERGY_CHARGER_EVAC
+    )
+    if generic_enabled and sigenergy_evac_enabled:
+        return "shared_loadpoint_multiple_backends"
+    if not generic_enabled and not sigenergy_evac_enabled:
+        return "shared_loadpoint_no_supported_backend"
+    return None
 
 
 def binding_for_entry(config_entry: Any) -> SharedLoadpointBinding | None:
@@ -133,6 +200,37 @@ def resolve_active_shared_profile(hass: Any, config_entry: Any) -> str | None:
     if state is None:
         return None
     return binding.resolve_state(state.state)
+
+
+def resolve_shared_profile_soc(
+    hass: Any, config_entry: Any, profile_id: str
+) -> SharedProfileSocSample | None:
+    """Read valid SoC for one logical profile, without any fallback.
+
+    This is deliberately state-machine-only: it never reads charger telemetry,
+    calls a service, or consults the sibling/legacy Generic entities.
+    """
+    binding = binding_for_entry(config_entry)
+    if binding is None:
+        return None
+    entity_id = binding.profile_soc_entity(profile_id)
+    if not entity_id:
+        return None
+    state = hass.states.get(entity_id)
+    if state is None:
+        return None
+    try:
+        value = float(state.state)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or not 0 <= value <= 100:
+        return None
+    return SharedProfileSocSample(
+        value=value,
+        entity_id=entity_id,
+        source="state",
+        timestamp=getattr(state, "last_updated", None),
+    )
 
 
 def resolve_shared_loadpoint_command(

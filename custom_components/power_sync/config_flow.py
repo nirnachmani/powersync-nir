@@ -484,8 +484,10 @@ from .const import (
     CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH,
     CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY,
     CONF_SHARED_LOADPOINT_PROFILE_A_NAME,
+    CONF_SHARED_LOADPOINT_PROFILE_A_SOC_ENTITY,
     CONF_SHARED_LOADPOINT_PROFILE_A_STATE,
     CONF_SHARED_LOADPOINT_PROFILE_B_NAME,
+    CONF_SHARED_LOADPOINT_PROFILE_B_SOC_ENTITY,
     CONF_SHARED_LOADPOINT_PROFILE_B_STATE,
     # Sigenergy EV charger configuration
     CONF_SIGENERGY_CHARGER_ENABLED,
@@ -15613,43 +15615,25 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     "invalid_tesla_ble_vehicle_mapping"
                 )
 
-            shared_values = {
-                key: str(user_input.get(key) or "").strip()
-                for key in (
-                    CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY,
-                    CONF_SHARED_LOADPOINT_PROFILE_A_NAME,
-                    CONF_SHARED_LOADPOINT_PROFILE_A_STATE,
-                    CONF_SHARED_LOADPOINT_PROFILE_B_NAME,
-                    CONF_SHARED_LOADPOINT_PROFILE_B_STATE,
-                )
-            }
-            if any(shared_values.values()):
-                if (
-                    user_input.get(CONF_GENERIC_CHARGER_ENABLED)
-                    and user_input.get(CONF_SIGENERGY_CHARGER_ENABLED)
-                    and user_input.get(CONF_SIGENERGY_CHARGER_TYPE) == SIGENERGY_CHARGER_EVAC
-                ):
-                    errors[CONF_GENERIC_CHARGER_ENABLED] = (
-                        "shared_loadpoint_multiple_backends"
-                    )
-                elif not all(shared_values.values()):
-                    errors[CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY] = (
-                        "incomplete_shared_loadpoint_binding"
-                    )
-                elif (
-                    shared_values[CONF_SHARED_LOADPOINT_PROFILE_A_NAME].casefold()
-                    == shared_values[CONF_SHARED_LOADPOINT_PROFILE_B_NAME].casefold()
-                ):
-                    errors[CONF_SHARED_LOADPOINT_PROFILE_B_NAME] = (
-                        "duplicate_shared_loadpoint_name"
-                    )
-                elif (
-                    shared_values[CONF_SHARED_LOADPOINT_PROFILE_A_STATE].casefold()
-                    == shared_values[CONF_SHARED_LOADPOINT_PROFILE_B_STATE].casefold()
-                ):
-                    errors[CONF_SHARED_LOADPOINT_PROFILE_B_STATE] = (
-                        "duplicate_shared_loadpoint_state"
-                    )
+            from .automations.shared_loadpoint import validate_shared_loadpoint_options
+
+            shared_error = validate_shared_loadpoint_options(user_input)
+            if shared_error:
+                error_fields = {
+                    "incomplete_shared_loadpoint_binding": (
+                        CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY
+                    ),
+                    "duplicate_shared_loadpoint_name": CONF_SHARED_LOADPOINT_PROFILE_B_NAME,
+                    "duplicate_shared_loadpoint_state": CONF_SHARED_LOADPOINT_PROFILE_B_STATE,
+                    "duplicate_shared_loadpoint_soc_entity": (
+                        CONF_SHARED_LOADPOINT_PROFILE_B_SOC_ENTITY
+                    ),
+                    "shared_loadpoint_multiple_backends": CONF_GENERIC_CHARGER_ENABLED,
+                    "shared_loadpoint_no_supported_backend": (
+                        CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY
+                    ),
+                }
+                errors[error_fields[shared_error]] = shared_error
 
             if not errors:
                 # Store EV data for potential zaptec_cloud step
@@ -15693,6 +15677,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         )
         current_generic_soc_entity_2 = _normalize_optional_entity(
             self._get_option(CONF_GENERIC_CHARGER_SOC_ENTITY_2)
+        )
+        current_shared_profile_a_soc_entity = _normalize_optional_entity(
+            self._get_option(CONF_SHARED_LOADPOINT_PROFILE_A_SOC_ENTITY)
+        )
+        current_shared_profile_b_soc_entity = _normalize_optional_entity(
+            self._get_option(CONF_SHARED_LOADPOINT_PROFILE_B_SOC_ENTITY)
         )
 
         schema_dict: dict[vol.Marker, Any] = {
@@ -15827,6 +15817,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 default=self._get_option(CONF_SHARED_LOADPOINT_PROFILE_A_STATE, ""),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Optional(
+                CONF_SHARED_LOADPOINT_PROFILE_A_SOC_ENTITY,
+                description=(
+                    {"suggested_value": current_shared_profile_a_soc_entity}
+                    if current_shared_profile_a_soc_entity
+                    else None
+                ),
+            ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+            vol.Optional(
                 CONF_SHARED_LOADPOINT_PROFILE_B_NAME,
                 default=self._get_option(CONF_SHARED_LOADPOINT_PROFILE_B_NAME, ""),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
@@ -15834,6 +15832,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_SHARED_LOADPOINT_PROFILE_B_STATE,
                 default=self._get_option(CONF_SHARED_LOADPOINT_PROFILE_B_STATE, ""),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            vol.Optional(
+                CONF_SHARED_LOADPOINT_PROFILE_B_SOC_ENTITY,
+                description=(
+                    {"suggested_value": current_shared_profile_b_soc_entity}
+                    if current_shared_profile_b_soc_entity
+                    else None
+                ),
+            ): EntitySelector(EntitySelectorConfig(domain="sensor")),
             # Sigenergy EVAC/EVDC charger direct Modbus control
             vol.Optional(
                 CONF_SIGENERGY_CHARGER_ENABLED,
