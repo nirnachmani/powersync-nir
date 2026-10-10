@@ -216,6 +216,83 @@ def test_fresh_positive_generic_power_with_powersync_command_is_powersync() -> N
     assert state.origin == "powersync"
 
 
+def test_mark_requested_stop_pending_waits_for_fresh_readback() -> None:
+    state = module.ReconciliationState(origin="powersync", physical_active=True)
+
+    mark_pending = getattr(module, "mark_stop_pending", None)
+    assert mark_pending is not None
+    mark_pending(state)
+
+    assert state.stop_outcome == {"status": "pending"}
+
+    observation = module.generic_power_observation(
+        binding_id="garage",
+        power_kw=7.2,
+        observed_at=NOW,
+        now=NOW,
+    )
+    reconciled = module.reconcile_shared_external_session(observation, previous=state)
+
+    assert reconciled.stop_outcome == {"status": "pending"}
+    assert reconciled.origin == "settling"
+
+
+def test_fresh_inactive_readback_confirms_a_failed_stop_request() -> None:
+    state = module.ReconciliationState(origin="powersync", physical_active=True)
+
+    mark_failed = getattr(module, "mark_stop_failed", None)
+    assert mark_failed is not None
+    mark_failed(state)
+    assert state.stop_outcome == {"status": "failed"}
+
+    observation = module.generic_power_observation(
+        binding_id="garage",
+        power_kw=0.0,
+        observed_at=NOW,
+        now=NOW,
+    )
+    reconciled = module.reconcile_shared_external_session(observation, previous=state)
+
+    assert reconciled.stop_outcome == {"status": "confirmed"}
+    assert reconciled.physical_active is False
+
+
+def test_stale_readback_makes_a_failed_stop_request_indeterminate() -> None:
+    state = module.ReconciliationState(origin="powersync", physical_active=True)
+    module.mark_stop_failed(state)
+
+    observation = module.generic_power_observation(
+        binding_id="garage",
+        power_kw=7.2,
+        observed_at=NOW - timedelta(seconds=91),
+        now=NOW,
+    )
+    reconciled = module.reconcile_shared_external_session(observation, previous=state)
+
+    assert reconciled.stop_outcome == {"status": "indeterminate"}
+    assert reconciled.physical_active is None
+    assert reconciled.origin == "unknown"
+
+
+def test_fresh_inactive_readback_confirms_an_indeterminate_stop_request() -> None:
+    state = module.ReconciliationState(
+        origin="unknown",
+        physical_active=None,
+        stop_outcome={"status": "indeterminate"},
+    )
+    observation = module.generic_power_observation(
+        binding_id="garage",
+        power_kw=0.0,
+        observed_at=NOW,
+        now=NOW,
+    )
+
+    reconciled = module.reconcile_shared_external_session(observation, previous=state)
+
+    assert reconciled.stop_outcome == {"status": "confirmed"}
+    assert reconciled.physical_active is False
+
+
 @pytest.mark.parametrize(
     ("power_kw", "observed_at"),
     [

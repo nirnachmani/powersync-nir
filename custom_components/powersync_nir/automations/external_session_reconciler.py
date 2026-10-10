@@ -50,6 +50,18 @@ class ReconciliationState:
     observed_session_token: str | None = None
 
 
+def mark_stop_pending(state: ReconciliationState) -> ReconciliationState:
+    """Record that a stop was requested and needs fresh physical readback."""
+    state.stop_outcome = {"status": "pending"}
+    return state
+
+
+def mark_stop_failed(state: ReconciliationState) -> ReconciliationState:
+    """Record that issuing the requested stop failed before readback."""
+    state.stop_outcome = {"status": "failed"}
+    return state
+
+
 def _automation_store(hass: Any, config_entry: Any) -> Any | None:
     """Return this entry's storage without creating runtime or policy state."""
     entry = getattr(hass, "data", {}).get(DOMAIN, {}).get(config_entry.entry_id, {})
@@ -361,14 +373,18 @@ def reconcile_shared_external_session(
     if not observation.fresh:
         state.origin = "unknown"
         state.physical_active = None
-        if state.stop_outcome and state.stop_outcome.get("status") == "pending":
+        if state.stop_outcome and state.stop_outcome.get("status") in {"pending", "failed"}:
             state.stop_outcome = {"status": "indeterminate"}
         return state
 
     state.physical_active = bool(observation.charging)
     state.active_profile_id = active_profile_id
     if not state.physical_active:
-        if state.stop_outcome and state.stop_outcome.get("status") == "pending":
+        if state.stop_outcome and state.stop_outcome.get("status") in {
+            "pending",
+            "failed",
+            "indeterminate",
+        }:
             state.stop_outcome = {"status": "confirmed"}
         state.origin = "unknown"
         return state
