@@ -14,4 +14,6 @@ The released app uses single global objects for Solar Surplus policy thresholds,
 
 ## Implementation boundary
 
-This document records app compatibility only. The backend must still map those logical IDs to one selected Generic or Sigenergy EVAC physical charger and enforce one active physical session.
+This document records app compatibility only. The backend maps the stable IDs `shared_ev_profile_a` and `shared_ev_profile_b` to one selected Generic or Sigenergy EVAC physical charger and enforces one active physical session.
+
+For a configured shared binding, `/api/power_sync/ev/vehicles` replaces the physical `generic_ev` or `sigenergy_charger` row with exactly those two logical records. Each record reports only its own configured logical SoC, including while disconnected. Physical plug state, charging state, and charger power are projected only onto the selected profile; the sibling remains disconnected with no physical power. This projection is state-only and performs no charger refresh or control.

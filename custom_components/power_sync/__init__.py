@@ -1590,6 +1590,80 @@ def _generic_charger_charging_state(observation: dict) -> str:
     return "Disconnected"
 
 
+def _project_shared_logical_vehicles(
+    hass,
+    config_entry,
+    physical_vehicle: dict,
+) -> list[dict] | None:
+    """Project one configured shared Generic/EVAC loadpoint into two logical EVs.
+
+    This is intentionally a state-only presentation transform.  The caller
+    supplies an already-observed physical vehicle row; resolving profile SoC
+    and selection reads only Home Assistant state and cannot refresh or control
+    the charger.
+    """
+    from .automations.shared_loadpoint import (
+        PROFILE_A_ID,
+        PROFILE_B_ID,
+        binding_for_entry,
+        canonical_shared_loadpoint_id,
+        resolve_active_shared_profile,
+        resolve_shared_profile_soc,
+    )
+
+    binding = binding_for_entry(config_entry)
+    if binding is None:
+        return None
+
+    physical_id = str(
+        physical_vehicle.get("vehicle_id") or physical_vehicle.get("id") or ""
+    )
+    charger_type = (
+        "generic" if physical_id == "generic_ev"
+        else "sigenergy" if physical_id == "sigenergy_charger"
+        else ""
+    )
+    if not charger_type or canonical_shared_loadpoint_id(
+        config_entry, PROFILE_A_ID, charger_type
+    ) != physical_id:
+        return None
+
+    selected_profile_id = resolve_active_shared_profile(hass, config_entry)
+    updated_at = physical_vehicle.get("data_updated_at") or dt_util.now().isoformat()
+    records: list[dict] = []
+    for profile_id in (PROFILE_A_ID, PROFILE_B_ID):
+        sample = resolve_shared_profile_soc(hass, config_entry, profile_id)
+        selected = selected_profile_id == profile_id
+        records.append(
+            {
+                "id": profile_id,
+                "vehicle_id": profile_id,
+                "vin": None,
+                "display_name": binding.profile_name(profile_id) or profile_id,
+                "model": physical_vehicle.get("model"),
+                "battery_level": sample.value if sample is not None else None,
+                "charging_state": (
+                    physical_vehicle.get("charging_state") or "Disconnected"
+                    if selected else "Disconnected"
+                ),
+                "charge_limit_soc": (
+                    physical_vehicle.get("charge_limit_soc") if selected else None
+                ),
+                "charger_power": (
+                    physical_vehicle.get("charger_power") if selected else None
+                ),
+                "is_online": bool(physical_vehicle.get("is_online", True)),
+                "is_plugged_in": (
+                    bool(physical_vehicle.get("is_plugged_in")) if selected else False
+                ),
+                "data_updated_at": updated_at,
+                "source": "shared_logical_profile",
+                "brand": "shared_logical",
+            }
+        )
+    return records
+
+
 def _get_ev_vehicle_status(hass, entry) -> dict:
     """Get EV charging status from configured EV sensors.
 
@@ -15289,7 +15363,7 @@ class EVVehiclesView(HomeAssistantView):
                 battery_level = observation.get("ev_soc")
                 charging_state = _generic_charger_charging_state(observation)
 
-                vehicles.append({
+                generic_vehicle = {
                     "id": "generic_ev",
                     "vehicle_id": "generic_ev",
                     "vin": None,
@@ -15308,7 +15382,11 @@ class EVVehiclesView(HomeAssistantView):
                     "data_updated_at": dt_util.now().isoformat(),
                     "source": "generic_charger",
                     "brand": "generic",
-                })
+                }
+                logical_vehicles = _project_shared_logical_vehicles(
+                    self._hass, entry, generic_vehicle
+                )
+                vehicles.extend(logical_vehicles or [generic_vehicle])
                 _LOGGER.debug(
                     "EV Generic: soc=%s, power=%.2fkW, connected=%s, charging=%s, state=%s",
                     battery_level,
@@ -15327,17 +15405,19 @@ class EVVehiclesView(HomeAssistantView):
                 from .sigenergy_charger import sigenergy_charger_state_to_vehicle
 
                 state = await _read_sigenergy_charger_state_for_entry(entry, self._hass)
-                vehicles.append(
-                    sigenergy_charger_state_to_vehicle(
-                        state or configured_state,
-                        updated_at=dt_util.now().isoformat(),
-                        online=state is not None,
-                        capabilities=_configured_sigenergy_charger_capabilities(
-                            entry,
-                            self._hass,
-                        ),
-                    )
+                sigenergy_vehicle = sigenergy_charger_state_to_vehicle(
+                    state or configured_state,
+                    updated_at=dt_util.now().isoformat(),
+                    online=state is not None,
+                    capabilities=_configured_sigenergy_charger_capabilities(
+                        entry,
+                        self._hass,
+                    ),
                 )
+                logical_vehicles = _project_shared_logical_vehicles(
+                    self._hass, entry, sigenergy_vehicle
+                )
+                vehicles.extend(logical_vehicles or [sigenergy_vehicle])
                 _LOGGER.debug(
                     "EV Sigenergy charger: type=%s, online=%s, state=%s",
                     (state or configured_state).charger_type,
