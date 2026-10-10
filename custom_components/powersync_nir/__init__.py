@@ -14709,6 +14709,30 @@ def _get_available_ev_vehicles(hass: HomeAssistant) -> list[dict]:
     return vehicles
 
 
+class SharedLoadpointDiagnosticsView(HomeAssistantView):
+    """Read-only diagnostics for the optional shared Generic/EVAC loadpoint."""
+
+    url = "/api/power_sync/ev/shared_loadpoints/diagnostics"
+    name = "api:power_sync:ev:shared_loadpoints:diagnostics"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Return private persisted evidence; never read or control a charger."""
+        from .automations.shared_loadpoint_diagnostics import (
+            persisted_shared_loadpoint_diagnostics,
+        )
+
+        entries = self._hass.config_entries.async_entries(DOMAIN)
+        diagnostics = [
+            persisted_shared_loadpoint_diagnostics(self._hass, entry)
+            for entry in entries
+        ]
+        return web.json_response({"success": True, "diagnostics": diagnostics})
+
+
 class EVVehiclesView(HomeAssistantView):
     """HTTP view to get Tesla vehicles for mobile app."""
 
@@ -41526,6 +41550,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Register HTTP endpoints for EV/Tesla vehicles (for mobile app EV section)
     hass.http.register_view(EVStatusView(hass))
+    hass.http.register_view(SharedLoadpointDiagnosticsView(hass))
     hass.http.register_view(EVVehiclesView(hass))
     hass.http.register_view(EVVehiclesSyncView(hass))
     ev_vehicle_command_view = EVVehicleCommandView(hass)
@@ -43578,6 +43603,41 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     await persist_reconciliation_state(
                         hass, entry, binding_id or "", reconciliation_state
+                    )
+                    # The per-cycle ledger is deliberately transient. Preserve
+                    # only its selected decision alongside the reconciled
+                    # physical evidence before the finally block clears it.
+                    from .automations.shared_loadpoint_diagnostics import (
+                        persist_shared_loadpoint_diagnostic_snapshot,
+                    )
+
+                    cycle_ledger = (
+                        entry_data.get("_automated_shared_loadpoint_decision_ledger", {})
+                        if isinstance(entry_data, dict)
+                        else {}
+                    )
+                    selected_decision = (
+                        cycle_ledger.get(binding_id, {}).get(active_profile_id)
+                        if isinstance(cycle_ledger, Mapping)
+                        and isinstance(cycle_ledger.get(binding_id), Mapping)
+                        else None
+                    )
+                    await persist_shared_loadpoint_diagnostic_snapshot(
+                        hass,
+                        entry,
+                        {
+                            "binding_id": binding_id,
+                            "selected_profile_id": active_profile_id,
+                            "evidence": reconciliation_state.evidence,
+                            "observed_at": (
+                                reconciliation_state.observed_at.isoformat()
+                                if reconciliation_state.observed_at is not None
+                                else None
+                            ),
+                            "physical_active": reconciliation_state.physical_active,
+                            "origin": reconciliation_state.origin,
+                            "decision": selected_decision,
+                        },
                     )
                 finally:
                     _clear_automated_shared_loadpoint_cycle(hass, entry)
