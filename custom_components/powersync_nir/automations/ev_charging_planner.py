@@ -71,6 +71,7 @@ from .ev_vehicle_capacity import (
     validate_ev_battery_capacity,
     vehicle_ids_match,
 )
+from .external_session_reconciler import reconcile_shared_external_session
 
 
 class SensitiveDataFilter(logging.Filter):
