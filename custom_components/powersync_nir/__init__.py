@@ -43346,6 +43346,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _adopt_observed_solar_surplus_shared_session,
                     _adopt_observed_scheduled_shared_session,
                     _adopt_observed_smart_schedule_shared_session,
+                    _adopt_observed_price_level_shared_session,
                 )
                 from .automations.ev_ownership import (
                     claim_ev_ownership,
@@ -43517,6 +43518,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             )
                     return adopted
 
+                async def adopt_price_level_session(**kwargs):
+                    adopted = await _adopt_observed_price_level_shared_session(
+                        hass,
+                        entry,
+                        binding_id=kwargs["binding_id"],
+                        active_profile_id=kwargs["active_profile_id"],
+                        selected_params=kwargs["selected_params"],
+                        observed_at=kwargs["observed_at"],
+                    )
+                    if adopted:
+                        from .automations.ev_charging_planner import (
+                            get_price_level_executor,
+                        )
+
+                        price_level = get_price_level_executor()
+                        if (
+                            price_level is not None
+                            and price_level.config_entry.entry_id == entry.entry_id
+                        ):
+                            price_level.mark_observed_shared_session_adopted(
+                                kwargs["binding_id"],
+                            )
+                    return adopted
+
                 try:
                     reconciliation_state = load_reconciliation_state(hass, entry, binding_id or "")
                     await resolve_end_of_cycle_external_shared_session(
@@ -43549,6 +43574,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         adopt_solar_session=adopt_solar_session,
                         adopt_scheduled_session=adopt_scheduled_session,
                         adopt_smart_schedule_session=adopt_smart_schedule_session,
+                        adopt_price_level_session=adopt_price_level_session,
                     )
                     await persist_reconciliation_state(
                         hass, entry, binding_id or "", reconciliation_state

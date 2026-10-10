@@ -3530,6 +3530,56 @@ def test_price_level_generic_stop_ignores_stale_tesla_vehicle_config(fake_action
     assert params["charger_switch_entity"] == "switch.garage_ev"
 
 
+@pytest.mark.parametrize(
+    ("charger_type", "binding_id"),
+    [("generic", "generic_ev"), ("sigenergy", "sigenergy_charger")],
+)
+def test_price_level_adopted_shared_session_prevents_allowed_restart_and_uses_normal_denied_stop(
+    monkeypatch, fake_actions, charger_type, binding_id
+):
+    """Adoption seeds canonical Price-Level state, not a duplicate start path."""
+    class SharedEntry(_FakeConfigEntry):
+        options = {
+            "generic_charger_enabled": charger_type == "generic",
+            "sigenergy_charger_enabled": charger_type == "sigenergy",
+            "sigenergy_charger_type": "evac",
+        }
+
+    adopt_runtime = AsyncMock(return_value=True)
+    fake_actions._adopt_observed_price_level_shared_session = adopt_runtime
+    starts = AsyncMock(return_value=True)
+    stops = AsyncMock(return_value=True)
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _no_vehicles)
+
+    async def allows_charge(self, _price):
+        return True, "Cheap price", "price_level_opportunity"
+
+    monkeypatch.setattr(ev_planner.PriceLevelChargingExecutor, "get_charging_decision", allows_charge)
+    executor = ev_planner.PriceLevelChargingExecutor(_FakeHass(), SharedEntry())
+    executor._start_charging = starts
+    executor._stop_charging = stops
+
+    assert asyncio.run(executor.adopt_observed_shared_session(
+        binding_id, "shared_ev_profile_a", {"charger_type": charger_type},
+        datetime(2026, 10, 10, tzinfo=timezone.utc),
+    ))
+    state = executor._get_or_create_vehicle_state(binding_id)
+    assert state.is_charging is True
+    assert state.charging_mode == "price_level"
+    assert state.last_decision_reason == "Adopted observed external Price-Level session"
+
+    asyncio.run(executor.evaluate_all_vehicles(5))
+    starts.assert_not_awaited()
+
+    async def denies_charge(self, _price):
+        return False, "Price above threshold", ""
+
+    monkeypatch.setattr(ev_planner.PriceLevelChargingExecutor, "get_charging_decision", denies_charge)
+    asyncio.run(executor.evaluate_all_vehicles(50))
+    stops.assert_awaited_once_with("Price above threshold", vehicle_vin=binding_id)
+    adopt_runtime.assert_awaited_once()
+
+
 def test_scheduled_generic_start_uses_generic_loadpoint_id(fake_actions):
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
 

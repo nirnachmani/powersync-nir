@@ -626,6 +626,7 @@ async def resolve_end_of_cycle_external_shared_session(
     adopt_solar_session: Callable[..., Awaitable[bool]] | None = None,
     adopt_scheduled_session: Callable[..., Awaitable[bool]] | None = None,
     adopt_smart_schedule_session: Callable[..., Awaitable[bool]] | None = None,
+    adopt_price_level_session: Callable[..., Awaitable[bool]] | None = None,
 ) -> bool:
     """Resolve one proven external selected shared session after a cycle.
 
@@ -765,6 +766,28 @@ async def resolve_end_of_cycle_external_shared_session(
         ):
             try:
                 await adopt_smart_schedule_session(
+                    binding_id=binding_id,
+                    active_profile_id=active_profile_id,
+                    selected_params=dict(selected_params),
+                    observed_at=observed_at,
+                )
+            except Exception:
+                pass
+        return False
+    selected_price_level_admission = (
+        isinstance(selected_record, Mapping)
+        and selected_record.get("allowed") is True
+        and selected_record.get("responsible_mode") == "price_level"
+    )
+    if selected_price_level_admission:
+        # Price-Level owns this allowed cycle. An adapter decline must not turn
+        # external charging into a same-cycle physical stop.
+        if (
+            adopt_price_level_session is not None
+            and (lease is None or lease.get("owner") != "powersync")
+        ):
+            try:
+                await adopt_price_level_session(
                     binding_id=binding_id,
                     active_profile_id=active_profile_id,
                     selected_params=dict(selected_params),

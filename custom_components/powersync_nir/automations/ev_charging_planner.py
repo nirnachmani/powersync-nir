@@ -10407,6 +10407,46 @@ class PriceLevelChargingExecutor:
             self._vehicle_states[vehicle_vin] = PriceLevelChargingState()
         return self._vehicle_states[vehicle_vin]
 
+    async def adopt_observed_shared_session(
+        self,
+        binding_id: str,
+        active_profile_id: str,
+        selected_params: Mapping[str, Any],
+        observed_at: datetime | None,
+    ) -> bool:
+        """Adopt one permitted external Generic or EVAC Price-Level session."""
+        expected_charger = "generic" if binding_id == "generic_ev" else "sigenergy"
+        if (
+            binding_id not in {"generic_ev", "sigenergy_charger"}
+            or not active_profile_id
+            or str(selected_params.get("charger_type") or "").lower()
+            != expected_charger
+        ):
+            return False
+
+        from .actions import _adopt_observed_price_level_shared_session
+
+        adopted = await _adopt_observed_price_level_shared_session(
+            self.hass,
+            self.config_entry,
+            binding_id=binding_id,
+            active_profile_id=active_profile_id,
+            selected_params=selected_params,
+            observed_at=observed_at,
+        )
+        if not adopted:
+            return False
+        self.mark_observed_shared_session_adopted(binding_id)
+        return True
+
+    def mark_observed_shared_session_adopted(self, binding_id: str) -> None:
+        """Mark canonical Price-Level state after no-I/O shared adoption."""
+        state = self._get_or_create_vehicle_state(binding_id)
+        state.is_charging = True
+        state.charging_mode = "price_level"
+        state.last_decision = "charging"
+        state.last_decision_reason = "Adopted observed external Price-Level session"
+
     def _set_preserve_home_battery_intent(self, reason: str) -> None:
         """Publish price-level EV preserve intent for the optimiser to execute."""
         entry_data = self.hass.data.setdefault(self._domain, {}).setdefault(
