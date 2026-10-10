@@ -1062,6 +1062,42 @@ def test_end_of_cycle_adopts_only_selected_allowed_scheduled_external_session(
 
 
 @pytest.mark.parametrize(
+    ("binding_id", "charger_type", "evidence"),
+    [("generic_ev", "generic", "fresh_power"), ("sigenergy_charger", "sigenergy", "fresh_evac_state")],
+)
+def test_end_of_cycle_adopts_only_selected_allowed_smart_schedule_external_session(
+    binding_id: str, charger_type: str, evidence: str
+) -> None:
+    """Smart Schedule admission adopts rather than commanding the session."""
+    adopted = []
+    stopped = []
+
+    async def adopt(**kwargs):
+        adopted.append(kwargs)
+        return True
+
+    async def stop_and_confirm(**kwargs):
+        stopped.append(kwargs)
+        return True
+
+    assert not asyncio.run(module.resolve_end_of_cycle_external_shared_session(
+        binding_id=binding_id, active_profile_id="shared_ev_profile_a",
+        selected_params={"charger_type": charger_type},
+        state=module.ReconciliationState(origin="external", physical_active=True),
+        cycle_context={"binding_id": binding_id, "active_profile_id": "shared_ev_profile_a", "origin": "external", "physical_active": True, "observed_at": NOW, "evidence": evidence},
+        now=NOW, external_control_policy="override",
+        cycle_ledger={binding_id: {"shared_ev_profile_a": {"allowed": True, "responsible_mode": "smart_schedule"}}},
+        get_lease=lambda: None, ensure_external_ownership=lambda _profile: None,
+        stop_and_confirm=stop_and_confirm, adopt_smart_schedule_session=adopt,
+    ))
+
+    assert len(adopted) == 1
+    assert adopted[0]["binding_id"] == binding_id
+    assert adopted[0]["active_profile_id"] == "shared_ev_profile_a"
+    assert stopped == []
+
+
+@pytest.mark.parametrize(
     "record",
     [
         {"allowed": False, "responsible_mode": "solar_surplus"},

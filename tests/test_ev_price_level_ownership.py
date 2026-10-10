@@ -3716,6 +3716,25 @@ def test_scheduled_adopted_shared_session_does_not_duplicate_allowed_start(
     assert executor.get_state()["last_decision"] == "charging"
 
 
+def test_smart_schedule_adopted_shared_session_marks_matching_state() -> None:
+    executor = ev_planner.AutoScheduleExecutor.__new__(ev_planner.AutoScheduleExecutor)
+    executor.hass = None
+    executor.config_entry = None
+    executor._state = {}
+    executor._fleet_vins = ()
+    executor._resolved_ble_prefixes = ()
+    adopted_at = datetime(2026, 10, 10, tzinfo=timezone.utc)
+
+    assert executor.adopt_observed_shared_session("shared_ev_profile_a", adopted_at) is True
+    assert executor.adopt_observed_shared_session("shared_ev_profile_a", adopted_at) is False
+
+    state = executor.get_state("shared_ev_profile_a")
+    assert state.is_charging is True
+    assert state.started_at == adopted_at
+    assert state.last_decision == "charging"
+    assert state.last_decision_reason == "Adopted observed external Smart Schedule session"
+
+
 def test_solar_surplus_config_falls_back_to_sigenergy_entry_charger():
     class SigenergyEntry(_FakeConfigEntry):
         options = {

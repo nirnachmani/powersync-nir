@@ -5361,6 +5361,22 @@ class AutoScheduleExecutor:
             self._state[vehicle_id] = AutoScheduleState(vehicle_id=vehicle_id)
         return self._state[vehicle_id]
 
+    def adopt_observed_shared_session(
+        self, vehicle_id: str, observed_at: datetime | None
+    ) -> bool:
+        """Mark a proven external shared session as Smart Schedule-owned.
+
+        This updates bookkeeping only; it deliberately emits no physical command.
+        """
+        state = self.get_state(vehicle_id)
+        if state.is_charging:
+            return False
+        state.is_charging = True
+        state.started_at = observed_at or dt_util.now()
+        state.last_decision = "charging"
+        state.last_decision_reason = "Adopted observed external Smart Schedule session"
+        return True
+
     def get_all_states(self, *, enabled_only: bool = False) -> Dict[str, dict]:
         """Get API-safe vehicle states, optionally limited to enabled schedules."""
         states: Dict[str, dict] = {}
