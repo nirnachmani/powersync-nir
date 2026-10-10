@@ -151,6 +151,58 @@ def test_inactive_or_unknown_profile_cannot_resolve_a_shared_command():
     assert resolver(FakeHass("unknown"), entry, PROFILE_A_ID, {"charger_type": "generic"}) is None
 
 
+def test_fresh_idle_observation_hands_shared_runtime_to_selected_profile_in_place():
+    handoff = getattr(shared_loadpoint, "handoff_idle_shared_profile", None)
+    assert handoff is not None
+
+    timer = object()
+    session_id = "session-1"
+    runtime_state = {
+        "active_profile_id": PROFILE_A_ID,
+        "params": {
+            "active_logical_vehicle_id": PROFILE_A_ID,
+            "logical_vehicle_id": PROFILE_A_ID,
+            "charger_type": "generic",
+        },
+        "cancel_timer": timer,
+        "session_id": session_id,
+        "current_amps": 0,
+    }
+    lease = {"active_profile_id": PROFILE_A_ID, "session_id": session_id}
+    idle_observation = SimpleNamespace(fresh=True, charging=False)
+
+    assert handoff(runtime_state, lease, PROFILE_B_ID, idle_observation) is True
+    assert runtime_state["active_profile_id"] == PROFILE_B_ID
+    assert runtime_state["params"]["active_logical_vehicle_id"] == PROFILE_B_ID
+    assert runtime_state["params"]["logical_vehicle_id"] == PROFILE_B_ID
+    assert lease["active_profile_id"] == PROFILE_B_ID
+    assert runtime_state["cancel_timer"] is timer
+    assert runtime_state["session_id"] == session_id
+
+
+def test_charging_or_unknown_observation_never_hands_shared_runtime_to_other_profile():
+    handoff = getattr(shared_loadpoint, "handoff_idle_shared_profile", None)
+    assert handoff is not None
+
+    for observation in (
+        SimpleNamespace(fresh=True, charging=True),
+        SimpleNamespace(fresh=True, charging=None),
+        SimpleNamespace(fresh=False, charging=None),
+    ):
+        runtime_state = {
+            "active_profile_id": PROFILE_A_ID,
+            "params": {"active_logical_vehicle_id": PROFILE_A_ID},
+            "cancel_timer": object(),
+            "session_id": "session-1",
+        }
+        lease = {"active_profile_id": PROFILE_A_ID, "session_id": "session-1"}
+
+        assert handoff(runtime_state, lease, PROFILE_B_ID, observation) is False
+        assert runtime_state["active_profile_id"] == PROFILE_A_ID
+        assert runtime_state["params"]["active_logical_vehicle_id"] == PROFILE_A_ID
+        assert lease["active_profile_id"] == PROFILE_A_ID
+
+
 def test_ensure_profiles_preserves_app_owned_config_and_updates_name():
     async def exercise():
         store = FakeStore()

@@ -12498,6 +12498,7 @@ async def _action_start_ev_charging_dynamic_locked(
     entry_id = config_entry.entry_id
     vehicle_id = params.get("vehicle_vin") or params.get("vehicle_id") or DEFAULT_VEHICLE_ID
 
+    shared_binding = None
     # A logical shared profile must be authorised and canonicalised before any
     # state, lease, timer, session, or hardware-command lookup is made.
     if params.get("charger_type") in ("generic", "sigenergy"):
@@ -12507,8 +12508,8 @@ async def _action_start_ev_charging_dynamic_locked(
             resolve_shared_loadpoint_command,
         )
 
-        binding: SharedLoadpointBinding | None = binding_for_entry(config_entry)
-        if binding is not None:
+        shared_binding: SharedLoadpointBinding | None = binding_for_entry(config_entry)
+        if shared_binding is not None:
             requested_profile_id = params.get("active_logical_vehicle_id") or params.get(
                 "logical_vehicle_id"
             ) or vehicle_id
@@ -12594,6 +12595,79 @@ async def _action_start_ev_charging_dynamic_locked(
     owner_mode = params.get("owner_mode", dynamic_mode)
     allow_takeover = bool(params.get("allow_ownership_takeover", False))
     entry_vehicles = _dynamic_ev_state.get(entry_id, {})
+
+    # A selector change never authorises us to disturb a live shared charger.
+    # If the physical runtime is already attributed to the other profile, only
+    # a fresh idle observation can move its logical attribution.  This returns
+    # before ownership arbitration and all command paths, preserving the live
+    # runtime's timer and session identity.
+    if shared_binding is not None:
+        requested_profile_id = params.get("active_logical_vehicle_id")
+        existing_state = entry_vehicles.get(vehicle_id)
+        if (
+            isinstance(existing_state, dict)
+            and existing_state.get("active")
+            and requested_profile_id
+            and existing_state.get("active_profile_id") != requested_profile_id
+        ):
+            from .external_session_reconciler import (
+                generic_observation_from_hass,
+                load_reconciliation_state,
+                persist_reconciliation_state,
+                reconcile_shared_external_session,
+            )
+            from .ev_ownership import claim_ev_ownership, get_ev_ownership
+            from .shared_loadpoint import handoff_idle_shared_profile
+
+            # This slice supports the Generic-Charger reader already wired to
+            # the reconciler.  EVAC has no fresh reader at this start boundary,
+            # so it fails closed rather than issuing a start while uncertain.
+            if params.get("charger_type") != "generic":
+                return False
+            observation = generic_observation_from_hass(
+                hass,
+                binding_id=vehicle_id,
+                params=params,
+            )
+            reconciliation = reconcile_shared_external_session(
+                observation,
+                previous=load_reconciliation_state(hass, config_entry, vehicle_id),
+                active_profile_id=existing_state.get("active_profile_id"),
+            )
+            _lease_id, stored_lease = get_ev_ownership(
+                hass, config_entry, vehicle_id
+            )
+            lease = stored_lease if isinstance(stored_lease, dict) else {}
+            if not handoff_idle_shared_profile(
+                existing_state, lease, requested_profile_id, observation
+            ):
+                return False
+
+            reconciliation.active_profile_id = requested_profile_id
+            await persist_reconciliation_state(
+                hass, config_entry, vehicle_id, reconciliation
+            )
+            existing_params = existing_state.get("params") or {}
+            existing_state["ownership"] = claim_ev_ownership(
+                hass,
+                config_entry,
+                vehicle_id,
+                owner_mode=(
+                    existing_params.get("owner_mode")
+                    or existing_params.get("dynamic_mode")
+                    or "dynamic"
+                ),
+                session_id=existing_state.get("session_id"),
+                reason=existing_state.get("reason"),
+                extra={
+                    "active_profile_id": requested_profile_id,
+                    "charger_type": existing_params.get("charger_type", "generic"),
+                },
+            )
+            if DOMAIN in hass.data and entry_id in hass.data[DOMAIN]:
+                hass.data[DOMAIN][entry_id]["dynamic_ev_state"] = entry_vehicles
+            return True
+
     prevalidated_generic_max: Optional[int] = None
     prevalidated_generic_max_source: Optional[str] = None
     if params.get("charger_type", "tesla") == "generic":

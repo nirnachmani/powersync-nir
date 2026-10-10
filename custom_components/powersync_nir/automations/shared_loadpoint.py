@@ -158,6 +158,38 @@ def resolve_shared_loadpoint_command(
     }
 
 
+def handoff_idle_shared_profile(
+    runtime_state: dict[str, Any],
+    lease: dict[str, Any],
+    requested_profile_id: str,
+    observation: Any,
+) -> bool:
+    """Attribute an existing idle shared runtime to the newly selected profile.
+
+    A handoff is deliberately metadata-only: it preserves the controller,
+    timer, and session identity.  A fresh physical idle read is the sole proof
+    that makes moving the logical attribution safe.
+    """
+    current_profile_id = runtime_state.get("active_profile_id")
+    if (
+        not current_profile_id
+        or current_profile_id == requested_profile_id
+        or not bool(getattr(observation, "fresh", False))
+        or getattr(observation, "charging", None) is not False
+    ):
+        return False
+
+    runtime_state["active_profile_id"] = requested_profile_id
+    runtime_params = runtime_state.get("params")
+    if not isinstance(runtime_params, dict):
+        runtime_params = {}
+        runtime_state["params"] = runtime_params
+    runtime_params["active_logical_vehicle_id"] = requested_profile_id
+    runtime_params["logical_vehicle_id"] = requested_profile_id
+    lease["active_profile_id"] = requested_profile_id
+    return True
+
+
 def shared_profile_configs(config_entry: Any) -> list[dict[str, Any]]:
     """Return the two app-visible logical configs when a complete binding exists."""
     binding = binding_for_entry(config_entry)
