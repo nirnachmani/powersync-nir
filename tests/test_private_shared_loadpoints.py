@@ -56,3 +56,10 @@ def test_physical_session_key_is_separate_from_logical_vehicle_attribution():
     source = SESSIONS.read_text()
 
     assert "loadpoint_id" in source and 'session_key = loadpoint_id or vehicle_id' in source
+
+
+def test_manual_api_parameters_use_the_shared_loadpoint_guard():
+    """The app cannot send a Generic/EVAC command around profile selection."""
+    source = (ROOT / "custom_components/powersync_nir/__init__.py").read_text()
+
+    assert "resolve_shared_loadpoint_command" in source

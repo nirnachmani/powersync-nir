@@ -16038,6 +16038,28 @@ class EVVehicleCommandView(HomeAssistantView):
                 params["vehicle_vin"] = None
                 params["vehicle_id"] = stored_config.get("vehicle_id") or manual_vehicle_id
 
+        # Logical profiles must pass the same selected-profile guard as planner
+        # commands before they acquire a manual lease or reach a charger write.
+        if stored_config and params.get("charger_type") in ("generic", "sigenergy"):
+            from .automations.shared_loadpoint import resolve_shared_loadpoint_command
+
+            physical_id = (
+                "generic_ev"
+                if params.get("charger_type") == "generic"
+                else "sigenergy_charger"
+            )
+            _physical_id, physical_params = self._manual_session_identity(physical_id)
+            requested_profile_id = str(stored_config.get("vehicle_id") or vehicle_vin or "")
+            resolved = resolve_shared_loadpoint_command(
+                self._hass,
+                self._get_powersync_entry(),
+                requested_profile_id,
+                {**params, **physical_params},
+            )
+            if resolved is None:
+                return {"_shared_loadpoint_rejected": True}
+            params = resolved
+
         # Integration options are authoritative for the single Generic Charger.
         # A legacy app profile can retain scheduling metadata, but not entity IDs
         # that the user has replaced or deleted in the options flow.
@@ -16133,6 +16155,8 @@ class EVVehicleCommandView(HomeAssistantView):
 
         params = self._manual_action_params(vehicle_vin)
         params.update(params_extra or {})
+        if params.get("_shared_loadpoint_rejected"):
+            return False, "The selected logical EV is not currently connected"
         params["reason"] = reason
         # Explicit user command: control paths must not silently drop it in
         # favour of a backoff armed by an automatic optimizer loop.
