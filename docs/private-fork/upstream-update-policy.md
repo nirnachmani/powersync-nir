@@ -69,6 +69,39 @@ python scripts/private-fork/validate_local_architecture.py
 scripts/private-fork/run_private_tests.sh
 ```
 
+### Disposable candidate preparation
+
+`candidate_worktree.py` prepares only an isolated, detached local checkout; it
+does not integrate, publish, tag, or deploy. Its required arguments are always
+explicit: private checkout, candidate-root directory, private source ref,
+upstream target ref, and manifest output path. It rejects a dirty private
+checkout and an `origin` that is not `nirnachmani/powersync-nir`, unless an
+explicit `--private-owner-repo owner/repository` policy is supplied. The
+upstream target is recorded as review evidence only and is never a publication
+target.
+
+```bash
+python scripts/private-fork/candidate_worktree.py prepare \
+  --private-repo /path/to/powersync-nir \
+  --candidate-root /path/to/disposable-candidates \
+  --private-source-ref <private-source-sha-or-ref> \
+  --upstream-target-ref <upstream-target-sha-or-ref> \
+  --manifest /path/to/candidate-manifest.json
+```
+
+The manifest is written atomically and records starting/source/target SHAs,
+the exact candidate path, and the `candidate-prepared-no-integration`
+classification. If preflight or manifest writing fails after creation, the
+script removes that disposable candidate. Removal is separate and requires the
+exact registered candidate path directly beneath the supplied candidate root:
+
+```bash
+python scripts/private-fork/candidate_worktree.py cleanup \
+  --private-repo /path/to/powersync-nir \
+  --candidate-root /path/to/disposable-candidates \
+  --worktree /path/to/disposable-candidates/<exact-candidate-name>
+```
+
 Do not weaken those gates or claim a semantic resolution from classification
 output. Deployment, releases, public-repository updates, and remote publishing
 are outside this policy and these tools.

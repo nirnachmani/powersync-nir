@@ -66,7 +66,12 @@ and do not suppress baseline failures.
    - **Redundant:** the private fork already covers the upstream behaviour.
    - **Incompatible:** private behavioural invariants cannot be preserved
      safely.
-5. Create a disposable candidate worktree and branch.
+5. Use `scripts/private-fork/candidate_worktree.py prepare` with explicit
+   private repo, candidate root, source ref, upstream target ref, and manifest.
+   It requires a clean private source and a policy-approved private GitHub
+   `origin`, creates only a detached disposable worktree, and records that no
+   integration occurred. Use its separate `cleanup` command only with the exact
+   registered path beneath the candidate root.
 6. For no-overlap, mechanical, or compatible changes, integrate minimally and
    run every required gate. Commit only if they pass.
 7. For redundant changes, record the upstream SHA and equivalence rationale;
