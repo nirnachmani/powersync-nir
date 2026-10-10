@@ -12611,24 +12611,51 @@ async def _action_start_ev_charging_dynamic_locked(
             and existing_state.get("active_profile_id") != requested_profile_id
         ):
             from .external_session_reconciler import (
+                evac_observation_from_state,
                 generic_observation_from_hass,
                 load_reconciliation_state,
                 persist_reconciliation_state,
                 reconcile_shared_external_session,
+                stop_and_confirm_shared_handoff,
             )
-            from .ev_ownership import claim_ev_ownership, get_ev_ownership
+            from .ev_ownership import get_ev_ownership, release_ev_ownership
             from .shared_loadpoint import handoff_idle_shared_profile
 
-            # This slice supports the Generic-Charger reader already wired to
-            # the reconciler.  EVAC has no fresh reader at this start boundary,
-            # so it fails closed rather than issuing a start while uncertain.
-            if params.get("charger_type") != "generic":
+            # The active runtime owns the physical charger, so its stored
+            # parameters—not the incoming profile's policy—select both the
+            # stop transport and its fresh readback source.
+            existing_params = existing_state.get("params")
+            if not isinstance(existing_params, dict):
                 return False
-            observation = generic_observation_from_hass(
-                hass,
-                binding_id=vehicle_id,
-                params=params,
-            )
+            old_params = dict(existing_params)
+            old_charger_type = str(old_params.get("charger_type") or "").lower()
+
+            if old_charger_type == "generic":
+                async def observe_shared_loadpoint():
+                    return generic_observation_from_hass(
+                        hass, binding_id=vehicle_id, params=old_params
+                    )
+            elif old_charger_type == "sigenergy":
+                async def observe_shared_loadpoint():
+                    config = _sigenergy_charger_config(config_entry, old_params)
+                    if not config.get("host"):
+                        return evac_observation_from_state(
+                            binding_id=vehicle_id, state=None
+                        )
+                    controller = _new_sigenergy_charger(config)
+                    try:
+                        charger_state = await controller.read_state()
+                    except Exception:
+                        charger_state = None
+                    finally:
+                        await controller.disconnect()
+                    return evac_observation_from_state(
+                        binding_id=vehicle_id, state=charger_state
+                    )
+            else:
+                return False
+
+            observation = await observe_shared_loadpoint()
             reconciliation = reconcile_shared_external_session(
                 observation,
                 previous=load_reconciliation_state(hass, config_entry, vehicle_id),
@@ -12638,35 +12665,86 @@ async def _action_start_ev_charging_dynamic_locked(
                 hass, config_entry, vehicle_id
             )
             lease = stored_lease if isinstance(stored_lease, dict) else {}
-            if not handoff_idle_shared_profile(
-                existing_state, lease, requested_profile_id, observation
-            ):
+            if not observation.fresh:
+                return False
+            if observation.charging is False:
+                if not handoff_idle_shared_profile(
+                    existing_state, lease, requested_profile_id, observation
+                ):
+                    return False
+                reconciliation.active_profile_id = requested_profile_id
+                await persist_reconciliation_state(
+                    hass, config_entry, vehicle_id, reconciliation
+                )
+                if DOMAIN in hass.data and entry_id in hass.data[DOMAIN]:
+                    hass.data[DOMAIN][entry_id]["dynamic_ev_state"] = entry_vehicles
+                return True
+            if observation.charging is not True:
                 return False
 
+            async def persist_handoff(updated_reconciliation):
+                await persist_reconciliation_state(
+                    hass, config_entry, vehicle_id, updated_reconciliation
+                )
+
+            async def stop_old_physical_session():
+                # Generic routes to switch.turn_off and EVAC to its controller's
+                # stop_charging path. Never turn an active shared handoff into
+                # an ambiguous 0A rate update.
+                return await _action_stop_ev_charging(
+                    hass, config_entry, dict(old_params)
+                )
+
+            async def finalize_old_physical_session():
+                cancel_timer = existing_state.get("cancel_timer")
+                if callable(cancel_timer):
+                    cancel_timer()
+                quick_stop_timer = existing_state.get("quick_stop_timer")
+                if callable(quick_stop_timer):
+                    quick_stop_timer()
+                try:
+                    from .ev_charging_session import get_session_manager
+
+                    session_manager = get_session_manager()
+                    if session_manager and existing_state.get("session_id"):
+                        await session_manager.end_session(
+                            vehicle_id=vehicle_id, reason="profile handoff"
+                        )
+                except Exception as err:
+                    _LOGGER.warning(
+                        "Dynamic EV: failed to end shared loadpoint session for %s: %s",
+                        vehicle_id, err,
+                    )
+                release_ev_ownership(
+                    hass,
+                    config_entry,
+                    vehicle_id,
+                    reason="managed shared charging-profile handoff",
+                    command="release",
+                )
+                existing_state["active"] = False
+                if entry_vehicles.get(vehicle_id) is existing_state:
+                    del entry_vehicles[vehicle_id]
+                if DOMAIN in hass.data and entry_id in hass.data[DOMAIN]:
+                    hass.data[DOMAIN][entry_id]["dynamic_ev_state"] = entry_vehicles
+
+            handed_off = await stop_and_confirm_shared_handoff(
+                reconciliation,
+                active_profile_id=str(existing_state.get("active_profile_id") or ""),
+                stop=stop_old_physical_session,
+                observe=observe_shared_loadpoint,
+                persist=persist_handoff,
+                finalize=finalize_old_physical_session,
+                max_polls=params.get("_shared_profile_handoff_max_polls", 3),
+                poll_seconds=params.get("_shared_profile_handoff_poll_seconds", 1),
+                sleep=asyncio.sleep,
+            )
+            if not handed_off:
+                return False
             reconciliation.active_profile_id = requested_profile_id
             await persist_reconciliation_state(
                 hass, config_entry, vehicle_id, reconciliation
             )
-            existing_params = existing_state.get("params") or {}
-            existing_state["ownership"] = claim_ev_ownership(
-                hass,
-                config_entry,
-                vehicle_id,
-                owner_mode=(
-                    existing_params.get("owner_mode")
-                    or existing_params.get("dynamic_mode")
-                    or "dynamic"
-                ),
-                session_id=existing_state.get("session_id"),
-                reason=existing_state.get("reason"),
-                extra={
-                    "active_profile_id": requested_profile_id,
-                    "charger_type": existing_params.get("charger_type", "generic"),
-                },
-            )
-            if DOMAIN in hass.data and entry_id in hass.data[DOMAIN]:
-                hass.data[DOMAIN][entry_id]["dynamic_ev_state"] = entry_vehicles
-            return True
 
     prevalidated_generic_max: Optional[int] = None
     prevalidated_generic_max_source: Optional[str] = None

@@ -62,6 +62,79 @@ def mark_stop_failed(state: ReconciliationState) -> ReconciliationState:
     return state
 
 
+async def stop_and_confirm_shared_handoff(
+    state: ReconciliationState,
+    *,
+    active_profile_id: str,
+    stop: Callable[[], Awaitable[bool]],
+    observe: Callable[[], Awaitable[SharedLoadpointObservation | None]],
+    persist: Callable[[ReconciliationState], Awaitable[None]],
+    finalize: Callable[[], Awaitable[None]],
+    max_polls: int = 3,
+    poll_seconds: float = 1.0,
+    sleep: Callable[[float], Awaitable[None]],
+) -> bool:
+    """Stop one managed physical session and finalize only after fresh idle proof.
+
+    The callbacks deliberately keep this policy-free: callers retain their
+    physical stop path and old runtime/session ownership until the reconciler
+    has seen a fresh inactive observation.  A failed, unknown, or timed-out
+    readback never invokes ``finalize``.
+    """
+    mark_stop_pending(state)
+    state.active_profile_id = active_profile_id
+    await persist(state)
+    try:
+        stopped = await stop()
+    except Exception:
+        stopped = False
+    if not stopped:
+        mark_stop_failed(state)
+        await persist(state)
+        return False
+
+    try:
+        attempts = max(1, int(max_polls))
+    except (TypeError, ValueError):
+        attempts = 3
+    try:
+        delay = max(0.0, float(poll_seconds))
+    except (TypeError, ValueError):
+        delay = 1.0
+
+    for attempt in range(attempts):
+        try:
+            observation = await observe()
+        except Exception:
+            observation = None
+        if observation is None:
+            observation = SharedLoadpointObservation(
+                binding_id="",
+                connected=None,
+                charging=None,
+                power_kw=None,
+                observed_at=None,
+                evidence="failed_or_unknown_read",
+            )
+        reconcile_shared_external_session(
+            observation,
+            previous=state,
+            active_profile_id=active_profile_id,
+        )
+        await persist(state)
+        if state.stop_outcome == {"status": "confirmed"}:
+            await finalize()
+            return True
+        if state.stop_outcome == {"status": "indeterminate"}:
+            return False
+        if attempt + 1 < attempts:
+            await sleep(delay)
+
+    state.stop_outcome = {"status": "timed_out"}
+    await persist(state)
+    return False
+
+
 def _automation_store(hass: Any, config_entry: Any) -> Any | None:
     """Return this entry's storage without creating runtime or policy state."""
     entry = getattr(hass, "data", {}).get(DOMAIN, {}).get(config_entry.entry_id, {})

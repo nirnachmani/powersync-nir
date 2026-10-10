@@ -342,6 +342,131 @@ def test_fresh_zero_power_confirms_pending_stop() -> None:
     assert state.stop_outcome == {"status": "confirmed"}
 
 
+def test_managed_handoff_stops_then_waits_for_fresh_idle_before_finalizing() -> None:
+    handoff = getattr(module, "stop_and_confirm_shared_handoff", None)
+    assert handoff is not None
+    state = module.ReconciliationState(
+        origin="powersync",
+        physical_active=True,
+        active_profile_id="shared_ev_profile_a",
+    )
+    observations = iter(
+        [
+            module.generic_power_observation(
+                binding_id="garage", power_kw=7.2, observed_at=NOW, now=NOW
+            ),
+            module.generic_power_observation(
+                binding_id="garage", power_kw=0.0, observed_at=NOW, now=NOW
+            ),
+        ]
+    )
+    events = []
+
+    async def stop() -> bool:
+        events.append("stop")
+        return True
+
+    async def observe():
+        events.append("observe")
+        return next(observations)
+
+    async def persist(updated):
+        events.append(("persist", updated.stop_outcome["status"]))
+
+    async def sleep(_seconds):
+        events.append("sleep")
+
+    async def finalize():
+        events.append("finalize")
+
+    assert asyncio.run(
+        handoff(
+            state,
+            active_profile_id="shared_ev_profile_a",
+            stop=stop,
+            observe=observe,
+            persist=persist,
+            finalize=finalize,
+            max_polls=2,
+            poll_seconds=0,
+            sleep=sleep,
+        )
+    )
+    assert events == [
+        ("persist", "pending"),
+        "stop",
+        "observe",
+        ("persist", "pending"),
+        "sleep",
+        "observe",
+        ("persist", "confirmed"),
+        "finalize",
+    ]
+    assert state.stop_outcome == {"status": "confirmed"}
+
+
+def test_managed_handoff_never_finalizes_after_failed_stop_or_unknown_readback() -> None:
+    handoff = getattr(module, "stop_and_confirm_shared_handoff", None)
+    assert handoff is not None
+
+    async def exercise(stop_result, observation):
+        state = module.ReconciliationState(physical_active=True)
+        finalized = []
+
+        async def stop():
+            return stop_result
+
+        async def observe():
+            return observation
+
+        async def persist(_state):
+            return None
+
+        async def finalize():
+            finalized.append(True)
+
+        result = await handoff(
+            state,
+            active_profile_id="shared_ev_profile_a",
+            stop=stop,
+            observe=observe,
+            persist=persist,
+            finalize=finalize,
+            max_polls=1,
+            poll_seconds=0,
+            sleep=lambda _seconds: None,
+        )
+        return result, state, finalized
+
+    failed_stop = asyncio.run(exercise(False, None))
+    unknown = asyncio.run(
+        exercise(
+            True,
+            module.generic_power_observation(
+                binding_id="garage", power_kw=None, observed_at=NOW, now=NOW
+            ),
+        )
+    )
+    timed_out = asyncio.run(
+        exercise(
+            True,
+            module.generic_power_observation(
+                binding_id="garage", power_kw=7.2, observed_at=NOW, now=NOW
+            ),
+        )
+    )
+
+    assert failed_stop[0] is False
+    assert failed_stop[1].stop_outcome == {"status": "failed"}
+    assert failed_stop[2] == []
+    assert unknown[0] is False
+    assert unknown[1].stop_outcome == {"status": "indeterminate"}
+    assert unknown[2] == []
+    assert timed_out[0] is False
+    assert timed_out[1].stop_outcome == {"status": "timed_out"}
+    assert timed_out[2] == []
+
+
 def test_generic_hass_observation_uses_fresh_power_entity() -> None:
     class State:
         state = "7200"
