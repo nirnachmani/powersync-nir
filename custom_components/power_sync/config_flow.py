@@ -16114,8 +16114,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY,
             CONF_SHARED_LOADPOINT_PROFILE_A_NAME,
             CONF_SHARED_LOADPOINT_PROFILE_A_STATE,
+            CONF_SHARED_LOADPOINT_PROFILE_A_SOC_ENTITY,
             CONF_SHARED_LOADPOINT_PROFILE_B_NAME,
             CONF_SHARED_LOADPOINT_PROFILE_B_STATE,
+            CONF_SHARED_LOADPOINT_PROFILE_B_SOC_ENTITY,
         ):
             final_data[key] = str(ev_input.get(key, "") or "").strip()
 

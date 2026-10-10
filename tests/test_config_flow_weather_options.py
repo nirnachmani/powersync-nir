@@ -462,6 +462,95 @@ def test_ev_charging_save_preserves_fallback_generic_soc_sensor():
     assert "final_data[CONF_GENERIC_CHARGER_SOC_ENTITY_2]" in method_source
 
 
+def _config_flow_constant_values() -> dict[str, object]:
+    """Return literal constants so an extracted save method uses real option keys."""
+    values: dict[str, object] = {}
+    for node in ast.parse(CONST_PATH.read_text()).body:
+        targets = (
+            node.targets
+            if isinstance(node, ast.Assign)
+            else [node.target]
+            if isinstance(node, ast.AnnAssign)
+            else []
+        )
+        for target in targets:
+            if isinstance(target, ast.Name):
+                try:
+                    values[target.id] = ast.literal_eval(node.value)
+                except (TypeError, ValueError):
+                    pass
+    return values
+
+
+def _save_ev_options(existing: dict[str, object], submitted: dict[str, object]) -> dict[str, object]:
+    """Execute the real options-save method without importing Home Assistant."""
+    method = _options_flow_method("_save_ev_options")
+    constants = _config_flow_constant_values()
+    namespace = {"Any": object, "FlowResult": object}
+    namespace.update(
+        {
+            name: constants.get(name, name)
+            for name in {
+                node.id
+                for node in ast.walk(method)
+                if isinstance(node, ast.Name) and node.id.isupper()
+            }
+        }
+    )
+    exec(
+        compile(
+            ast.Module(body=[method], type_ignores=[]),
+            str(CONFIG_FLOW_PATH),
+            "exec",
+        ),
+        namespace,
+    )
+    flow = SimpleNamespace(
+        config_entry=SimpleNamespace(options=existing),
+        _final_options={"earlier_options_step": "preserved"},
+        _apply_legacy_data_key_removals=lambda: None,
+        async_create_entry=lambda **kwargs: kwargs,
+    )
+    return namespace["_save_ev_options"](flow, submitted)["data"]
+
+
+def test_ev_charging_save_round_trips_shared_profile_soc_entities():
+    saved = _save_ev_options(
+        {
+            "unrelated_option": "must-survive",
+            "shared_loadpoint_profile_a_soc_entity": "sensor.old_a_soc",
+            "shared_loadpoint_profile_b_soc_entity": "sensor.old_b_soc",
+        },
+        {
+            "shared_loadpoint_profile_a_soc_entity": "sensor.profile_a_soc",
+            "shared_loadpoint_profile_b_soc_entity": "sensor.profile_b_soc",
+        },
+    )
+
+    assert saved["shared_loadpoint_profile_a_soc_entity"] == "sensor.profile_a_soc"
+    assert saved["shared_loadpoint_profile_b_soc_entity"] == "sensor.profile_b_soc"
+    assert saved["unrelated_option"] == "must-survive"
+    assert saved["earlier_options_step"] == "preserved"
+
+
+def test_ev_charging_save_persists_explicit_shared_profile_soc_entity_clears():
+    saved = _save_ev_options(
+        {
+            "shared_loadpoint_profile_a_soc_entity": "sensor.old_a_soc",
+            "shared_loadpoint_profile_b_soc_entity": "sensor.old_b_soc",
+            "unrelated_option": "must-survive",
+        },
+        {
+            "shared_loadpoint_profile_a_soc_entity": "",
+            "shared_loadpoint_profile_b_soc_entity": "   ",
+        },
+    )
+
+    assert saved["shared_loadpoint_profile_a_soc_entity"] == ""
+    assert saved["shared_loadpoint_profile_b_soc_entity"] == ""
+    assert saved["unrelated_option"] == "must-survive"
+
+
 def test_ev_charging_generic_capacity_round_trip_and_clear():
     """Anonymous chargers expose one optional, clearable capacity fallback."""
     source = CONFIG_FLOW_PATH.read_text()
