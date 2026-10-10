@@ -6486,6 +6486,7 @@ async def record_manual_ev_charging_session(
     # rate the charger is already on so the controller holds it silently.
     _dynamic_ev_state[entry_id][resolved_vehicle_id] = {
         "active": True,
+        "active_profile_id": full_params.get("active_logical_vehicle_id"),
         "params": full_params,
         "current_amps": 0 if reconcile_now else requested_amps,
         "target_amps": requested_amps,
@@ -13662,6 +13663,7 @@ async def _action_start_ev_charging_dynamic_locked(
 
     _dynamic_ev_state[entry_id][vehicle_id] = {
         "active": True,
+        "active_profile_id": full_params.get("active_logical_vehicle_id"),
         "params": full_params,
         "current_amps": initial_current_amps,
         "target_amps": initial_current_amps,

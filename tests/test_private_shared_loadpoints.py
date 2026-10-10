@@ -63,3 +63,9 @@ def test_manual_api_parameters_use_the_shared_loadpoint_guard():
     source = (ROOT / "custom_components/powersync_nir/__init__.py").read_text()
 
     assert "resolve_shared_loadpoint_command" in source
+
+
+def test_dynamic_state_retains_logical_attribution_under_physical_key():
+    source = ACTIONS.read_text()
+
+    assert '"active_profile_id"' in source
