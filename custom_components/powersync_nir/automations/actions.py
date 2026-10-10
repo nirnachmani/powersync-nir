@@ -5122,6 +5122,8 @@ async def _action_start_ev_charging(
         if resolved_command is None:
             return False
         _physical_vehicle_id, params = resolved_command
+        if not _reserve_automated_shared_loadpoint_sequence(hass, config_entry, params):
+            return False
 
     if charger_type == "tesla" and not params.get("vehicle_vin") and params.get(
         "vehicle_id"
@@ -5498,6 +5500,8 @@ async def _action_stop_ev_charging(
         if resolved_command is None:
             return False
         _physical_vehicle_id, params = resolved_command
+        if not _reserve_automated_shared_loadpoint_sequence(hass, config_entry, params):
+            return False
 
     # Cancel any scheduled stop
     if not force_tesla_stop_request and entry_id in _ev_scheduled_stop:
@@ -5800,6 +5804,8 @@ async def _action_set_ev_charging_amps(
         if resolved_command is None:
             return False
         _physical_vehicle_id, params = resolved_command
+        if not _reserve_automated_shared_loadpoint_sequence(hass, config_entry, params):
+            return False
 
     # OCPP charger
     if charger_type == "ocpp":

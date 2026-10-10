@@ -11,6 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPONENT_ROOT = ROOT / "custom_components" / "powersync_nir"
@@ -909,3 +911,90 @@ def test_shared_dynamic_session_keeps_logical_identity_for_periodic_rate_and_sto
     assert asyncio.run(
         actions._set_vehicle_amps(hass, entry, "generic_ev", 8, _generic_params())
     ) is False
+
+
+@pytest.mark.parametrize(
+    ("charger_type", "boundary"),
+    (
+        ("generic", "start"),
+        ("generic", "stop"),
+        ("generic", "current"),
+        ("sigenergy", "start"),
+        ("sigenergy", "stop"),
+        ("sigenergy", "current"),
+    ),
+)
+def test_active_cycle_budget_blocks_competing_direct_shared_command_before_io(
+    monkeypatch, charger_type, boundary
+):
+    """Every direct Generic/EVAC boundary consumes the active cycle token."""
+    hass = _Hass()
+    entry = _Entry()
+    if charger_type == "sigenergy":
+        entry.options = {
+            **entry.options,
+            "generic_charger_enabled": False,
+            "sigenergy_charger_enabled": True,
+            "sigenergy_charger_type": "evac",
+        }
+
+    physical_id = "generic_ev" if charger_type == "generic" else "sigenergy_charger"
+    first = {
+        "charger_type": charger_type,
+        "shared_loadpoint_binding": True,
+        "logical_vehicle_id": "shared_ev_profile_a",
+    }
+    competitor = {
+        "charger_type": charger_type,
+        "shared_loadpoint_binding": True,
+        "logical_vehicle_id": "shared_ev_profile_b",
+        "active_logical_vehicle_id": "shared_ev_profile_b",
+        "vehicle_id": physical_id,
+    }
+    if charger_type == "generic":
+        competitor.update(
+            charger_switch_entity="switch.shared_ev",
+            charger_amps_entity="number.shared_ev_amps",
+        )
+
+    async def resolve(*_args, **_kwargs):
+        return physical_id, competitor
+
+    monkeypatch.setattr(actions, "_resolve_shared_loadpoint_direct_command", resolve)
+    actions._begin_automated_shared_loadpoint_cycle(hass, entry)
+    assert actions._reserve_automated_shared_loadpoint_sequence(hass, entry, first) is True
+
+    if charger_type == "generic":
+        monkeypatch.setattr(actions, "_generic_charger_ready_for_start", lambda *_args: (True, None))
+        monkeypatch.setattr(actions, "_normalize_generic_charger_amps", lambda *_args: 8)
+        write = AsyncMock(return_value=True)
+        if boundary == "start":
+            monkeypatch.setattr(actions, "_start_generic_charger_switch", write)
+        elif boundary == "current":
+            monkeypatch.setattr(actions, "_set_generic_charger_amps_entity", write)
+    else:
+        write = AsyncMock(return_value=True)
+        monkeypatch.setattr(actions, "_with_sigenergy_charger_capabilities", lambda *_args: competitor)
+        if boundary == "start":
+            monkeypatch.setattr(actions, "_start_sigenergy_charger", write)
+        elif boundary == "stop":
+            monkeypatch.setattr(actions, "_stop_sigenergy_charger", write)
+        else:
+            monkeypatch.setattr(actions, "_set_sigenergy_charger_amps", write)
+
+    if boundary == "start":
+        result = asyncio.run(actions._action_start_ev_charging(hass, entry, competitor))
+    elif boundary == "stop":
+        result = asyncio.run(actions._action_stop_ev_charging(hass, entry, competitor))
+    else:
+        result = asyncio.run(
+            actions._action_set_ev_charging_amps(
+                hass, entry, {**competitor, "amps": 8}
+            )
+        )
+
+    assert result is False
+    if boundary == "stop" and charger_type == "generic":
+        hass.services.async_call.assert_not_awaited()
+    else:
+        write.assert_not_awaited()
