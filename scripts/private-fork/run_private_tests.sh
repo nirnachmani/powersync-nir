@@ -24,6 +24,7 @@ python3 scripts/private-fork/validate_local_architecture.py
 
 focused_tests=(
     tests/test_private_architecture_validator.py
+    tests/test_private_fork_upstream_delta.py
     tests/test_private_shared_loadpoints.py
     tests/test_shared_loadpoint_binding.py
     tests/test_shared_loadpoint_action_guard.py
