@@ -91,6 +91,8 @@ def test_cycle_context_reconciles_selected_generic_loadpoint_as_external():
         "active_profile_id": "shared_ev_profile_a",
         "origin": "external",
         "physical_active": True,
+        "observed_at": NOW,
+        "evidence": "fresh_power",
     }
     assert hass.data["powersync_nir"]["entry-1"]["_shared_loadpoint_cycle_context"] == context
     assert store.saved == 1
@@ -132,6 +134,41 @@ def test_cycle_context_publishes_unknown_for_stale_generic_power():
 
     assert context["physical_active"] is None
     assert context["origin"] == "unknown"
+    assert context["observed_at"] == NOW - timedelta(seconds=91)
+    assert context["evidence"] == "stale_or_missing_power"
+
+
+def test_cycle_context_publishes_fresh_evac_observation_provenance():
+    store = _Store()
+    hass = _Hass(store)
+    entry = _Entry()
+    entry.options = {
+        **entry.options,
+        "generic_charger_enabled": False,
+        "sigenergy_charger_enabled": True,
+        "sigenergy_charger_type": "evac",
+    }
+
+    class _EvacState:
+        charger_type = "evac"
+        is_connected = True
+        is_charging = True
+        power_kw = 7.2
+
+    async def read_evac_state():
+        return _EvacState()
+
+    context = asyncio.run(
+        module.reconcile_selected_shared_loadpoint_cycle(
+            hass, entry, now=NOW, read_evac_state=read_evac_state
+        )
+    )
+
+    assert context is not None
+    assert context["physical_active"] is True
+    assert context["origin"] == "external"
+    assert context["observed_at"] == NOW
+    assert context["evidence"] == "fresh_evac_state"
 
 
 def test_unselected_or_incomplete_binding_publishes_no_cycle_context():
@@ -173,5 +210,7 @@ def test_evac_read_failure_publishes_unknown_context():
         "active_profile_id": "shared_ev_profile_a",
         "origin": "unknown",
         "physical_active": None,
+        "observed_at": None,
+        "evidence": "failed_or_unknown_evac_read",
     }
     assert store.saved == 1

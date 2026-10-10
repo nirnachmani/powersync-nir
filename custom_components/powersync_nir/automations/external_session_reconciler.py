@@ -48,6 +48,8 @@ class ReconciliationState:
     active_profile_id: str | None = None
     stop_outcome: dict[str, Any] | None = None
     observed_session_token: str | None = None
+    observed_at: datetime | None = None
+    evidence: str | None = None
 
 
 def mark_stop_pending(state: ReconciliationState) -> ReconciliationState:
@@ -299,6 +301,7 @@ def evac_observation_from_state(
     *,
     binding_id: str,
     state: Any | None,
+    observed_at: datetime | None = None,
 ) -> SharedLoadpointObservation:
     """Map one just-read normalized EVAC state into the reconciler contract."""
     if state is None or str(getattr(state, "charger_type", "")).lower() != "evac":
@@ -320,7 +323,7 @@ def evac_observation_from_state(
         connected=bool(getattr(state, "is_connected", False)),
         charging=bool(getattr(state, "is_charging", False)),
         power_kw=numeric_power,
-        observed_at=None,
+        observed_at=_as_utc(observed_at),
         evidence="fresh_evac_state",
     )
 
@@ -483,6 +486,8 @@ async def reconcile_selected_shared_loadpoint_cycle(
         "active_profile_id": active_profile_id,
         "origin": state.origin,
         "physical_active": state.physical_active,
+        "observed_at": state.observed_at,
+        "evidence": state.evidence,
     }
     if isinstance(entry_data, dict):
         entry_data["_shared_loadpoint_cycle_context"] = context
@@ -507,6 +512,7 @@ async def reconcile_evac_session_from_reader(
         observation = evac_observation_from_state(
             binding_id=loadpoint_id,
             state=await read_state(),
+            observed_at=current,
         )
     except Exception:
         observation = evac_observation_from_state(binding_id=loadpoint_id, state=None)
@@ -537,6 +543,8 @@ def reconcile_shared_external_session(
 ) -> ReconciliationState:
     """Classify one observed physical state without deciding a charging policy."""
     state = previous or ReconciliationState()
+    state.observed_at = observation.observed_at
+    state.evidence = observation.evidence
     if not observation.fresh:
         state.origin = "unknown"
         state.physical_active = None
