@@ -10844,6 +10844,20 @@ class PriceLevelChargingExecutor:
                 pseudo_vin = "sigenergy_charger"
                 results[pseudo_vin] = decision
 
+                try:
+                    from .actions import _record_automated_shared_loadpoint_decision
+
+                    _record_automated_shared_loadpoint_decision(
+                        self.hass,
+                        self.config_entry,
+                        allowed=should_charge,
+                        responsible_mode="price_level",
+                        reason=reason,
+                        source=mode,
+                    )
+                except Exception as err:
+                    _LOGGER.debug("Price-level shared decision ledger record failed: %s", err)
+
                 vehicle_state = self._get_or_create_vehicle_state(pseudo_vin)
                 _LOGGER.debug(
                     f"Sigenergy charger decision: should_charge={should_charge}, reason={reason}"
@@ -10866,6 +10880,20 @@ class PriceLevelChargingExecutor:
                 should_charge, reason, mode = decision
                 pseudo_vin = "generic_ev"
                 results[pseudo_vin] = decision
+
+                try:
+                    from .actions import _record_automated_shared_loadpoint_decision
+
+                    _record_automated_shared_loadpoint_decision(
+                        self.hass,
+                        self.config_entry,
+                        allowed=should_charge,
+                        responsible_mode="price_level",
+                        reason=reason,
+                        source=mode,
+                    )
+                except Exception as err:
+                    _LOGGER.debug("Price-level shared decision ledger record failed: %s", err)
 
                 vehicle_state = self._get_or_create_vehicle_state(pseudo_vin)
                 _LOGGER.debug(

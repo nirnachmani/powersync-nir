@@ -2222,6 +2222,85 @@ def test_scheduled_shared_decision_is_logged_before_existing_start_behavior(monk
     }
 
 
+def test_price_level_shared_generic_decision_is_logged_before_existing_start_behavior(monkeypatch):
+    hass = _FakeHass(states={"sensor.connected_vehicle": "tank"})
+    entry = _FakeConfigEntry()
+    entry.options = {
+        "generic_charger_enabled": True,
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Tesla",
+        "shared_loadpoint_profile_b_state": "tesla",
+    }
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    executor.get_charging_decision = AsyncMock(
+        return_value=(True, "Price-level: cheap window", "price_level_opportunity")
+    )
+
+    async def start_after_ledger(mode, reason, vehicle_vin=None):
+        assert hass.data["powersync_nir"]["entry-1"][
+            "_automated_shared_loadpoint_decision_ledger"
+        ]["generic_ev"]["shared_ev_profile_a"] == {
+            "allowed": True,
+            "responsible_mode": "price_level",
+            "reason": "Price-level: cheap window",
+            "source": "price_level_opportunity",
+        }
+        return True
+
+    executor._start_charging = AsyncMock(side_effect=start_after_ledger)
+    actions = importlib.import_module("powersync_nir.automations.actions")
+    actions._begin_automated_shared_loadpoint_cycle(hass, entry)
+
+    results = asyncio.run(executor.evaluate_all_vehicles(10))
+
+    assert results == {
+        "generic_ev": (True, "Price-level: cheap window", "price_level_opportunity")
+    }
+    executor._start_charging.assert_awaited_once_with(
+        "price_level_opportunity", "Price-level: cheap window", vehicle_vin="generic_ev"
+    )
+
+
+def test_price_level_shared_evac_denial_is_logged(monkeypatch):
+    hass = _FakeHass(states={"sensor.connected_vehicle": "tank"})
+    entry = _FakeConfigEntry()
+    entry.options = {
+        "sigenergy_charger_enabled": True,
+        "sigenergy_charger_type": "evac",
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Tesla",
+        "shared_loadpoint_profile_b_state": "tesla",
+    }
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    executor.get_charging_decision = AsyncMock(
+        return_value=(False, "Price-level: above threshold", "price_level_opportunity")
+    )
+    actions = importlib.import_module("powersync_nir.automations.actions")
+    actions._begin_automated_shared_loadpoint_cycle(hass, entry)
+
+    results = asyncio.run(executor.evaluate_all_vehicles(50))
+
+    assert results == {
+        "sigenergy_charger": (
+            False,
+            "Price-level: above threshold",
+            "price_level_opportunity",
+        )
+    }
+    assert hass.data["powersync_nir"]["entry-1"][
+        "_automated_shared_loadpoint_decision_ledger"
+    ]["sigenergy_charger"]["shared_ev_profile_a"] == {
+        "allowed": False,
+        "responsible_mode": "price_level",
+        "reason": "Price-level: above threshold",
+        "source": "price_level_opportunity",
+    }
+
+
 def _scheduled_price_hass(schedule: dict | None) -> _FakeHass:
     hass = _FakeHass()
     hass.data["powersync_nir"]["entry-1"]["automation_store"]._data[
