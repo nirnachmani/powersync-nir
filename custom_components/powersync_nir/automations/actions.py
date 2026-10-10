@@ -5100,6 +5100,23 @@ async def _action_start_ev_charging(
     """
     charger_type = params.get("charger_type", "tesla")
 
+    if str(charger_type).strip().lower() in ("generic", "sigenergy"):
+        requested_vehicle_id = (
+            params.get("active_logical_vehicle_id")
+            or params.get("logical_vehicle_id")
+            or params.get("vehicle_vin")
+            or params.get("vehicle_id")
+        )
+        resolved_command = _resolve_shared_loadpoint_direct_command(
+            hass,
+            config_entry,
+            requested_vehicle_id,
+            params,
+        )
+        if resolved_command is None:
+            return False
+        _physical_vehicle_id, params = resolved_command
+
     if charger_type == "tesla" and not params.get("vehicle_vin") and params.get(
         "vehicle_id"
     ) in (None, DEFAULT_VEHICLE_ID):
@@ -5754,6 +5771,23 @@ async def _action_set_ev_charging_amps(
         return False
 
     charger_type = params.get("charger_type", "tesla")
+
+    if str(charger_type).strip().lower() in ("generic", "sigenergy"):
+        requested_vehicle_id = (
+            params.get("active_logical_vehicle_id")
+            or params.get("logical_vehicle_id")
+            or params.get("vehicle_vin")
+            or params.get("vehicle_id")
+        )
+        resolved_command = _resolve_shared_loadpoint_direct_command(
+            hass,
+            config_entry,
+            requested_vehicle_id,
+            params,
+        )
+        if resolved_command is None:
+            return False
+        _physical_vehicle_id, params = resolved_command
 
     # OCPP charger
     if charger_type == "ocpp":

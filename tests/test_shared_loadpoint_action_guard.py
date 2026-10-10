@@ -117,6 +117,54 @@ def test_physical_generic_id_cannot_bypass_selected_profile_for_direct_stop():
     hass.services.async_call.assert_not_awaited()
 
 
+def test_physical_generic_id_cannot_bypass_selected_profile_for_direct_start():
+    hass = _Hass()
+
+    result = asyncio.run(
+        actions._action_start_ev_charging(
+            hass, _Entry(), {**_generic_params(), "vehicle_id": "generic_ev"}
+        )
+    )
+
+    assert result is False
+    hass.services.async_call.assert_not_awaited()
+
+
+def test_selected_logical_generic_id_reaches_canonical_direct_start_command(monkeypatch):
+    hass = _Hass()
+    seen = []
+
+    def ready(_hass, params):
+        seen.append(params)
+        return True, None
+
+    monkeypatch.setattr(actions, "_generic_charger_ready_for_start", ready)
+    monkeypatch.setattr(actions, "_start_generic_charger_switch", AsyncMock(return_value=True))
+
+    result = asyncio.run(
+        actions._action_start_ev_charging(
+            hass, _Entry(), {**_generic_params(), "vehicle_id": "shared_ev_profile_a"}
+        )
+    )
+
+    assert result is True
+    assert seen[0]["vehicle_id"] == "generic_ev"
+    assert seen[0]["logical_vehicle_id"] == "shared_ev_profile_a"
+
+
+def test_inactive_logical_generic_id_cannot_issue_direct_start():
+    hass = _Hass(selector_state="tank")
+
+    result = asyncio.run(
+        actions._action_start_ev_charging(
+            hass, _Entry(), {**_generic_params(), "vehicle_id": "shared_ev_profile_b"}
+        )
+    )
+
+    assert result is False
+    hass.services.async_call.assert_not_awaited()
+
+
 def test_selected_logical_generic_id_reaches_canonical_direct_stop_command():
     hass = _Hass()
 
@@ -158,6 +206,28 @@ def test_physical_generic_id_cannot_bypass_selected_profile_for_current_write():
     hass.services.async_call.assert_not_awaited()
 
 
+def test_physical_generic_id_cannot_bypass_selected_profile_for_direct_current_write(monkeypatch):
+    hass = _Hass()
+    set_amps = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_set_generic_charger_amps_entity", set_amps)
+
+    result = asyncio.run(
+        actions._action_set_ev_charging_amps(
+            hass,
+            _Entry(),
+            {
+                **_generic_params(),
+                "vehicle_id": "generic_ev",
+                "charger_amps_entity": "number.shared_ev_amps",
+                "amps": 8,
+            },
+        )
+    )
+
+    assert result is False
+    set_amps.assert_not_awaited()
+
+
 def test_selected_logical_generic_id_reaches_canonical_current_command(monkeypatch):
     hass = _Hass()
     seen = []
@@ -176,6 +246,52 @@ def test_selected_logical_generic_id_reaches_canonical_current_command(monkeypat
     assert result is True
     assert seen[0]["vehicle_id"] == "generic_ev"
     assert seen[0]["logical_vehicle_id"] == "shared_ev_profile_a"
+
+
+def test_physical_evac_id_cannot_bypass_selected_profile_for_direct_start(monkeypatch):
+    hass = _Hass()
+    entry = _Entry()
+    entry.options = {
+        **entry.options,
+        "generic_charger_enabled": False,
+        "sigenergy_charger_enabled": True,
+        "sigenergy_charger_type": "evac",
+    }
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_start_sigenergy_charger", start)
+
+    result = asyncio.run(
+        actions._action_start_ev_charging(
+            hass, entry, {"charger_type": "sigenergy", "vehicle_id": "sigenergy_charger"}
+        )
+    )
+
+    assert result is False
+    start.assert_not_awaited()
+
+
+def test_selected_logical_evac_id_reaches_canonical_direct_start_command(monkeypatch):
+    hass = _Hass()
+    entry = _Entry()
+    entry.options = {
+        **entry.options,
+        "generic_charger_enabled": False,
+        "sigenergy_charger_enabled": True,
+        "sigenergy_charger_type": "evac",
+    }
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_start_sigenergy_charger", start)
+
+    result = asyncio.run(
+        actions._action_start_ev_charging(
+            hass, entry, {"charger_type": "sigenergy", "vehicle_id": "shared_ev_profile_a"}
+        )
+    )
+
+    assert result is True
+    assert start.await_args is not None
+    assert start.await_args.args[2]["vehicle_id"] == "sigenergy_charger"
+    assert start.await_args.args[2]["logical_vehicle_id"] == "shared_ev_profile_a"
 
 
 def test_physical_evac_id_cannot_bypass_selected_profile_for_direct_stop(monkeypatch):
@@ -198,6 +314,80 @@ def test_physical_evac_id_cannot_bypass_selected_profile_for_direct_stop(monkeyp
 
     assert result is False
     stop.assert_not_awaited()
+
+
+def test_physical_evac_id_cannot_bypass_selected_profile_for_direct_current_write(monkeypatch):
+    hass = _Hass()
+    entry = _Entry()
+    entry.options = {
+        **entry.options,
+        "generic_charger_enabled": False,
+        "sigenergy_charger_enabled": True,
+        "sigenergy_charger_type": "evac",
+    }
+    set_amps = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_set_sigenergy_charger_amps", set_amps)
+
+    result = asyncio.run(
+        actions._action_set_ev_charging_amps(
+            hass,
+            entry,
+            {"charger_type": "sigenergy", "vehicle_id": "sigenergy_charger", "amps": 8},
+        )
+    )
+
+    assert result is False
+    set_amps.assert_not_awaited()
+
+
+def test_selected_logical_evac_id_reaches_canonical_direct_current_command(monkeypatch):
+    hass = _Hass()
+    entry = _Entry()
+    entry.options = {
+        **entry.options,
+        "generic_charger_enabled": False,
+        "sigenergy_charger_enabled": True,
+        "sigenergy_charger_type": "evac",
+    }
+    set_amps = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_set_sigenergy_charger_amps", set_amps)
+
+    result = asyncio.run(
+        actions._action_set_ev_charging_amps(
+            hass,
+            entry,
+            {"charger_type": "sigenergy", "vehicle_id": "shared_ev_profile_a", "amps": 8},
+        )
+    )
+
+    assert result is True
+    assert set_amps.await_args is not None
+    assert set_amps.await_args.args[2]["vehicle_id"] == "sigenergy_charger"
+    assert set_amps.await_args.args[2]["logical_vehicle_id"] == "shared_ev_profile_a"
+
+
+def test_unknown_selection_cannot_issue_direct_evac_current_write(monkeypatch):
+    hass = _Hass(selector_state="unknown")
+    entry = _Entry()
+    entry.options = {
+        **entry.options,
+        "generic_charger_enabled": False,
+        "sigenergy_charger_enabled": True,
+        "sigenergy_charger_type": "evac",
+    }
+    set_amps = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_set_sigenergy_charger_amps", set_amps)
+
+    result = asyncio.run(
+        actions._action_set_ev_charging_amps(
+            hass,
+            entry,
+            {"charger_type": "sigenergy", "vehicle_id": "shared_ev_profile_a", "amps": 8},
+        )
+    )
+
+    assert result is False
+    set_amps.assert_not_awaited()
 
 
 def test_selected_logical_evac_id_reaches_canonical_current_command(monkeypatch):
