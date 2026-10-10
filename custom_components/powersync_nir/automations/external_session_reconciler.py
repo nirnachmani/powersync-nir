@@ -395,6 +395,100 @@ def reconcile_generic_session_from_hass(
     )
 
 
+async def reconcile_selected_shared_loadpoint_cycle(
+    hass: Any,
+    config_entry: Any,
+    *,
+    now: datetime | None = None,
+    read_evac_state: Callable[[], Awaitable[Any | None]] | None = None,
+) -> dict[str, Any] | None:
+    """Reconcile the selected shared physical loadpoint and publish cycle context.
+
+    This is observation-only: it neither changes ownership nor invokes charging
+    policy.  A complete binding and one currently selected logical profile are
+    required before any backend telemetry is read.
+    """
+    entry_data = getattr(hass, "data", {}).get(DOMAIN, {}).get(config_entry.entry_id)
+
+    def clear_cycle_context() -> None:
+        if isinstance(entry_data, dict):
+            entry_data.pop("_shared_loadpoint_cycle_context", None)
+
+    from .shared_loadpoint import (
+        canonical_shared_loadpoint_id,
+        binding_for_entry,
+        resolve_active_shared_profile,
+    )
+
+    if binding_for_entry(config_entry) is None:
+        clear_cycle_context()
+        return None
+    active_profile_id = resolve_active_shared_profile(hass, config_entry)
+    if active_profile_id is None:
+        clear_cycle_context()
+        return None
+    loadpoint_id = canonical_shared_loadpoint_id(config_entry, active_profile_id)
+    if loadpoint_id is None:
+        clear_cycle_context()
+        return None
+
+    options = {
+        **getattr(config_entry, "data", {}),
+        **getattr(config_entry, "options", {}),
+    }
+    store = _automation_store(hass, config_entry)
+    stored_configs = getattr(store, "_data", {}).get("vehicle_charging_configs", [])
+    selected_params = next(
+        (
+            dict(candidate)
+            for candidate in stored_configs
+            if isinstance(candidate, Mapping)
+            and str(candidate.get("vehicle_id") or "") == active_profile_id
+        ),
+        {},
+    )
+    if not selected_params.get("charger_power_entity"):
+        selected_params["charger_power_entity"] = options.get(
+            "generic_charger_power_entity"
+        )
+    if loadpoint_id == "generic_ev":
+        state = reconcile_generic_session_from_hass(
+            hass,
+            config_entry,
+            loadpoint_id,
+            selected_params,
+            previous=load_reconciliation_state(hass, config_entry, loadpoint_id),
+            active_profile_id=active_profile_id,
+            now=now,
+        )
+    elif loadpoint_id == "sigenergy_charger":
+        if read_evac_state is None:
+            state = ReconciliationState()
+        else:
+            state = await reconcile_evac_session_from_reader(
+                hass,
+                config_entry,
+                loadpoint_id,
+                read_state=read_evac_state,
+                previous=load_reconciliation_state(hass, config_entry, loadpoint_id),
+                active_profile_id=active_profile_id,
+                now=now,
+            )
+    else:
+        return None
+
+    await persist_reconciliation_state(hass, config_entry, loadpoint_id, state)
+    context = {
+        "binding_id": loadpoint_id,
+        "active_profile_id": active_profile_id,
+        "origin": state.origin,
+        "physical_active": state.physical_active,
+    }
+    if isinstance(entry_data, dict):
+        entry_data["_shared_loadpoint_cycle_context"] = context
+    return context
+
+
 async def reconcile_evac_session_from_reader(
     hass: Any,
     config_entry: Any,

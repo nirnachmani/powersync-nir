@@ -42995,6 +42995,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             except Exception as err:
                 _LOGGER.debug("Observed Tesla ownership reconciliation failed: %s", err)
 
+        # Freshly reconcile only the selected shared physical loadpoint.  The
+        # resulting context is observational and intentionally cannot alter
+        # command, ownership, policy, or optimizer behavior in this cycle.
+        try:
+            from .automations.external_session_reconciler import (
+                reconcile_selected_shared_loadpoint_cycle,
+            )
+
+            await reconcile_selected_shared_loadpoint_cycle(
+                hass,
+                entry,
+                now=now,
+                read_evac_state=lambda: _read_sigenergy_charger_state_for_entry(
+                    entry, hass
+                ),
+            )
+        except Exception as err:
+            _LOGGER.debug("Shared loadpoint cycle reconciliation failed: %s", err)
+
         try:
             triggered_count = await automation_engine.async_evaluate_all()
             if triggered_count > 0:
