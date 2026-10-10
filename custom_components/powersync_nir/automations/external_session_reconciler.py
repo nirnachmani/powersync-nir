@@ -623,6 +623,7 @@ async def resolve_end_of_cycle_external_shared_session(
     ensure_external_ownership: Callable[[str], Awaitable[None]],
     stop_and_confirm: Callable[..., Awaitable[bool]],
     release_temporary_external_ownership: Callable[[str], Awaitable[None]] | None = None,
+    adopt_solar_session: Callable[..., Awaitable[bool]] | None = None,
 ) -> bool:
     """Resolve one proven external selected shared session after a cycle.
 
@@ -698,6 +699,34 @@ async def resolve_end_of_cycle_external_shared_session(
         return False
 
     records = cycle_ledger.get(binding_id, {}) if isinstance(cycle_ledger, Mapping) else {}
+    selected_record = (
+        records.get(active_profile_id)
+        if isinstance(records, Mapping)
+        else None
+    )
+    selected_solar_admission = (
+        isinstance(selected_record, Mapping)
+        and selected_record.get("allowed") is True
+        and selected_record.get("responsible_mode") == "solar_surplus"
+    )
+    if selected_solar_admission:
+        # An allowed Solar decision owns this cycle even if the runtime adapter
+        # declines (or fails): never turn a failed adoption into an immediate
+        # physical stop.  A PowerSync lease is a conflict and remains untouched.
+        if (
+            adopt_solar_session is not None
+            and (lease is None or lease.get("owner") != "powersync")
+        ):
+            try:
+                await adopt_solar_session(
+                    binding_id=binding_id,
+                    active_profile_id=active_profile_id,
+                    selected_params=dict(selected_params),
+                    observed_at=observed_at,
+                )
+            except Exception:
+                pass
+        return False
     if isinstance(records, Mapping) and any(
         isinstance(record, Mapping) and record.get("allowed") is True
         for record in records.values()

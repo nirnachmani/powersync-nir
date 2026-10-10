@@ -909,6 +909,144 @@ def test_end_of_cycle_does_not_stop_after_selector_changes_from_reconciled_conte
     assert stopped == []
 
 
+@pytest.mark.parametrize(
+    ("binding_id", "charger_type", "evidence"),
+    [
+        ("generic_ev", "generic", "fresh_power"),
+        ("sigenergy_charger", "sigenergy", "fresh_evac_state"),
+    ],
+)
+def test_end_of_cycle_adopts_only_selected_allowed_solar_external_session(
+    binding_id: str, charger_type: str, evidence: str
+) -> None:
+    """Solar may adopt the fresh selected physical session without a stop."""
+    adopted = []
+    stopped = []
+    lease = None
+
+    async def adopt(**kwargs):
+        adopted.append(kwargs)
+        return True
+
+    async def stop_and_confirm(**kwargs):
+        stopped.append(kwargs)
+        return True
+
+    assert not asyncio.run(
+        module.resolve_end_of_cycle_external_shared_session(
+            binding_id=binding_id,
+            active_profile_id="shared_ev_profile_a",
+            selected_params={"charger_type": charger_type},
+            state=module.ReconciliationState(origin="external", physical_active=True),
+            cycle_context={
+                "binding_id": binding_id,
+                "active_profile_id": "shared_ev_profile_a",
+                "origin": "external",
+                "physical_active": True,
+                "observed_at": NOW,
+                "evidence": evidence,
+            },
+            now=NOW,
+            external_control_policy="override",
+            cycle_ledger={
+                binding_id: {
+                    "shared_ev_profile_a": {
+                        "allowed": True,
+                        "responsible_mode": "solar_surplus",
+                    }
+                }
+            },
+            get_lease=lambda: lease,
+            ensure_external_ownership=lambda _profile: None,
+            stop_and_confirm=stop_and_confirm,
+            adopt_solar_session=adopt,
+        )
+    )
+
+    assert len(adopted) == 1
+    assert adopted[0]["binding_id"] == binding_id
+    assert adopted[0]["active_profile_id"] == "shared_ev_profile_a"
+    assert stopped == []
+
+
+def test_end_of_cycle_allowed_solar_adoption_decline_never_stops_same_cycle() -> None:
+    adopted = []
+    stopped = []
+
+    async def adopt(**_kwargs):
+        adopted.append(True)
+        return False
+
+    async def stop_and_confirm(**kwargs):
+        stopped.append(kwargs)
+        return True
+
+    assert not asyncio.run(
+        module.resolve_end_of_cycle_external_shared_session(
+            binding_id="generic_ev",
+            active_profile_id="shared_ev_profile_a",
+            selected_params={"charger_type": "generic"},
+            state=module.ReconciliationState(origin="external", physical_active=True),
+            cycle_context={
+                "binding_id": "generic_ev", "active_profile_id": "shared_ev_profile_a",
+                "origin": "external", "physical_active": True,
+                "observed_at": NOW, "evidence": "fresh_power",
+            },
+            now=NOW, external_control_policy="override",
+            cycle_ledger={"generic_ev": {"shared_ev_profile_a": {
+                "allowed": True, "responsible_mode": "solar_surplus",
+            }}},
+            get_lease=lambda: {"owner": "external"},
+            ensure_external_ownership=lambda _profile: None,
+            stop_and_confirm=stop_and_confirm,
+            adopt_solar_session=adopt,
+        )
+    )
+    assert adopted == [True]
+    assert stopped == []
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"allowed": False, "responsible_mode": "solar_surplus"},
+        {"allowed": True, "responsible_mode": "scheduled"},
+    ],
+)
+def test_end_of_cycle_nonadoptable_allowed_record_never_solar_adopts(record) -> None:
+    adopted = []
+
+    async def adopt(**_kwargs):
+        adopted.append(True)
+        return True
+
+    assert not asyncio.run(
+        module.resolve_end_of_cycle_external_shared_session(
+            binding_id="generic_ev", active_profile_id="shared_ev_profile_a",
+            selected_params={"charger_type": "generic"},
+            state=module.ReconciliationState(origin="external", physical_active=True),
+            cycle_context={
+                "binding_id": "generic_ev", "active_profile_id": "shared_ev_profile_a",
+                "origin": "external", "physical_active": True,
+                "observed_at": NOW, "evidence": "fresh_power",
+            },
+            now=NOW, external_control_policy="override",
+            cycle_ledger={"generic_ev": {"shared_ev_profile_a": record}},
+            get_lease=lambda: {"owner": "external"},
+            ensure_external_ownership=lambda _profile: None,
+            stop_and_confirm=(
+                (lambda **_kwargs: _false_async())
+            ),
+            adopt_solar_session=adopt,
+        )
+    )
+    assert adopted == []
+
+
+async def _false_async() -> bool:
+    return False
+
+
 def test_end_of_cycle_does_not_stop_when_allowed_or_already_resolved() -> None:
     stopped = []
 

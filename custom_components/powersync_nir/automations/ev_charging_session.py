@@ -388,6 +388,7 @@ class ChargingSessionManager:
         start_soc: Optional[int] = None,
         target_soc: Optional[int] = None,
         loadpoint_id: Optional[str] = None,
+        start_time: datetime | None = None,
     ) -> ChargingSession:
         """Start a new charging session.
 
@@ -411,7 +412,7 @@ class ChargingSessionManager:
             session = ChargingSession(
                 id=str(uuid.uuid4()),
                 vehicle_id=vehicle_id,
-                start_time=dt_util.now().isoformat(),
+                start_time=(start_time or dt_util.now()).isoformat(),
                 loadpoint_id=loadpoint_id,
                 mode=mode,
                 start_soc=start_soc,

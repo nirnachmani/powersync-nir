@@ -6262,6 +6262,121 @@ def _record_automated_shared_loadpoint_decision(
     }
 
 
+async def _adopt_observed_solar_surplus_shared_session(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    *,
+    binding_id: str,
+    active_profile_id: str,
+    selected_params: Mapping[str, Any],
+    observed_at: datetime | None,
+) -> bool:
+    """Attach Solar runtime state to a proven active shared loadpoint.
+
+    This deliberately creates no command and no timer.  The next ordinary Solar
+    tick owns all rate and stop decisions through its existing dynamic guards.
+    """
+    expected_charger = "generic" if binding_id == "generic_ev" else "sigenergy"
+    if (
+        binding_id not in {"generic_ev", "sigenergy_charger"}
+        or not active_profile_id
+        or str(selected_params.get("charger_type") or "").lower() != expected_charger
+    ):
+        return False
+    entry_id = config_entry.entry_id
+    existing = _dynamic_ev_state.get(entry_id, {}).get(binding_id)
+    if isinstance(existing, dict) and existing.get("active"):
+        return existing.get("active_profile_id") == active_profile_id
+
+    from .ev_ownership import claim_ev_ownership, get_ev_ownership
+
+    _lease_id, lease = get_ev_ownership(hass, config_entry, binding_id)
+    if isinstance(lease, Mapping) and lease.get("owner") == "powersync":
+        return False
+
+    entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry_id, {})
+    store = entry_data.get("automation_store")
+    stored = getattr(store, "_data", {}) or {}
+    solar_config = normalize_solar_surplus_config(stored.get("solar_surplus_config"))
+    params = {
+        **dict(selected_params),
+        "vehicle_id": binding_id,
+        "vehicle_vin": binding_id,
+        "active_logical_vehicle_id": active_profile_id,
+        "dynamic_mode": "solar_surplus",
+        "owner_mode": "solar_surplus",
+        "charger_type": expected_charger,
+        "min_charge_amps": selected_params.get("min_amps", selected_params.get("min_charge_amps", 5)),
+        "max_charge_amps": selected_params.get("max_amps", selected_params.get("max_charge_amps", 32)),
+        "voltage": selected_params.get("voltage", 240),
+        "phases": selected_params.get("phases", 1),
+        "household_buffer_kw": solar_config.get("household_buffer_kw", 0.5),
+        "surplus_calculation": solar_config.get("surplus_calculation", "grid_based"),
+        "sustained_surplus_minutes": solar_config.get("sustained_surplus_minutes", 2),
+        "stop_delay_minutes": solar_config.get("stop_delay_minutes", 5),
+        "min_battery_soc": get_solar_surplus_min_battery_soc(solar_config),
+        "pause_below_soc": max(0, get_solar_surplus_min_battery_soc(solar_config) - 10),
+        "adoption_provenance": "observed_external_session",
+        "adopted_at": (observed_at or dt_util.now()).isoformat(),
+    }
+    _dynamic_ev_state.setdefault(entry_id, {})[binding_id] = {
+        "active": True,
+        "active_profile_id": active_profile_id,
+        "params": params,
+        "current_amps": 0,
+        "target_amps": 0,
+        "cancel_timer": None,
+        "priority": selected_params.get("priority", 1),
+        "paused": False,
+        "paused_reason": None,
+        "charging_started": True,
+        "external_generic_session": expected_charger == "generic",
+        "external_start_detection_armed": False,
+        "external_manual_override": False,
+        "reason": "Adopted observed external Solar Surplus session",
+        "vehicle_name": selected_params.get("display_name"),
+        "session_id": None,
+    }
+    try:
+        from .ev_charging_session import get_session_manager
+
+        manager = get_session_manager()
+        if manager is not None:
+            existing_session = getattr(manager, "active_sessions", {}).get(binding_id)
+            if existing_session is not None and not getattr(existing_session, "completed", False):
+                if getattr(existing_session, "vehicle_id", None) != active_profile_id:
+                    _dynamic_ev_state[entry_id].pop(binding_id, None)
+                    return False
+                session = existing_session
+            else:
+                session = await manager.start_session(
+                    vehicle_id=active_profile_id,
+                    loadpoint_id=binding_id,
+                    mode="solar_surplus",
+                    start_time=observed_at or dt_util.now(),
+                )
+            _dynamic_ev_state[entry_id][binding_id]["session_id"] = session.id
+    except Exception as err:
+        _LOGGER.debug("Solar surplus observed-session tracking failed: %s", err)
+
+    state = _dynamic_ev_state[entry_id][binding_id]
+    state["ownership"] = claim_ev_ownership(
+        hass,
+        config_entry,
+        binding_id,
+        owner_mode="solar_surplus",
+        session_id=state.get("session_id"),
+        reason=state["reason"],
+        extra={
+            "active_profile_id": active_profile_id,
+            "charger_type": expected_charger,
+            "adoption_provenance": "observed_external_session",
+        },
+    )
+    entry_data["dynamic_ev_state"] = _dynamic_ev_state[entry_id]
+    return True
+
+
 def _reserve_automated_shared_loadpoint_sequence(
     hass: HomeAssistant, config_entry: ConfigEntry | None, params: dict[str, Any]
 ) -> bool:
