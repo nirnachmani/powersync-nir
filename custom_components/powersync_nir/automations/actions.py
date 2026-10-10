@@ -12778,6 +12778,37 @@ async def _action_start_ev_charging_dynamic_locked(
             if not observation.fresh:
                 return False
             if observation.charging is False:
+                # The physical session is keyed by the shared loadpoint, while
+                # its vehicle ID is logical-profile attribution.  Move that
+                # attribution before changing the runtime/lease metadata so a
+                # failed transfer cannot leave recorded energy under A while
+                # the active profile says B.  This is metadata-only: it does
+                # not start/end a session or contact charger hardware.
+                if existing_state.get("session_id"):
+                    try:
+                        from .ev_charging_session import get_session_manager
+
+                        session_manager = get_session_manager()
+                        if session_manager and not await session_manager.transfer_idle_session_attribution(
+                            loadpoint_id=vehicle_id,
+                            from_vehicle_id=str(existing_state.get("active_profile_id") or ""),
+                            to_vehicle_id=requested_profile_id,
+                            fresh_idle=True,
+                        ):
+                            _LOGGER.warning(
+                                "Dynamic EV: refusing idle shared profile handoff because "
+                                "session attribution transfer failed for %s",
+                                vehicle_id,
+                            )
+                            return False
+                    except Exception as err:
+                        _LOGGER.warning(
+                            "Dynamic EV: refusing idle shared profile handoff because "
+                            "session attribution transfer errored for %s: %s",
+                            vehicle_id,
+                            err,
+                        )
+                        return False
                 if not handoff_idle_shared_profile(
                     existing_state, lease, requested_profile_id, observation
                 ):

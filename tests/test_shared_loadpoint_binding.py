@@ -6,6 +6,7 @@ import asyncio
 import importlib.util
 import sys
 import types
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,6 +38,27 @@ def _load_shared_loadpoint():
         sys.modules[name] = module
         spec.loader.exec_module(module)
     return sys.modules["custom_components.powersync_nir.automations.shared_loadpoint"]
+
+
+def _load_session_manager():
+    """Load session tracking with the small HA clock surface it uses."""
+    homeassistant = sys.modules.setdefault("homeassistant", types.ModuleType("homeassistant"))
+    util = sys.modules.setdefault("homeassistant.util", types.ModuleType("homeassistant.util"))
+    dt = sys.modules.setdefault("homeassistant.util.dt", types.ModuleType("homeassistant.util.dt"))
+    dt.now = lambda: datetime.now(timezone.utc)
+    dt.DEFAULT_TIME_ZONE = timezone.utc
+    homeassistant.util = util
+    util.dt = dt
+
+    name = "custom_components.powersync_nir.automations.ev_charging_session"
+    spec = importlib.util.spec_from_file_location(
+        name, COMPONENT_ROOT / "automations" / "ev_charging_session.py"
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 shared_loadpoint = _load_shared_loadpoint()
@@ -201,6 +223,34 @@ def test_charging_or_unknown_observation_never_hands_shared_runtime_to_other_pro
         assert runtime_state["active_profile_id"] == PROFILE_A_ID
         assert runtime_state["params"]["active_logical_vehicle_id"] == PROFILE_A_ID
         assert lease["active_profile_id"] == PROFILE_A_ID
+
+
+def test_idle_handoff_transfers_active_physical_session_attribution_in_place():
+    sessions = _load_session_manager()
+    manager = sessions.ChargingSessionManager(SimpleNamespace())
+    session = sessions.ChargingSession(
+        id="session-1",
+        vehicle_id=PROFILE_A_ID,
+        loadpoint_id="generic_ev",
+        start_time="2026-01-01T00:00:00+00:00",
+        total_energy_kwh=4.2,
+    )
+    manager.active_sessions["generic_ev"] = session
+
+    transferred = asyncio.run(
+        manager.transfer_idle_session_attribution(
+            loadpoint_id="generic_ev",
+            from_vehicle_id=PROFILE_A_ID,
+            to_vehicle_id=PROFILE_B_ID,
+            fresh_idle=True,
+        )
+    )
+
+    assert transferred is True
+    assert manager.active_sessions == {"generic_ev": session}
+    assert session.vehicle_id == PROFILE_B_ID
+    assert session.id == "session-1"
+    assert session.total_energy_kwh == 4.2
 
 
 def test_ensure_profiles_preserves_app_owned_config_and_updates_name():

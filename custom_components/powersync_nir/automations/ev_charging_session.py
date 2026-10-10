@@ -423,6 +423,42 @@ class ChargingSessionManager:
 
             return session
 
+    async def transfer_idle_session_attribution(
+        self,
+        loadpoint_id: str,
+        from_vehicle_id: str,
+        to_vehicle_id: str,
+        *,
+        fresh_idle: bool,
+    ) -> bool:
+        """Move an active physical session's logical attribution after idle proof.
+
+        The caller supplies the fresh physical idle observation; this method
+        never creates, ends, or re-keys a session.  Requiring the outgoing
+        attribution to match prevents a stale profile handoff from rewriting
+        another logical vehicle's history.
+        """
+        if (
+            not fresh_idle
+            or not loadpoint_id
+            or not from_vehicle_id
+            or not to_vehicle_id
+            or from_vehicle_id == to_vehicle_id
+        ):
+            return False
+
+        async with self._session_lock:
+            session = self.active_sessions.get(loadpoint_id)
+            if (
+                session is None
+                or session.completed
+                or session.loadpoint_id != loadpoint_id
+                or session.vehicle_id != from_vehicle_id
+            ):
+                return False
+            session.vehicle_id = to_vehicle_id
+            return True
+
     async def update_session(
         self,
         vehicle_id: str,
