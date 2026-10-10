@@ -8649,6 +8649,34 @@ def _normalize_stored_auto_schedule_ids(
         **getattr(config_entry, "options", {}),
     }
     from ..const import CONF_EV_PROVIDER, EV_PROVIDER_TESLA_BLE
+    from .shared_loadpoint import PROFILE_A_ID, PROFILE_B_ID, binding_for_entry
+
+    # The legacy anonymous Generic cache has no logical-vehicle attribution.
+    # Once a shared binding exists, retain only fresh, valid caches explicitly
+    # keyed to one of its profiles; never promote ``_default``/``generic_ev``
+    # into either profile during restart migration.
+    if binding_for_entry(config_entry) is not None:
+        valid_shared_cache: dict[str, Any] = {}
+        for vehicle_id in (PROFILE_A_ID, PROFILE_B_ID):
+            cache_entry = cached_soc.get(vehicle_id)
+            if not isinstance(cache_entry, Mapping):
+                continue
+            try:
+                soc = float(cache_entry["soc"])
+                updated = datetime.fromisoformat(str(cache_entry["updated"]))
+                now = datetime.now(tz=updated.tzinfo) if updated.tzinfo else datetime.now()
+                age = now - updated
+            except (KeyError, TypeError, ValueError):
+                continue
+            if (
+                math.isfinite(soc)
+                and 0 <= soc <= 100
+                and timedelta(0) <= age <= SHARED_PROFILE_SOC_CACHE_MAX_AGE
+            ):
+                valid_shared_cache[vehicle_id] = cache_entry
+        if valid_shared_cache != cached_soc:
+            cached_soc = valid_shared_cache
+            changed = True
 
     if opts.get(CONF_EV_PROVIDER) == EV_PROVIDER_TESLA_BLE:
         stale_fleet_ids = [

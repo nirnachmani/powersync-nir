@@ -73,6 +73,18 @@ canonical identity and ownership checks; they are not API payload bypasses.
   when supplied, separating physical session identity from logical vehicle
   attribution.
 
+## Logical-profile SoC recovery
+
+- Shared profiles read only their own configured SoC entity. Anonymous Generic
+  primary/fallback SoC remains a legacy-only path and is never used for either
+  logical profile.
+- On planner storage normalization after restart, a shared binding retains only
+  fresh finite 0–100 caches keyed exactly as `shared_ev_profile_a` or
+  `shared_ev_profile_b`; ambiguous `_default`/`generic_ev`, malformed, and
+  expired values are discarded. A cache is forecast-only, never control proof.
+- A selector change clears the non-selected logical forecast; control remains
+  fenced by a fresh selected profile plus physical loadpoint guard.
+
 ## Android and diagnostics contracts
 
 - `tests/test_android_app_contract.py` and

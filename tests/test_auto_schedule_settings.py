@@ -1176,6 +1176,40 @@ def test_shared_logical_profile_uses_fresh_cache_for_forecast_only():
     assert executor._shared_profile_soc_metadata["shared_ev_profile_a"]["source"] == "cache"
 
 
+def test_shared_restart_discards_ambiguous_invalid_and_expired_soc_caches():
+    """A shared binding never inherits anonymous cache authority after restart."""
+    entry = types.SimpleNamespace(
+        data={},
+        options={
+            "generic_charger_enabled": True,
+            "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+            "shared_loadpoint_profile_a_name": "Tank",
+            "shared_loadpoint_profile_a_state": "tank",
+            "shared_loadpoint_profile_b_name": "Tesla",
+            "shared_loadpoint_profile_b_state": "tesla",
+        },
+    )
+    stored_data = {
+        "cached_vehicle_soc": {
+            "_default": {"soc": 99, "updated": datetime.now().isoformat()},
+            "generic_ev": {"soc": 88, "updated": datetime.now().isoformat()},
+            "shared_ev_profile_a": {"soc": 31, "updated": datetime.now().isoformat()},
+            "shared_ev_profile_b": {
+                "soc": "not-a-number",
+                "updated": (
+                    datetime.now() - ev_planner.SHARED_PROFILE_SOC_CACHE_MAX_AGE
+                    - timedelta(seconds=1)
+                ).isoformat(),
+            },
+        }
+    }
+
+    assert ev_planner._normalize_stored_auto_schedule_ids(None, entry, stored_data) is True
+    assert stored_data["cached_vehicle_soc"] == {
+        "shared_ev_profile_a": stored_data["cached_vehicle_soc"]["shared_ev_profile_a"]
+    }
+
+
 def test_shared_profile_without_soc_clears_existing_forecast_plan():
     entry = types.SimpleNamespace(
         entry_id="entry-1",
