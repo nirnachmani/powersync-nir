@@ -686,7 +686,10 @@ class ChargingSessionManager:
         sessions = [
             s for s in self._sessions_cache
             if s.completed and s.start_time >= cutoff_str
-            and (vehicle_id is None or s.vehicle_id == vehicle_id)
+            and (
+                vehicle_id is None
+                or (s.logical_vehicle_id or s.vehicle_id) == vehicle_id
+            )
         ]
 
         # Sort by start time, newest first

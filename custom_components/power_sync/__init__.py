@@ -17935,10 +17935,15 @@ class ChargingSessionsView(HomeAssistantView):
                 limit=limit,
             )
 
-            # Also include any active sessions
+            # Active sessions are keyed by physical loadpoint for a shared
+            # charger, so filter by the logical attribution rather than the
+            # dictionary key. Nonshared records retain their vehicle key.
             active_sessions = []
             for vid, session in manager.active_sessions.items():
-                if vehicle_id is None or vid == vehicle_id:
+                session_vehicle_id = getattr(session, "logical_vehicle_id", None) or getattr(
+                    session, "vehicle_id", vid
+                )
+                if vehicle_id is None or session_vehicle_id == vehicle_id:
                     active_sessions.append({
                         **session.to_dict(),
                         "is_active": True,

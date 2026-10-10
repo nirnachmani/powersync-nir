@@ -44,6 +44,81 @@ def diagnostic_snapshot_record(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _compact_ownership(value: Any) -> dict[str, Any] | None:
+    """Whitelist non-secret arbitration facts from a physical ownership lease."""
+    if not isinstance(value, Mapping):
+        return None
+    return {
+        key: value.get(key)
+        for key in ("owner", "owner_mode", "active_profile_id", "updated_at", "stop_settling")
+        if isinstance(value.get(key), (str, bool))
+    }
+
+
+def _compact_last_command(value: Any) -> dict[str, Any] | None:
+    """Whitelist command outcome facts; do not return stored command parameters."""
+    if not isinstance(value, Mapping):
+        return None
+    return {
+        key: value.get(key)
+        for key in ("command", "at", "source", "success", "reason")
+        if isinstance(value.get(key), (str, bool)) or value.get(key) is None and key == "reason"
+    }
+
+
+def _compact_soc(value: Any, *, cache: bool = False) -> dict[str, Any] | None:
+    """Return display-only SoC facts; cached SoC is never control authority."""
+    if not isinstance(value, Mapping):
+        return None
+    soc = value.get("value")
+    valid = value.get("valid")
+    if (
+        soc is not None
+        and (not isinstance(soc, (int, float)) or isinstance(soc, bool))
+    ) or not isinstance(valid, bool):
+        return None
+    result = {"value": soc, "valid": valid}
+    if cache:
+        result.update({
+            "updated_at": value.get("updated_at") if isinstance(value.get("updated_at"), str) else None,
+            "age_seconds": value.get("age_seconds") if isinstance(value.get("age_seconds"), (int, float)) else None,
+            "authorizes_control": False,
+        })
+    else:
+        result.update({
+            "entity_id": value.get("entity_id") if isinstance(value.get("entity_id"), str) else None,
+            "source": value.get("source") if isinstance(value.get("source"), str) else None,
+            "observed_at": value.get("observed_at") if isinstance(value.get("observed_at"), str) else None,
+            "age_seconds": value.get("age_seconds") if isinstance(value.get("age_seconds"), (int, float)) else None,
+        })
+    return result
+
+
+def _compact_session_provenance(value: Any, selected_profile_id: str | None) -> dict[str, Any] | None:
+    """Expose only the selected logical session's harmless SoC provenance."""
+    if not selected_profile_id or not isinstance(value, Mapping):
+        return None
+    if value.get("logical_vehicle_id") != selected_profile_id:
+        return None
+
+    def endpoint(name: str) -> dict[str, Any] | None:
+        raw = value.get(name)
+        if not isinstance(raw, Mapping):
+            return None
+        return {
+            "soc": raw.get("soc") if isinstance(raw.get("soc"), (int, float)) else None,
+            "entity_id": raw.get("entity_id") if isinstance(raw.get("entity_id"), str) else None,
+            "time": raw.get("time") if isinstance(raw.get("time"), str) else None,
+            "source": raw.get("source") if isinstance(raw.get("source"), str) else None,
+        }
+
+    return {
+        "logical_vehicle_id": selected_profile_id,
+        "start": endpoint("start"),
+        "end": endpoint("end"),
+    }
+
+
 def project_shared_loadpoint_diagnostics(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     """Project persisted diagnostic facts without reading hardware or controlling it."""
     selected_profile_id = snapshot.get("selected_profile_id")
@@ -83,18 +158,39 @@ def project_shared_loadpoint_diagnostics(snapshot: Mapping[str, Any]) -> dict[st
         reason = decision["reason"]
 
     selected_name = snapshot.get("selected_profile_name")
+    selected_profile = selected_profile_id if isinstance(selected_profile_id, str) and selected_profile_id else None
+    binding_id = snapshot.get("binding_id") if isinstance(snapshot.get("binding_id"), str) else None
+    live_soc = _compact_soc(snapshot.get("live_soc")) if selected_profile else None
+    cached_soc = _compact_soc(snapshot.get("cached_soc"), cache=True) if selected_profile else None
     return {
-        "binding_id": snapshot.get("binding_id") if isinstance(snapshot.get("binding_id"), str) else None,
+        "binding_id": binding_id,
         "selected_profile": {
-            "id": selected_profile_id if isinstance(selected_profile_id, str) else None,
-            "name": selected_name if isinstance(selected_name, str) else None,
+            "id": selected_profile,
+            "name": selected_name if selected_profile and isinstance(selected_name, str) else None,
         },
+        "mapping": {
+            "logical_profile_id": selected_profile,
+            "physical_loadpoint_id": binding_id if selected_profile else None,
+        },
+        "soc": {
+            "live": live_soc,
+            "cache": cached_soc,
+            "effective_source": "live" if live_soc and live_soc["valid"] else (
+                "cache" if cached_soc and cached_soc["valid"] else None
+            ),
+        },
+        "last_block_reason": (
+            snapshot.get("last_block_reason")
+            if isinstance(snapshot.get("last_block_reason"), str)
+            else (decision["reason"] if decision and not decision["allowed"] else None)
+        ),
+        "last_session": _compact_session_provenance(snapshot.get("last_session"), selected_profile),
         "physical_active": physical_active if isinstance(physical_active, bool) else None,
         "origin": origin if isinstance(origin, str) else None,
         "evidence": evidence if isinstance(evidence, str) else None,
         "observed_at": snapshot.get("observed_at") if isinstance(snapshot.get("observed_at"), str) else None,
-        "ownership": dict(snapshot["ownership"]) if isinstance(snapshot.get("ownership"), Mapping) else None,
-        "last_command": dict(snapshot["last_command"]) if isinstance(snapshot.get("last_command"), Mapping) else None,
+        "ownership": _compact_ownership(snapshot.get("ownership")),
+        "last_command": _compact_last_command(snapshot.get("last_command")),
         "decision": decision,
         "external_control_policy": (
             snapshot.get("external_control_policy")
@@ -104,6 +200,106 @@ def project_shared_loadpoint_diagnostics(snapshot: Mapping[str, Any]) -> dict[st
         "desired_action": desired_action,
         "reason": reason,
     }
+
+
+def _soc_age_seconds(value: Any) -> float | None:
+    """Return a non-negative UTC age for a persisted or state timestamp."""
+    from datetime import datetime, timezone
+
+    if isinstance(value, datetime):
+        timestamp = value
+    else:
+        try:
+            timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - timestamp.astimezone(timezone.utc)).total_seconds()
+    return age if age >= 0 else None
+
+
+def _live_soc_fact(hass: Any, config_entry: Any, binding: Any, profile_id: str) -> dict[str, Any]:
+    """Read only the profile-owned HA state for diagnostic truth."""
+    from .shared_loadpoint import resolve_shared_profile_soc
+
+    entity_id = binding.profile_soc_entity(profile_id)
+    state = hass.states.get(entity_id) if entity_id else None
+    sample = resolve_shared_profile_soc(hass, config_entry, profile_id)
+    timestamp = getattr(state, "last_updated", None) if state is not None else None
+    return {
+        "value": sample.value if sample is not None else None,
+        "entity_id": entity_id,
+        "source": "state",
+        "observed_at": timestamp.isoformat() if timestamp is not None and hasattr(timestamp, "isoformat") else None,
+        "age_seconds": _soc_age_seconds(timestamp),
+        "valid": sample is not None,
+    }
+
+
+def _cached_soc_fact(store: Any, profile_id: str) -> dict[str, Any] | None:
+    """Expose profile-local planner cache facts without treating them as authority."""
+    cached = getattr(store, "_data", {}).get("cached_vehicle_soc", {})
+    entry = cached.get(profile_id) if isinstance(cached, Mapping) else None
+    if not isinstance(entry, Mapping):
+        return None
+    value = entry.get("soc")
+    updated_at = entry.get("updated")
+    age_seconds = _soc_age_seconds(updated_at)
+    valid = (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and 0 <= value <= 100
+        and age_seconds is not None
+        and age_seconds <= 24 * 60 * 60
+    )
+    return {
+        "value": value if isinstance(value, (int, float)) and not isinstance(value, bool) else None,
+        "updated_at": updated_at if isinstance(updated_at, str) else None,
+        "age_seconds": age_seconds,
+        "valid": valid,
+    }
+
+
+def _session_provenance(session: Any, profile_id: str) -> dict[str, Any] | None:
+    """Return one profile-attributed session's persisted SoC endpoints."""
+    if session is None or (getattr(session, "logical_vehicle_id", None) or getattr(session, "vehicle_id", None)) != profile_id:
+        return None
+    return {
+        "logical_vehicle_id": profile_id,
+        "start": {
+            "soc": getattr(session, "start_soc", None),
+            "entity_id": getattr(session, "start_soc_entity", None),
+            "time": getattr(session, "start_soc_time", None),
+            "source": getattr(session, "start_soc_source", None),
+        },
+        "end": {
+            "soc": getattr(session, "end_soc", None),
+            "entity_id": getattr(session, "end_soc_entity", None),
+            "time": getattr(session, "end_soc_time", None),
+            "source": getattr(session, "end_soc_source", None),
+        },
+    }
+
+
+def _last_profile_session(profile_id: str) -> dict[str, Any] | None:
+    """Inspect in-memory session history only; never read hardware or storage."""
+    from .ev_charging_session import get_session_manager
+
+    manager = get_session_manager()
+    if manager is None:
+        return None
+    candidates = [
+        session for session in manager.active_sessions.values()
+        if (getattr(session, "logical_vehicle_id", None) or getattr(session, "vehicle_id", None)) == profile_id
+    ]
+    candidates.extend(
+        session for session in getattr(manager, "_sessions_cache", [])
+        if (getattr(session, "logical_vehicle_id", None) or getattr(session, "vehicle_id", None)) == profile_id
+    )
+    if not candidates:
+        return None
+    return _session_provenance(max(candidates, key=lambda session: getattr(session, "start_time", "")), profile_id)
 
 
 async def persist_shared_loadpoint_diagnostic_snapshot(
@@ -182,6 +378,17 @@ def persisted_shared_loadpoint_diagnostics(hass: Any, config_entry: Any) -> dict
         "ownership": ownership,
         "last_command": last_command,
         "decision": decision,
+        "live_soc": _live_soc_fact(hass, config_entry, binding, selected_profile_id)
+        if binding and selected_profile_id else None,
+        "cached_soc": _cached_soc_fact(store, selected_profile_id)
+        if selected_profile_id else None,
+        "last_block_reason": (
+            decision.get("reason")
+            if isinstance(decision, Mapping) and decision.get("allowed") is False
+            else None
+        ),
+        "last_session": _last_profile_session(selected_profile_id)
+        if selected_profile_id else None,
         "external_control_policy": (
             get_external_control_policy(hass, config_entry, selected_profile_id)
             if selected_profile_id is not None

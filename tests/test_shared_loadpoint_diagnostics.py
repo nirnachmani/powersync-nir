@@ -84,6 +84,74 @@ def test_missing_or_stale_control_context_fails_safe(selected_profile_id, eviden
     assert result["reason"] == expected_reason
 
 
+def test_projection_exposes_logical_mapping_soc_truth_and_session_provenance_without_cache_authority():
+    result = module.project_shared_loadpoint_diagnostics(
+        _snapshot(
+            live_soc={
+                "value": 42,
+                "entity_id": "sensor.tank_soc",
+                "source": "state",
+                "observed_at": NOW.isoformat(),
+                "age_seconds": 2.0,
+                "valid": True,
+            },
+            cached_soc={
+                "value": 41,
+                "updated_at": (NOW - timedelta(minutes=3)).isoformat(),
+                "age_seconds": 180.0,
+                "valid": True,
+            },
+            last_block_reason="outside window",
+            last_session={
+                "logical_vehicle_id": "shared_ev_profile_a",
+                "start": {"soc": 40, "entity_id": "sensor.tank_soc", "source": "state"},
+                "end": {"soc": 42, "entity_id": "sensor.tank_soc", "source": "state"},
+            },
+            secret="must-not-appear",
+        )
+    )
+
+    assert result["mapping"] == {
+        "logical_profile_id": "shared_ev_profile_a",
+        "physical_loadpoint_id": "generic_ev",
+    }
+    assert result["soc"]["live"]["value"] == 42
+    assert result["soc"]["live"]["valid"] is True
+    assert result["soc"]["cache"] == {
+        "value": 41,
+        "updated_at": (NOW - timedelta(minutes=3)).isoformat(),
+        "age_seconds": 180.0,
+        "valid": True,
+        "authorizes_control": False,
+    }
+    assert result["soc"]["effective_source"] == "live"
+    assert result["last_block_reason"] == "outside window"
+    assert result["last_session"]["start"]["entity_id"] == "sensor.tank_soc"
+    assert result["last_session"]["end"]["soc"] == 42
+    assert "secret" not in result
+
+
+def test_unknown_selector_clears_mapping_soc_and_session_identity_instead_of_reusing_stale_profile():
+    result = module.project_shared_loadpoint_diagnostics(
+        _snapshot(
+            binding_id=None,
+            selected_profile_id=None,
+            selected_profile_name="Tank",
+            live_soc={"value": 42, "valid": True},
+            cached_soc={"value": 41, "valid": True},
+            last_session={"logical_vehicle_id": "shared_ev_profile_a"},
+        )
+    )
+
+    assert result["selected_profile"] == {"id": None, "name": None}
+    assert result["mapping"] == {
+        "logical_profile_id": None,
+        "physical_loadpoint_id": None,
+    }
+    assert result["soc"] == {"live": None, "cache": None, "effective_source": None}
+    assert result["last_session"] is None
+
+
 def test_projection_preserves_truthful_nulls_and_never_invents_ownership():
     result = module.project_shared_loadpoint_diagnostics(
         _snapshot(
