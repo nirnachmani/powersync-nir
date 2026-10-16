@@ -9180,9 +9180,12 @@ class BatteryHealthView(HomeAssistantView):
 
 
 def _apply_inverter_physical_convergence_status(
-    state_dict: dict[str, Any], entry_data: dict[str, Any]
+    state_dict: dict[str, Any],
+    entry_data: dict[str, Any],
+    *,
+    inverter_brand: str | None = None,
 ) -> None:
-    """Keep API status pending until physical curtailment is proven."""
+    """Keep Fronius API status pending until physical curtailment is proven."""
     control_mode = entry_data.get("inverter_control_mode")
     physical_converged = entry_data.get(
         "inverter_curtailment_physical_converged"
@@ -9197,7 +9200,8 @@ def _apply_inverter_physical_convergence_status(
         "inverter_curtailment_residual_export_w"
     )
     if (
-        control_mode
+        inverter_brand == "fronius"
+        and control_mode
         in (
             INVERTER_CONTROL_MODE_LOAD_FOLLOWING,
             INVERTER_CONTROL_MODE_CURTAILED,
@@ -9340,7 +9344,9 @@ class InverterStatusView(HomeAssistantView):
                 "online" if cached_state == "running" else cached_state or "unknown"
             )
             state_dict["is_curtailed"] = cached_state == "curtailed"
-            _apply_inverter_physical_convergence_status(state_dict, entry_data)
+            _apply_inverter_physical_convergence_status(
+                state_dict, entry_data, inverter_brand=inverter_brand
+            )
             return web.json_response({
                 "success": True,
                 "enabled": True,
@@ -9401,7 +9407,9 @@ class InverterStatusView(HomeAssistantView):
             elif inverter_last_state in ("normal", "running"):
                 state_dict["is_curtailed"] = False
 
-            _apply_inverter_physical_convergence_status(state_dict, entry_data)
+            _apply_inverter_physical_convergence_status(
+                state_dict, entry_data, inverter_brand=inverter_brand
+            )
 
             # Check if it's nighttime for sleep detection
             is_night = False

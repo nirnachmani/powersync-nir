@@ -135,6 +135,8 @@ def test_unknown_fronius_convergence_is_pending_and_description_is_unverified():
             return 966
 
         def _get_config_value(self, key, default=None):
+            if key == "brand":
+                return "fronius"
             return default
 
     sensor = Sensor()
@@ -144,6 +146,44 @@ def test_unknown_fronius_convergence_is_pending_and_description_is_unverified():
         "Inverter load-following physical convergence unverified"
     )
     assert "curtailed - load following" not in attrs["description"]
+
+
+def test_non_fronius_curtailment_does_not_require_fronius_convergence():
+    native_value = _compiled_method("InverterStatusSensor", "native_value")
+    apply_status = _compiled_init_function(
+        "_apply_inverter_physical_convergence_status"
+    )
+
+    class Sensor:
+        _cached_state = "curtailed"
+
+        def _entry_data(self):
+            return {
+                "inverter_control_mode": "curtailed",
+                "inverter_curtailment_physical_converged": None,
+            }
+
+        def _control_mode(self):
+            return "curtailed"
+
+        def _get_config_value(self, key, default=None):
+            if key == "brand":
+                return "sungrow"
+            return default
+
+    assert native_value(Sensor()) == "Curtailed"
+
+    state = {"status": "curtailed", "is_curtailed": True}
+    apply_status(
+        state,
+        {
+            "inverter_control_mode": "curtailed",
+            "inverter_curtailment_physical_converged": None,
+        },
+        inverter_brand="sungrow",
+    )
+    assert state["status"] == "curtailed"
+    assert state["is_curtailed"] is True
 
 
 def test_physical_convergence_api_overlay_fails_closed_for_false_and_unknown():
@@ -160,6 +200,7 @@ def test_physical_convergence_api_overlay_fails_closed_for_false_and_unknown():
                 "inverter_curtailment_physical_converged": physical_converged,
                 "inverter_power_limit_w": 966,
             },
+            inverter_brand="fronius",
         )
         assert state["status"] == "curtailment_pending"
         assert state["is_curtailed"] is False
@@ -173,6 +214,7 @@ def test_physical_convergence_api_overlay_fails_closed_for_false_and_unknown():
             "inverter_control_mode": "load_following",
             "inverter_curtailment_physical_converged": True,
         },
+        inverter_brand="fronius",
     )
     assert converged_state["status"] == "curtailed"
     assert converged_state["is_curtailed"] is True
@@ -184,6 +226,7 @@ def test_physical_convergence_api_overlay_fails_closed_for_false_and_unknown():
             "inverter_control_mode": "load_following",
             "inverter_curtailment_physical_converged": None,
         },
+        inverter_brand="fronius",
     )
     assert offline_state["status"] == "offline"
 
