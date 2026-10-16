@@ -8235,6 +8235,47 @@ def test_active_optimizer_charge_retries_failed_soc_cap_restore(opt_module):
     assert coordinator._last_executed_action == "self_consumption"
 
 
+def test_amber_spike_restore_exception_retains_exact_optimizer_force_state(opt_module):
+    """A raised Amber cleanup failure must remain retryable without escaping."""
+
+    class _RaisingRestoreBattery(_FakeBattery):
+        async def restore_normal(self, *, force_restore=False):
+            self.restore_normal_calls += 1
+            self.restore_normal_force_flags.append(force_restore)
+            raise RuntimeError("inverter restore unavailable")
+
+    now = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    opt_module.dt_util.now = lambda *args, **kwargs: now
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: now
+    battery = _RaisingRestoreBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
+    coordinator._entry.options.update(
+        electricity_provider="amber",
+        spike_protection_enabled=True,
+    )
+    coordinator.price_coordinator = SimpleNamespace(
+        data={
+            "current": [
+                {
+                    "channelType": "general",
+                    "spikeStatus": "spike",
+                    "valid_from": now.isoformat(),
+                    "valid_to": (now + timedelta(minutes=30)).isoformat(),
+                }
+            ]
+        }
+    )
+    coordinator._set_optimizer_force_state("charge", 10, 5000)
+    expected_force_state = dict(coordinator._optimizer_force_state)
+    action = SimpleNamespace(action="charge", power_w=5000, timestamp=now)
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.restore_normal_calls == 1
+    assert coordinator._optimizer_force_state == expected_force_state
+    assert coordinator._last_executed_action == "self_consumption"
+
+
 def test_optimizer_owned_force_charge_holds_when_current_slot_stops_charging(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
