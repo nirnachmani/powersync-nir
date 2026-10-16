@@ -21,6 +21,7 @@ for the private `powersync-nir` fork.
 - Preserve the architecture in `docs/private-fork/local-change-inventory.md`.
 - Do not widen scope to Tesla, EVDC, OCPP, Zaptec, or other excluded backends.
 - Apply relevance triage before tests or a candidate: reject battery-vendor changes unless they target Sigenergy, and reject provider changes unless they target Amber. Keep a vendor-neutral optimiser/site/infrastructure change only when it can affect Sigenergy, Amber, solar/site power flows, or private shared-EV operation.
+- Do not re-audit upstream quality by default. For a relevant update with no plausible interaction with the private two-EV/external-session implementation, port it minimally with the upstream regression and normal gates; do not invent private semantic tests or redesign it.
 - Do not weaken, delete, bypass, or misreport a failing validator or test.
 - Never expose secrets, tokens, device addresses, or captures in commits or
   reports.
@@ -89,11 +90,18 @@ entitlement, permission, command-fencing, or hosted optimiser-access code.
    `docs/private-fork/powersync-private-updates-reference.md`.
 3. Fetch and compare the explicit upstream range deterministically using the
    repository tools; identify changed paths, symbols, tests, and release notes.
-4. Apply this relevance screen before the no-paywall classification: is the
-   change a real bug/capability/shared foundation for Amber, Sigenergy, the
-   user's solar/site flows, or the private shared EV model? If not, record
-   `irrelevant to configured setup` and reject it without a candidate. Then
-   classify the remaining delta as one of:
+4. Apply this relevance and interaction screen before the no-paywall classification:
+   - Is it relevant to Amber, Sigenergy, solar/site flows, private shared EVs,
+     or an explicitly approved optional feature? If not, record `irrelevant to
+     configured setup` with the specific unavailable vendor/feature reason and
+     reject it without a candidate.
+   - Does it plausibly interact with private two-EV or external-session code?
+     If not, port it minimally; use upstream's regression and normal gates, not
+     a private redesign or quality audit.
+   - If it does interact, decide whether private behavior remains compatible.
+     If the choice is uncertain or trades private functionality against another
+     required outcome, stop and ask the user before implementation.
+   Then classify the remaining delta as one of:
    - **No overlap:** no private modules/direct tests touched.
    - **Mechanical overlap:** same file, separable hunks.
    - **Compatible semantic overlap:** private invariants can be preserved with
@@ -122,15 +130,14 @@ entitlement, permission, command-fencing, or hosted optimiser-access code.
 
 ## Proportionate testing
 
-- Relevant low-risk provider/UI/device hunk: one RED/GREEN behavior regression,
-  affected focused tests, architecture validator, and private gate once per
-  thematic batch.
-- Relevant manual optimiser hunk: one solver behavior regression per outcome,
-  affected focused corpus, architecture validator, private gate, and one
-  independent semantic review. Broad testing is reserved for release handoff or
-  missing focused coverage, with baseline failure-ID comparison.
-- Never multiply review or broad test runs for irrelevant, theoretical, or
-  unavailable-vendor scenarios.
+- Relevant no-interaction hunk: upstream regression, affected focused tests,
+  architecture validator, and private gate once per thematic batch.
+- Relevant overlapping hunk: add only the smallest private interaction test
+  needed to prove compatibility or an intentional amendment. Use a semantic
+  review only where that overlap changes private behavior.
+- Broad testing is reserved for release handoff or missing focused coverage,
+  with baseline failure-ID comparison. Never multiply review or broad test runs
+  for irrelevant, theoretical, or unavailable-vendor scenarios.
 
 ## Private invariants
 
@@ -165,6 +172,19 @@ Commit/candidate: <SHA or retained worktree>
 Deployment: <not attempted / separately authorised result>
 Blockers / follow-up: <none or factual items>
 ```
+
+## End-of-cycle update report
+
+At the end of each upstream-update cycle, provide a brief table covering every
+considered upstream update:
+
+| Update | Outcome | Brief reason / adjustment |
+|---|---|---|
+| `<SHA or feature>` | ported / amended / rejected / deferred | One sentence. For `irrelevant to configured setup`, name the unavailable vendor or unused feature. |
+
+For an uncertain overlap or a choice between private functionality and another
+required outcome, do not decide silently: state the alternatives in one or two
+sentences and ask the user for a preference.
 
 ## Deployment handoff
 

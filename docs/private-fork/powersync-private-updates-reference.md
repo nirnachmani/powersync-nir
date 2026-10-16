@@ -81,15 +81,31 @@ useful capability; or supply shared infrastructure for likely relevant future
 work? Reject a battery-vendor change unless it targets Sigenergy. Reject a
 provider change unless it targets Amber. Keep generic optimiser/site changes
 only when they can affect Sigenergy, Amber, solar/site flows, or private shared
-EV behavior; record `irrelevant to configured setup` for the rest.
+EV behavior; record `irrelevant to configured setup` plus the unavailable
+vendor/unused feature for the rest.
 
-For a relevant low-risk hunk, use one RED/GREEN regression, affected focused
-tests, validator, and private gate once per thematic batch. For a relevant
-manual optimiser hunk, use one behavior/solver regression per outcome, its
-affected corpus, validator, private gate, and one semantic review. Run the
-broader suite only for release validation or missing focused coverage; compare
-failure IDs to baseline rather than repeating it per small hunk. Do not create
-speculative tests for unavailable vendors or theoretical scenarios.
+Do not re-audit upstream quality by default. If a relevant hunk has no
+plausible interaction with private two-EV/external-session functionality, port
+it minimally with its upstream regression and the normal gates. Add private
+behavior tests and manual semantic adaptation only when an actual interaction
+needs proof. If compatibility is uncertain or a choice trades private behavior
+against another required outcome, stop and ask the user for a preference.
+
+For a relevant no-interaction hunk, use the upstream regression, affected
+focused tests, validator, and private gate once per thematic batch. For a
+relevant overlapping hunk, add only the smallest private interaction test and
+adaptation required to preserve private behavior. Run the broader suite only
+for release validation or missing focused coverage; compare failure IDs to
+baseline rather than repeating it per small hunk. Do not create speculative
+tests for unavailable vendors or theoretical scenarios.
+
+## End-of-cycle report
+
+At the end of every update cycle, report every considered update in a concise
+table: update, `ported`/`amended`/`rejected`/`deferred`, and a one-sentence
+reason. An `irrelevant to configured setup` entry must name the unavailable
+vendor or unused feature. An uncertain compatibility choice must state the
+alternatives and request the user's preference.
 
 ## Forbidden actions
 
