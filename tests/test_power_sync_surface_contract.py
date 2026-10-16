@@ -183,6 +183,13 @@ def _expected_optimizer_coordinator_source() -> str:
 # and optimizer-owned force-charge restoration).
 _AMBER_COORDINATOR_DIFF_SHA256 = "063dd776754bd0b9fabf1aa6d792f22acb5df921574e40c506dcb7f442c46b4f"
 
+# Exact, path-specific exception for the reviewed Cost Neutral reachable-
+# deadline fix. The normal optimizer baseline contract stays intact: only the
+# complete b20bffb2 source delta is admitted.
+_COST_NEUTRAL_REACHABLE_DEADLINE_DIFF_SHA256 = (
+    "1a31032e30981313684b5a6b0d37f800519f8b76669836de22056873c3aa0298"
+)
+
 
 def _amber_coordinator_diff_is_allowlisted(expected: str, actual: str) -> bool:
     diff = "\n".join(
@@ -195,6 +202,24 @@ def _amber_coordinator_diff_is_allowlisted(expected: str, actual: str) -> bool:
         )
     )
     return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _AMBER_COORDINATOR_DIFF_SHA256
+
+
+def _cost_neutral_reachable_deadline_diff_is_allowlisted(
+    expected: str, actual: str
+) -> bool:
+    diff = "\n".join(
+        difflib.unified_diff(
+            expected.splitlines(),
+            actual.splitlines(),
+            fromfile="solar_refill_baseline",
+            tofile="cost_neutral_reachable_deadline_candidate",
+            lineterm="",
+        )
+    )
+    return (
+        hashlib.sha256(diff.encode("utf-8")).hexdigest()
+        == _COST_NEUTRAL_REACHABLE_DEADLINE_DIFF_SHA256
+    )
 
 
 def _git(*args: str) -> str:
@@ -255,6 +280,10 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
         )
         if relative_path == COORDINATOR:
             assert _amber_coordinator_diff_is_allowlisted(expected, actual)
+        elif relative_path == BATTERY_OPTIMIZER:
+            assert _cost_neutral_reachable_deadline_diff_is_allowlisted(
+                expected, actual
+            )
         else:
             assert actual == expected
 
@@ -282,11 +311,32 @@ def test_solar_only_refill_allowlist_rejects_a_nearby_predicate_mutation():
         "\r\n", "\n"
     )
 
-    assert actual == expected
-    assert actual != expected.replace(
-        "acquisition_cost_kwh > 0",
-        "acquisition_cost_kwh >= 0",
-        1,
+    assert _cost_neutral_reachable_deadline_diff_is_allowlisted(expected, actual)
+    assert not _cost_neutral_reachable_deadline_diff_is_allowlisted(
+        expected,
+        actual.replace(
+            "acquisition_cost_kwh > 0",
+            "acquisition_cost_kwh >= 0",
+            1,
+        ),
+    )
+
+
+def test_cost_neutral_deadline_allowlist_rejects_a_nearby_mode_mutation():
+    """The b20bffb2 exception is exact rather than a general optimizer waiver."""
+    expected = _expected_battery_optimizer_source()
+    actual = (ROOT / BATTERY_OPTIMIZER).read_text(encoding="utf-8").replace(
+        "\r\n", "\n"
+    )
+
+    assert _cost_neutral_reachable_deadline_diff_is_allowlisted(expected, actual)
+    assert not _cost_neutral_reachable_deadline_diff_is_allowlisted(
+        expected,
+        actual.replace(
+            "b_ub.append(1.0)",
+            "b_ub.append(0.0)",
+            1,
+        ),
     )
 
 
