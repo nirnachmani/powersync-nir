@@ -97,6 +97,25 @@ canonical identity and ownership checks; they are not API payload bypasses.
 - A selector change clears the non-selected logical forecast; control remains
   fenced by a fresh selected profile plus physical loadpoint guard.
 
+## Reviewed EV safety ports
+
+- Upstream `1198830f` is ported only at the Price-Level home-battery read:
+  `battery_energy_coordinator` is preferred over the legacy Tesla coordinator,
+  and all coordinator/entity SoC values must be finite percentages. This is a
+  physical site-safety input; it does not alter logical-profile identity,
+  capacity, target, selector, command, lease, or session behavior.
+- From upstream `26874402`, Solar Only now budgets only forecast solar after
+  battery and already-reserved EV demand. Spare grid-import headroom cannot be
+  labelled as solar. The private selected-profile gate continues to emit one
+  physical demand; selector A/B handoff and unknown-selector zero demand are
+  already covered by `test_shared_schedule_keeps_only_the_selected_profile_plan`
+  and the shared-loadpoint optimizer tests.
+- The upstream stale solar-controller rearm hunk is intentionally not ported.
+  It infers that no owner means a stale session and clears executor state;
+  private reconciliation/physical leases use owner absence as insufficient
+  proof and require fresh telemetry before transfer or command. No upstream
+  multi-profile identity or licensing code was imported.
+
 ## Android and diagnostics contracts
 
 - `tests/test_android_app_contract.py` and

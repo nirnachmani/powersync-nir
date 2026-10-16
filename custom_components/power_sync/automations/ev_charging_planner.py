@@ -2895,6 +2895,7 @@ class ChargingPlanner:
         reserved_ev_power_schedule: Optional[Dict[str, float]] = None,
         minimum_charging_power_kw: float = MIN_CHARGING_POWER_KW,
         charging_power_step_kw: Optional[float] = None,
+        allow_grid_import: bool = True,
     ) -> float:
         """Calculate available power for EV charging at a given hour.
 
@@ -2914,7 +2915,16 @@ class ChargingPlanner:
         reserved_ev_power = (reserved_ev_power_schedule or {}).get(hour, 0)
         grid_capacity_kw = self._get_grid_capacity_kw()
 
-        if solar_surplus_kw > 0:
+        if not allow_grid_import:
+            # Solar Only must not turn unused grid headroom into forecast solar.
+            # Keep the shared battery and other-EV reservations in the same
+            # budget, then let the common charger-limit/quantization path below
+            # enforce the physical minimum and current step.
+            total_available = max(
+                0,
+                solar_surplus_kw - max(0, battery_power) - reserved_ev_power,
+            )
+        elif solar_surplus_kw > 0:
             # Solar surplus available - EV can use surplus + remaining grid
             # Solar powers both battery and EV, only grid import is limited
             grid_needed_by_battery = max(0, battery_power - solar_surplus_kw)
@@ -3145,8 +3155,8 @@ class ChargingPlanner:
                 end_dt, usable_fraction = usable_window
                 hour_key = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
 
-                # Dynamic power sharing: calculate available power for EV
-                # Solar surplus can power both battery and EV simultaneously
+                # Dynamic power sharing: calculate available power for EV.
+                # Solar-only plans reserve no unused grid-import headroom.
                 available_power = self._get_available_ev_power(
                     hour_key,
                     charger_power_kw,
@@ -3155,6 +3165,7 @@ class ChargingPlanner:
                     reserved_ev_power_schedule=reserved_ev_power_schedule,
                     minimum_charging_power_kw=minimum_charging_power_kw,
                     charging_power_step_kw=charging_power_step_kw,
+                    allow_grid_import=False,
                 )
 
                 if available_power < minimum_charging_power_kw:
@@ -10041,16 +10052,33 @@ class PriceLevelChargingExecutor:
     async def _get_home_battery_soc(self) -> Optional[float]:
         """Get home battery (Powerwall/Sigenergy/Sungrow) state of charge.
 
-        Returns the battery percentage from the Tesla coordinator or other sources.
+        Returns the battery percentage from the active battery coordinator or
+        other sources.
         """
-        # Try to get from Tesla coordinator
         entry_data = self.hass.data.get(self._domain, {}).get(self.config_entry.entry_id, {})
-        tesla_coordinator = entry_data.get("tesla_coordinator")
 
-        if tesla_coordinator and tesla_coordinator.data:
-            battery_level = tesla_coordinator.data.get("battery_level")
+        def _valid_soc(value: Any) -> Optional[float]:
+            if isinstance(value, bool):
+                return None
+            try:
+                soc = float(value)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(soc) or not 0 <= soc <= 100:
+                return None
+            return soc
+
+        # Setup selects the active battery coordinator for the configured
+        # topology, including native Sigenergy Modbus. Keep Tesla as a legacy
+        # fallback for entries created before that active key existed.
+        for coordinator_key in ("battery_energy_coordinator", "tesla_coordinator"):
+            coordinator = entry_data.get(coordinator_key)
+            data = getattr(coordinator, "data", None) if coordinator else None
+            if not isinstance(data, Mapping):
+                continue
+            battery_level = _valid_soc(data.get("battery_level"))
             if battery_level is not None:
-                return float(battery_level)
+                return battery_level
 
         # Fallback: Try to find battery level from common entity patterns
         entity_patterns = [
@@ -10066,10 +10094,9 @@ class PriceLevelChargingExecutor:
                 if pattern.replace("*", "") in entity_id.lower() or entity_id == pattern:
                     state = self.hass.states.get(entity_id)
                     if state and state.state not in ("unknown", "unavailable"):
-                        try:
-                            return float(state.state)
-                        except (ValueError, TypeError):
-                            continue
+                        battery_level = _valid_soc(state.state)
+                        if battery_level is not None:
+                            return battery_level
 
         return None
 

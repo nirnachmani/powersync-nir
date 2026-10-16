@@ -2164,6 +2164,84 @@ class _FakeStates:
         return [entity_id for entity_id in self._states if entity_id.startswith(prefix)]
 
 
+def test_price_level_native_home_battery_minimum_blocks_shared_generic_start(
+    monkeypatch,
+):
+    """Native battery state remains a physical safety input for one loadpoint."""
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+
+    hass = _FakeHass(
+        price_settings={
+            "recovery_soc": 40,
+            "recovery_price_cents": 30,
+            "opportunity_price_cents": 10,
+            "home_battery_minimum": 20,
+        }
+    )
+    hass.data["power_sync"]["entry-1"]["battery_energy_coordinator"] = (
+        SimpleNamespace(data={"battery_level": 10})
+    )
+    executor = ev_planner.PriceLevelChargingExecutor(hass, _FakeConfigEntry())
+    executor._get_ev_soc = AsyncMock(return_value=50)
+
+    assert asyncio.run(executor.get_charging_decision(5)) == (
+        False,
+        "Home battery 10% < 20% minimum",
+        "",
+    )
+
+
+def test_solar_only_plan_reserves_only_forecast_solar_budget(
+    monkeypatch,
+):
+    """Solar-only must not represent spare site import headroom as solar demand."""
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "now",
+        lambda: datetime(2026, 10, 11, 9, 0, tzinfo=brisbane_tz),
+    )
+    monkeypatch.setattr(
+        ev_planner.dt_util,
+        "as_local",
+        lambda value: value.astimezone(brisbane_tz),
+        raising=False,
+    )
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    planner._grid_capacity_kw = 25.2
+    planner._get_solar_surplus_config = AsyncMock(return_value={})
+    hour = "2026-10-11T09:00:00"
+
+    plan = asyncio.run(
+        planner._plan_solar_only(
+            vehicle_id="shared_ev_profile_a",
+            current_soc=53,
+            target_soc=85,
+            target_time=datetime(2026, 10, 11, 13, 15, tzinfo=brisbane_tz),
+            energy_needed_kwh=4.0,
+            charger_power_kw=7.36,
+            surplus_forecast=[
+                ev_planner.SurplusForecast(
+                    hour=hour,
+                    solar_kw=2.7,
+                    load_kw=0.7,
+                    surplus_kw=2.0,
+                    confidence=1.0,
+                )
+            ],
+            battery_power_schedule={hour: 0.0},
+            minimum_charging_power_kw=1.15,
+            charging_power_step_kw=0.23,
+        )
+    )
+
+    assert plan.windows[0].estimated_power_kw == pytest.approx(1.84)
+    assert plan.estimated_solar_kwh == pytest.approx(1.84)
+    assert plan.estimated_grid_kwh == 0
+    assert plan.can_meet_target is False
+
+
 def _set_external_policy(hass, *vehicle_ids: str, policy: str = "yield") -> None:
     store = hass.data["power_sync"]["entry-1"]["automation_store"]
     store._data["vehicle_charging_configs"] = [
