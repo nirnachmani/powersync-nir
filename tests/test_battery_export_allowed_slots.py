@@ -12796,8 +12796,30 @@ def test_tesla_force_charge_does_not_reupload_same_aligned_tariff_boundary(opt_m
     assert force_state["hardware_expires_at"] == tariff_boundary
 
 
+def test_active_optimizer_charge_restores_at_soc_cap_without_price_coordinator(opt_module):
+    """A lightweight coordinator without price data still applies the SOC cap."""
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.63)
+    coordinator.battery_system = "fronius_reserva"
+    coordinator._config.grid_charge_soc_cap = 0.59
+    coordinator._get_energy_data = lambda: {"battery_level": 63}
+    coordinator._set_optimizer_force_state("charge", 10, 5000)
+    action = SimpleNamespace(
+        action="charge",
+        power_w=5000,
+        timestamp=datetime(2026, 7, 20, 1, 30, tzinfo=timezone.utc),
+    )
+
+    asyncio.run(coordinator._execute_optimizer_action(action))
+
+    assert battery.restore_normal_calls == 1
+    assert battery.force_charge_calls == []
+    assert coordinator._optimizer_force_state["active"] is False
+    assert coordinator._last_executed_action == "self_consumption"
+
+
 def test_tesla_force_charge_reuploads_when_plan_extends_tariff_by_one_slot(opt_module):
-    """A real five-minute LP extension must still roll the Tesla tariff forward."""
+    """No price coordinator must not block a real Tesla tariff extension."""
     now = datetime(2026, 7, 20, 1, 30, tzinfo=timezone.utc)
     opt_module.dt_util.now = lambda *args, **kwargs: now
     opt_module.dt_util.utcnow = lambda *args, **kwargs: now
@@ -12834,6 +12856,7 @@ def test_tesla_force_charge_reuploads_when_plan_extends_tariff_by_one_slot(opt_m
     asyncio.run(coordinator._execute_optimizer_action(actions[0]))
 
     assert battery.force_charge_calls == [(35, 20000.0, True)]
+    assert battery.restore_normal_calls == 0
 
 
 def _solar_export_capability_coordinator(opt_module, capability):

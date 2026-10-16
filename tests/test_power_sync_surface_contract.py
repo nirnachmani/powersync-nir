@@ -122,7 +122,7 @@ def _expected_optimizer_coordinator_source() -> str:
 # baseline-to-shared-LP transform above remains mandatory; this digest permits
 # only the remaining coordinator hunks (price preservation, mask construction,
 # and optimizer-owned force-charge restoration).
-_AMBER_COORDINATOR_DIFF_SHA256 = "e7749f8ceebf2163c31e3e7aa420d7e749b72496e6a1a740a37a2efdcf394774"
+_AMBER_COORDINATOR_DIFF_SHA256 = "063dd776754bd0b9fabf1aa6d792f22acb5df921574e40c506dcb7f442c46b4f"
 
 
 def _amber_coordinator_diff_is_allowlisted(expected: str, actual: str) -> bool:
