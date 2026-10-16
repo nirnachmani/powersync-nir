@@ -53,10 +53,12 @@ or `LicensedBatteryController`. A hunk coupled to licensing is **incompatible
 until disentangled**, rather than a reason to copy its guard or recovery code.
 
 These rejections are intentionally path/symbol-specific: unrelated provider
-authentication tokens and provider pairing flows remain allowed. Preserve
-source attribution and licence notices for every adapted hunk and keep the
-private fork's noncommercial scope. Before proposing any candidate, run the
-current source-only gates:
+authentication tokens and provider pairing flows remain allowed. ChatGPT
+plan-explanation sign-in is also distinct from optimiser licensing: it may be
+considered only as a separately approved AI feature after a dedicated security
+and API-contract review, and must never import optimiser entitlement,
+permission, command-fencing, or hosted optimiser-access code. Preserve source attribution and this private fork's noncommercial scope for every adapted hunk.
+Before proposing any candidate, run the current source-only gates:
 
 ```bash
 python scripts/private-fork/validate_local_architecture.py
@@ -70,6 +72,24 @@ scripts/private-fork/run_private_tests.sh
 - Create focused tests and minimal private-fork maintenance changes.
 - Run the deterministic validator and focused tests.
 - Create a local git commit after all required gates pass.
+
+## Relevance-first triage and proportionate testing
+
+Before a candidate or test, answer: does this fix a problem the configured
+Amber/Sigenergy/shared-home/private-EV setup can encounter; add a materially
+useful capability; or supply shared infrastructure for likely relevant future
+work? Reject a battery-vendor change unless it targets Sigenergy. Reject a
+provider change unless it targets Amber. Keep generic optimiser/site changes
+only when they can affect Sigenergy, Amber, solar/site flows, or private shared
+EV behavior; record `irrelevant to configured setup` for the rest.
+
+For a relevant low-risk hunk, use one RED/GREEN regression, affected focused
+tests, validator, and private gate once per thematic batch. For a relevant
+manual optimiser hunk, use one behavior/solver regression per outcome, its
+affected corpus, validator, private gate, and one semantic review. Run the
+broader suite only for release validation or missing focused coverage; compare
+failure IDs to baseline rather than repeating it per small hunk. Do not create
+speculative tests for unavailable vendors or theoretical scenarios.
 
 ## Forbidden actions
 

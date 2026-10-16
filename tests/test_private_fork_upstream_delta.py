@@ -262,8 +262,8 @@ def test_1363_1408_manifest_preserves_private_rejects_and_review_gates():
         assert sha in records
     assert "**Classification:** paywall/subscription reject" in records["854fdf67af4a95387edd10b2ab7fb7c60a291e4a"]
     assert "**Classification:** paywall/subscription reject" in records["9e9eb36845686cecb9858add14a0f17e1d4265e9"]
-    assert "**Classification:** paywall/subscription reject" in records["a1df6d70f7628baf5cc3addb62457371ad3964ff"]
-    assert "**Classification:** paywall/subscription reject" in records["297bada9f54a72d2833ca50c7c0f45fb10d13afb"]
+    assert "**Classification:** manual semantic review" in records["a1df6d70f7628baf5cc3addb62457371ad3964ff"]
+    assert "**Classification:** admin/no-port" in records["297bada9f54a72d2833ca50c7c0f45fb10d13afb"]
     assert "**Classification:** redundant/incompatible private shared-EV" in records["59d8618c1eac952cb88ee4b25bae2511085bcecc"]
     assert "ev_loadpoint_profiles.py" in records["59d8618c1eac952cb88ee4b25bae2511085bcecc"]
     assert "**Classification:** manual semantic review" in records[MANIFEST_TARGET]
@@ -276,6 +276,6 @@ def test_1363_1408_manifest_preserves_private_rejects_and_review_gates():
         "validate_local_architecture.py",
         "run_private_tests.sh",
         "licensing/",
-        "optimization/chatgpt_auth.py",
+        "ChatGPT plan-explanation sign-in",
     ):
         assert required in document

@@ -20,6 +20,7 @@ for the private `powersync-nir` fork.
   publish to the public `upstream` remote.
 - Preserve the architecture in `docs/private-fork/local-change-inventory.md`.
 - Do not widen scope to Tesla, EVDC, OCPP, Zaptec, or other excluded backends.
+- Apply relevance triage before tests or a candidate: reject battery-vendor changes unless they target Sigenergy, and reject provider changes unless they target Amber. Keep a vendor-neutral optimiser/site/infrastructure change only when it can affect Sigenergy, Amber, solar/site power flows, or private shared-EV operation.
 - Do not weaken, delete, bypass, or misreport a failing validator or test.
 - Never expose secrets, tokens, device addresses, or captures in commits or
   reports.
@@ -47,8 +48,10 @@ scripts/private-fork/run_private_tests.sh
 ```
 
 The focused runner includes Android-contract and private shared-loadpoint/
-reconciliation tests. Use `--broader` only when required; report every failure
-and do not suppress baseline failures.
+reconciliation tests. Use `--broader` only for release validation or when the
+affected subsystem lacks focused coverage; compare its stable failure IDs to
+the starting revision and report the difference. Do not repeat broad runs for
+small isolated ports or create speculative tests for unconfigured vendors.
 
 ## No-paywall upstream classification
 
@@ -73,6 +76,11 @@ and do not suppress baseline failures.
   `python scripts/private-fork/validate_local_architecture.py` and
   `scripts/private-fork/run_private_tests.sh`.
 
+ChatGPT plan-explanation sign-in is explicitly distinct from optimiser
+licensing. It is permitted only as a separately approved AI feature after a
+dedicated security and API-contract review; it must not import optimiser
+entitlement, permission, command-fencing, or hosted optimiser-access code.
+
 ## Workflow
 
 1. Record `git status --short`, private starting SHA, last reviewed upstream
@@ -81,7 +89,11 @@ and do not suppress baseline failures.
    `docs/private-fork/powersync-private-updates-reference.md`.
 3. Fetch and compare the explicit upstream range deterministically using the
    repository tools; identify changed paths, symbols, tests, and release notes.
-4. Apply the no-paywall classification above, then classify the delta as one of:
+4. Apply this relevance screen before the no-paywall classification: is the
+   change a real bug/capability/shared foundation for Amber, Sigenergy, the
+   user's solar/site flows, or the private shared EV model? If not, record
+   `irrelevant to configured setup` and reject it without a candidate. Then
+   classify the remaining delta as one of:
    - **No overlap:** no private modules/direct tests touched.
    - **Mechanical overlap:** same file, separable hunks.
    - **Compatible semantic overlap:** private invariants can be preserved with
@@ -107,6 +119,18 @@ and do not suppress baseline failures.
    retain the private implementation.
 9. For incompatible changes or failed gates, retain the candidate untouched and
    report the precise conflict/failure. Do not push it as a release or deploy.
+
+## Proportionate testing
+
+- Relevant low-risk provider/UI/device hunk: one RED/GREEN behavior regression,
+  affected focused tests, architecture validator, and private gate once per
+  thematic batch.
+- Relevant manual optimiser hunk: one solver behavior regression per outcome,
+  affected focused corpus, architecture validator, private gate, and one
+  independent semantic review. Broad testing is reserved for release handoff or
+  missing focused coverage, with baseline failure-ID comparison.
+- Never multiply review or broad test runs for irrelevant, theoretical, or
+  unavailable-vendor scenarios.
 
 ## Private invariants
 

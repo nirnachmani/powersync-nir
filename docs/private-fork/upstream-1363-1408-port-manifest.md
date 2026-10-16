@@ -14,7 +14,7 @@
 - Preserve `resolve_shared_loadpoint_command()` and no first-profile fallback.
 - Preserve one physical ownership lease and logical-profile attribution for the two private profiles.
 - Keep reconciliation observational; the established Solar Surplus, Smart Schedule, Scheduled Charging, and Price Level calculations remain authoritative.
-- Reject `custom_components/power_sync/licensing/`, hosted optimiser entitlement/permission flows, and `optimization/chatgpt_auth.py`.
+- Reject `custom_components/power_sync/licensing/` and hosted optimiser entitlement/permission flows. `optimization/chatgpt_auth.py` is separately authorised for dedicated AI security/API-contract review, not an optimiser-paywall port.
 - Before any future selected port: `python scripts/private-fork/validate_local_architecture.py` and `scripts/private-fork/run_private_tests.sh`.
 
 ## Classification legend
@@ -22,7 +22,7 @@
 - **low-risk compatible port:** candidate only; never an automatic cherry-pick.
 - **manual semantic review:** source outcome may be useful but must be adapted behind private invariants and a RED/GREEN regression.
 - **redundant/incompatible private shared-EV:** reject upstream shared-profile architecture; retain private model.
-- **paywall/subscription reject:** reject all licensing, entitlement, hosted access, and ChatGPT subscription work.
+- **paywall/subscription reject:** reject optimiser licensing, entitlement, and hosted optimiser access. ChatGPT plan-explanation sign-in is a separate manual AI review category.
 - **excluded backend reject:** reject out-of-scope backend/protocol work.
 - **admin/no-port:** retain no release/version/merge metadata.
 
@@ -721,10 +721,10 @@ The key-file lists below are taken from the per-commit Git command above; an ell
 - **Intended gate:** No code port; manifest contract test only.
 
 ### `a1df6d70f7628baf5cc3addb62457371ad3964ff` — feat(ai): add ChatGPT subscription sign-in for plan explanations
-- **Classification:** paywall/subscription reject
+- **Classification:** manual semantic review
 - **Key files:** `custom_components/power_sync/__init__.py`, `custom_components/power_sync/config_flow.py`, `custom_components/power_sync/const.py`, `custom_components/power_sync/frontend/power-sync-strategy.js` (+10 more)
-- **Rationale:** Introduces or carries licensing, optimiser entitlement, hosted subscription, or ChatGPT subscription behavior, all forbidden in this no-paywall fork.
-- **Intended gate:** No port; source review against forbidden `licensing/` and `optimization/chatgpt_auth.py` paths plus architecture validator.
+- **Rationale:** User authorised ChatGPT plan-explanation sign-in as distinct from optimiser licensing. It requires a dedicated security, token-storage, OAuth/API-contract, and private-architecture review; it must not import optimiser entitlement or command-fencing paths.
+- **Intended gate:** Dedicated AI-auth RED/GREEN security and API-contract suite plus architecture validator and private gate; no automatic port.
 
 ### `2b5514b9421b58c8f919670900b4c8afa9613a02` — fix(foxess): propagate self-consumption restore failures
 - **Classification:** low-risk compatible port
@@ -745,10 +745,10 @@ The key-file lists below are taken from the per-commit Git command above; an ell
 - **Intended gate:** No code port; manifest contract test only.
 
 ### `297bada9f54a72d2833ca50c7c0f45fb10d13afb` — Merge pull request #134 from pemontto/chatgpt-subscription-signin
-- **Classification:** paywall/subscription reject
+- **Classification:** admin/no-port
 - **Key files:** `custom_components/power_sync/__init__.py`, `custom_components/power_sync/config_flow.py`, `custom_components/power_sync/const.py`, `custom_components/power_sync/frontend/power-sync-strategy.js` (+14 more)
-- **Rationale:** Introduces or carries licensing, optimiser entitlement, hosted subscription, or ChatGPT subscription behavior, all forbidden in this no-paywall fork.
-- **Intended gate:** No port; source review against forbidden `licensing/` and `optimization/chatgpt_auth.py` paths plus architecture validator.
+- **Rationale:** Merge metadata; the separately reviewable ChatGPT plan-explanation implementation is recorded at `a1df6d70`.
+- **Intended gate:** No code port; dedicated AI-auth review for `a1df6d70` if selected.
 
 ### `54d47af22cda225f791826442c1a05f6b496eed9` — chore(manifest): bump version to 2.12.1402
 - **Classification:** admin/no-port
