@@ -487,10 +487,10 @@ The key-file lists below are taken from the per-commit Git command above; an ell
 - **Intended gate:** Task-specific RED/GREEN private regression + `validate_local_architecture.py` + `run_private_tests.sh`.
 
 ### `5404735c39a8f9cb97716b2132c63dbf7584585c` — fix(ev): preserve anonymous charger external control policies
-- **Classification:** manual semantic review
+- **Classification:** redundant/incompatible private shared-EV
 - **Key files:** `custom_components/power_sync/automations/ev_ownership.py`, `tests/test_ev_ownership_runtime.py`, `tests/test_ev_price_level_ownership.py`
-- **Rationale:** Touches optimizer or EV planning semantics; adapt the smallest outcome only after a private regression preserves profile, lease, and mode authority.
-- **Intended gate:** Task-specific RED/GREEN private regression + `validate_local_architecture.py` + `run_private_tests.sh`.
+- **Rationale:** Reject the upstream anonymous `_default` profile-to-config mapping: private Generic/Sigenergy selection is fail-closed and logical-profile based. The private selected-cycle resolver already owns `override`/`yield`; no upstream policy field, profile selection, OCPP, or storage mapping is imported.
+- **Intended gate:** Private resolver regression + `validate_local_architecture.py` + `run_private_tests.sh`.
 
 ### `762789b2b68853240bf4b581d0e1d358bb566a39` — chore(manifest): bump version to 2.12.1388
 - **Classification:** admin/no-port
@@ -507,7 +507,7 @@ The key-file lists below are taken from the per-commit Git command above; an ell
 ### `fbd33c0bdc7e34770b981faa2763daa346e9f708` — fix(ev): fence superseded Generic charger cleanup
 - **Classification:** manual semantic review
 - **Key files:** `custom_components/power_sync/automations/actions.py`, `tests/test_ev_ocpp_actions.py`
-- **Rationale:** Touches optimizer or EV planning semantics; adapt the smallest outcome only after a private regression preserves profile, lease, and mode authority.
+- **Rationale:** The pending-marker cleanup fence is redundant with private delayed Generic command fences. Keep that behavior and adapt only the compatible resolver outcome: fresh current evidence cannot retag, stop, or release an external physical lease attributed to a newer logical profile; verified for Generic and Sigenergy EVAC under both `yield` and `override`.
 - **Intended gate:** Task-specific RED/GREEN private regression + `validate_local_architecture.py` + `run_private_tests.sh`.
 
 ### `c4f1155107cc554d87607ecc94b8e60f407918c7` — chore(manifest): bump version to 2.12.1389

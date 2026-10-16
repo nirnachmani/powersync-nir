@@ -743,6 +743,60 @@ def test_end_of_cycle_yield_claims_only_an_unowned_external_shared_session() -> 
     assert stopped == []
 
 
+@pytest.mark.parametrize(
+    ("binding_id", "charger_type", "evidence"),
+    [
+        ("generic_ev", "generic", "fresh_power"),
+        ("sigenergy_charger", "sigenergy", "fresh_evac_state"),
+    ],
+)
+@pytest.mark.parametrize("external_control_policy", ["yield", "override"])
+def test_end_of_cycle_never_mutates_a_newer_external_profile_lease(
+    binding_id: str,
+    charger_type: str,
+    evidence: str,
+    external_control_policy: str,
+) -> None:
+    """A current observation cannot let an older selected profile affect B's lease."""
+    claimed = []
+    stopped = []
+
+    async def claim_external(profile_id):
+        claimed.append(profile_id)
+
+    async def stop_and_confirm(**kwargs):
+        stopped.append(kwargs)
+        return True
+
+    assert not asyncio.run(
+        module.resolve_end_of_cycle_external_shared_session(
+            binding_id=binding_id,
+            active_profile_id="shared_ev_profile_a",
+            selected_params={"charger_type": charger_type},
+            state=module.ReconciliationState(origin="external", physical_active=True),
+            cycle_context={
+                "binding_id": binding_id,
+                "active_profile_id": "shared_ev_profile_a",
+                "origin": "external",
+                "physical_active": True,
+                "observed_at": NOW,
+                "evidence": evidence,
+            },
+            now=NOW,
+            external_control_policy=external_control_policy,
+            cycle_ledger={},
+            get_lease=lambda: {
+                "owner": "external",
+                "active_profile_id": "shared_ev_profile_b",
+            },
+            ensure_external_ownership=claim_external,
+            stop_and_confirm=stop_and_confirm,
+        )
+    )
+    assert claimed == []
+    assert stopped == []
+
+
 def test_end_of_cycle_override_stops_once_only_without_an_allowed_cycle_decision() -> None:
     state = module.ReconciliationState(origin="external", physical_active=True)
     calls = []
