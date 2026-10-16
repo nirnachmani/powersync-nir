@@ -82,6 +82,35 @@ def _expected_optimizer_coordinator_source() -> str:
                     continue
 """,
         1,
+    ).replace(
+        """            if by_vehicle:
+                api_response["ev_charging_by_vehicle_w"] = {
+                    vehicle_id: list(series[:n_sched_pts])
+                    for vehicle_id, series in by_vehicle.items()
+                }
+            elif self._ev_coordinator and data.get("ev"):
+""",
+        """            if by_vehicle:
+                api_response["ev_charging_by_vehicle_w"] = {
+                    vehicle_id: list(series[:n_sched_pts])
+                    for vehicle_id, series in by_vehicle.items()
+                }
+
+                from ..automations.shared_logical_ev_chart import (
+                    shared_logical_optimizer_chart_payload_for_coordinator,
+                )
+
+                logical_demand = shared_logical_optimizer_chart_payload_for_coordinator(
+                    coordinator=self,
+                    schedule_response=api_response,
+                    series_by_vehicle_w=by_vehicle,
+                    plan_snapshot_id=plan_snapshot_id,
+                )
+                if logical_demand is not None:
+                    api_response["logical_ev_planned_demand"] = logical_demand
+            elif self._ev_coordinator and data.get("ev"):
+""",
+        1,
     )
     assert expected != baseline
     return expected

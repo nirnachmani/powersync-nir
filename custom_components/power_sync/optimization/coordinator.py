@@ -19940,6 +19940,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     vehicle_id: list(series[:n_sched_pts])
                     for vehicle_id, series in by_vehicle.items()
                 }
+
+                from ..automations.shared_logical_ev_chart import (
+                    shared_logical_optimizer_chart_payload_for_coordinator,
+                )
+
+                logical_demand = shared_logical_optimizer_chart_payload_for_coordinator(
+                    coordinator=self,
+                    schedule_response=api_response,
+                    series_by_vehicle_w=by_vehicle,
+                    plan_snapshot_id=plan_snapshot_id,
+                )
+                if logical_demand is not None:
+                    api_response["logical_ev_planned_demand"] = logical_demand
             elif self._ev_coordinator and data.get("ev"):
                 # Backward-compatible fallback when no optimizer EV overlay exists.
                 ev_power = [0.0] * n_sched_pts
