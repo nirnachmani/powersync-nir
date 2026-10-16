@@ -3,6 +3,18 @@
 This is a source-maintenance inventory for the private fork. It describes the
 current repository only; it is not a deployment or upstream-update procedure.
 
+## Reviewed upstream baseline
+
+- The reviewed upstream baseline is `v2.12.1363` /
+  `85f99ea62a174cd9153d5ff2ce71023dda2c9a5c`; the reviewed target is
+  `v2.12.1408` / `e3e107409b18add2213a9de617cc23591e73c873`.
+- `upstream-1363-1408-port-manifest.md` is the exhaustive, Git-derived
+  classification for that range. It is a review record, not permission to
+  cherry-pick or merge upstream production code.
+- Any future selected port must preserve the inventory below, first add its
+  behavior regression, and pass `validate_local_architecture.py` plus
+  `run_private_tests.sh`.
+
 ## Shared physical loadpoint selection and binding
 
 - `custom_components/power_sync/automations/shared_loadpoint.py` defines the

@@ -209,3 +209,73 @@ def test_private_fork_runner_includes_delta_tool_tests():
     runner = (ROOT / "scripts/private-fork/run_private_tests.sh").read_text(encoding="utf-8")
 
     assert "tests/test_private_fork_upstream_delta.py" in runner
+
+
+MANIFEST_PATH = ROOT / "docs/private-fork/upstream-1363-1408-port-manifest.md"
+MANIFEST_BASELINE = "85f99ea62a174cd9153d5ff2ce71023dda2c9a5c"
+MANIFEST_TARGET = "e3e107409b18add2213a9de617cc23591e73c873"
+MANIFEST_CLASSIFICATIONS = {
+    "low-risk compatible port",
+    "manual semantic review",
+    "redundant/incompatible private shared-EV",
+    "paywall/subscription reject",
+    "excluded backend reject",
+    "admin/no-port",
+}
+
+
+def _manifest_records(document: str) -> dict[str, str]:
+    pattern = r"^### `([0-9a-f]{40})` — .+?(?=^### `|\Z)"
+    return {match.group(1): match.group(0) for match in __import__("re").finditer(pattern, document, __import__("re").M | __import__("re").S)}
+
+
+def test_1363_1408_manifest_is_exhaustive_and_matches_git_range():
+    document = MANIFEST_PATH.read_text(encoding="utf-8")
+    collector = _load_module("collect_upstream_delta_manifest", COLLECTOR_PATH)
+    delta = collector.collect_delta(ROOT, MANIFEST_BASELINE, MANIFEST_TARGET)
+    expected = {commit["sha"]: commit["subject"] for commit in delta["commits"]}
+    records = _manifest_records(document)
+
+    assert "v2.12.1363" in document and MANIFEST_BASELINE in document
+    assert "v2.12.1408" in document and MANIFEST_TARGET in document
+    assert set(records) == set(expected)
+    for sha, subject in expected.items():
+        record = records[sha]
+        assert subject in record
+        assert any(f"**Classification:** {classification}" in record for classification in MANIFEST_CLASSIFICATIONS)
+        assert "**Key files:**" in record
+        assert "**Rationale:**" in record
+        assert "**Intended gate:**" in record
+
+
+def test_1363_1408_manifest_preserves_private_rejects_and_review_gates():
+    document = MANIFEST_PATH.read_text(encoding="utf-8")
+    records = _manifest_records(document)
+
+    for sha in (
+        "854fdf67af4a95387edd10b2ab7fb7c60a291e4a",
+        "9e9eb36845686cecb9858add14a0f17e1d4265e9",
+        "a1df6d70f7628baf5cc3addb62457371ad3964ff",
+        "297bada9f54a72d2833ca50c7c0f45fb10d13afb",
+        "59d8618c1eac952cb88ee4b25bae2511085bcecc",
+    ):
+        assert sha in records
+    assert "**Classification:** paywall/subscription reject" in records["854fdf67af4a95387edd10b2ab7fb7c60a291e4a"]
+    assert "**Classification:** paywall/subscription reject" in records["9e9eb36845686cecb9858add14a0f17e1d4265e9"]
+    assert "**Classification:** paywall/subscription reject" in records["a1df6d70f7628baf5cc3addb62457371ad3964ff"]
+    assert "**Classification:** paywall/subscription reject" in records["297bada9f54a72d2833ca50c7c0f45fb10d13afb"]
+    assert "**Classification:** redundant/incompatible private shared-EV" in records["59d8618c1eac952cb88ee4b25bae2511085bcecc"]
+    assert "ev_loadpoint_profiles.py" in records["59d8618c1eac952cb88ee4b25bae2511085bcecc"]
+    assert "**Classification:** manual semantic review" in records[MANIFEST_TARGET]
+    assert "presentation" in records[MANIFEST_TARGET].lower()
+
+    for required in (
+        "resolve_shared_loadpoint_command()",
+        "no first-profile fallback",
+        "one physical ownership lease",
+        "validate_local_architecture.py",
+        "run_private_tests.sh",
+        "licensing/",
+        "optimization/chatgpt_auth.py",
+    ):
+        assert required in document
