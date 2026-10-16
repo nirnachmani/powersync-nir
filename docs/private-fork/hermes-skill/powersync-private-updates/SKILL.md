@@ -21,7 +21,7 @@ for the private `powersync-nir` fork.
 - Preserve the architecture in `docs/private-fork/local-change-inventory.md`.
 - Do not widen scope to Tesla, EVDC, OCPP, Zaptec, or other excluded backends.
 - Apply relevance triage before tests or a candidate: reject battery-vendor changes unless they target Sigenergy, and reject provider changes unless they target Amber. Keep a vendor-neutral optimiser/site/infrastructure change only when it can affect Sigenergy, Amber, solar/site power flows, or private shared-EV operation.
-- Do not re-audit upstream quality by default. For a relevant update with no plausible interaction with the private two-EV/external-session implementation, port it minimally with the upstream regression and normal gates; do not invent private semantic tests or redesign it.
+- The updater's role is classification and private-fork compatibility, not upstream quality assurance. Rely on upstream developer tests for an unamended compatible update. Do not hunt for theoretical upstream bugs or re-test every upstream behavior; later upstream releases are the normal route for upstream bug fixes.
 - Do not weaken, delete, bypass, or misreport a failing validator or test.
 - Never expose secrets, tokens, device addresses, or captures in commits or
   reports.
@@ -96,8 +96,7 @@ entitlement, permission, command-fencing, or hosted optimiser-access code.
      configured setup` with the specific unavailable vendor/feature reason and
      reject it without a candidate.
    - Does it plausibly interact with private two-EV or external-session code?
-     If not, port it minimally; use upstream's regression and normal gates, not
-     a private redesign or quality audit.
+     If not, port it minimally without a private quality audit or new tests.
    - If it does interact, decide whether private behavior remains compatible.
      If the choice is uncertain or trades private functionality against another
      required outcome, stop and ask the user before implementation.
@@ -130,14 +129,17 @@ entitlement, permission, command-fencing, or hosted optimiser-access code.
 
 ## Proportionate testing
 
-- Relevant no-interaction hunk: upstream regression, affected focused tests,
-  architecture validator, and private gate once per thematic batch.
-- Relevant overlapping hunk: add only the smallest private interaction test
-  needed to prove compatibility or an intentional amendment. Use a semantic
-  review only where that overlap changes private behavior.
-- Broad testing is reserved for release handoff or missing focused coverage,
-  with baseline failure-ID comparison. Never multiply review or broad test runs
-  for irrelevant, theoretical, or unavailable-vendor scenarios.
+- Relevant no-interaction hunk: classify, minimally port, then run the
+  architecture validator and private compatibility gate once per update cycle.
+  Do not add tests merely to re-prove upstream behavior.
+- Relevant overlapping hunk that needs no amendment: port it and run the same
+  cycle gate; do not turn it into an upstream quality review.
+- Amended private-overlap hunk: add only the smallest interaction regression
+  required to prove the amendment. Use a semantic review only where the
+  amendment changes private behavior.
+- Broad testing is reserved for final release handoff or a clear regression
+  discovered during an amendment. Never multiply review or broad test runs for
+  irrelevant, theoretical, or unavailable-vendor scenarios.
 
 ## Private invariants
 

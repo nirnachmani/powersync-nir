@@ -84,20 +84,24 @@ only when they can affect Sigenergy, Amber, solar/site flows, or private shared
 EV behavior; record `irrelevant to configured setup` plus the unavailable
 vendor/unused feature for the rest.
 
-Do not re-audit upstream quality by default. If a relevant hunk has no
-plausible interaction with private two-EV/external-session functionality, port
-it minimally with its upstream regression and the normal gates. Add private
-behavior tests and manual semantic adaptation only when an actual interaction
-needs proof. If compatibility is uncertain or a choice trades private behavior
-against another required outcome, stop and ask the user for a preference.
+The updater classifies and preserves private-fork compatibility; it is not an
+upstream quality-assurance role. Rely on upstream developer tests for a
+compatible unamended update. Do not hunt for theoretical upstream defects or
+re-prove every upstream behavior; later upstream releases normally carry those
+fixes. If a relevant hunk has no plausible interaction with private
+two-EV/external-session functionality, port it minimally without adding private
+tests. Add a private interaction regression only when the fork must amend an
+actual overlap. If compatibility is uncertain or a choice trades private
+behavior against another required outcome, stop and ask the user for a
+preference.
 
-For a relevant no-interaction hunk, use the upstream regression, affected
-focused tests, validator, and private gate once per thematic batch. For a
-relevant overlapping hunk, add only the smallest private interaction test and
-adaptation required to preserve private behavior. Run the broader suite only
-for release validation or missing focused coverage; compare failure IDs to
-baseline rather than repeating it per small hunk. Do not create speculative
-tests for unavailable vendors or theoretical scenarios.
+For relevant no-interaction and unamended-overlap hunks, classify and port, then
+run the architecture validator and private compatibility gate once per update
+cycle. For an amended overlap, add only the smallest private interaction test
+needed for that amendment. Run the broader suite only for final release
+validation or a clear regression discovered during an amendment. Do not create
+speculative tests for unavailable vendors, theoretical scenarios, or ordinary
+upstream behavior.
 
 ## End-of-cycle report
 
