@@ -346,6 +346,86 @@ def test_lp_battery_power_chart_splits_home_consumption_from_export():
     assert "attribute: 'discharge_values_kw'" not in chart_source
 
 
+def test_optimizer_logical_schedule_presentation_is_advisory_and_preserves_local_dst_windows():
+    """The dashboard must render the reviewed read-only schedule snapshot as local time."""
+    source = STRATEGY_PATH.read_text()
+
+    assert "function _logicalSchedulePresentation" in source
+    assert "function _formatLogicalScheduleWindow" in source
+    assert "Smart Schedule (solar)" in source
+    assert "Advisory only" in source
+    assert "Measured charger status remains authoritative" in source
+
+    helper_start = source.index("function _logicalSchedulePresentation")
+    helper_end = source.index("\nclass PowerSyncOptimizationPlan", helper_start)
+    runtime = r"""
+      const active = _logicalSchedulePresentation({
+        diagnostics: [{
+          schedule_presentation: {
+            state: 'active',
+            window_start: '2026-10-04T01:30:00+09:30',
+            window_end: '2026-10-04T03:30:00+10:30',
+            source: 'Smart Schedule (solar)',
+          },
+        }],
+      });
+      if (!active || active.state !== 'active' || active.source !== 'Smart Schedule (solar)') {
+        throw new Error('active advisory snapshot was not accepted');
+      }
+      const rendered = _formatLogicalScheduleWindow(active);
+      if (!rendered.includes('1:30 AM') || !rendered.includes('3:30 AM')) {
+        throw new Error(`DST-local window was not rendered from offset timestamps: ${rendered}`);
+      }
+      for (const state of ['next', 'no_plan', 'stale', 'unavailable']) {
+        const schedule_presentation = state === 'next'
+          ? {state, window_start: '2026-10-04T04:00:00+10:30', window_end: '2026-10-04T05:00:00+10:30', source: 'Smart Schedule (solar)'}
+          : {state};
+        const snapshot = _logicalSchedulePresentation({diagnostics: [{schedule_presentation}]});
+        if (!snapshot || snapshot.state !== state) throw new Error(`state lost: ${state}`);
+      }
+      if (_logicalSchedulePresentation({diagnostics: [{schedule_presentation: {state: 'active', source: 'not smart'}}]})) {
+        throw new Error('unreviewed source label was accepted');
+      }
+    """
+    subprocess.run(["node", "-e", source[helper_start:helper_end] + runtime], check=True)
+
+
+def test_optimizer_uses_only_fail_closed_logical_planned_demand_series():
+    """No frontend inference, relabeling, padding, or fallback may create a logical EV line."""
+    source = STRATEGY_PATH.read_text()
+
+    assert "function _logicalPlannedDemandSeries" in source
+    assert "logical_ev_planned_demand" in source
+    helper_start = source.index("function _logicalPlannedDemandSeries")
+    helper_end = source.index("\nclass PowerSyncOptimizationPlan", helper_start)
+    runtime = r"""
+      const timestamps = ['2026-10-16T08:00:00+00:00', '2026-10-16T08:05:00+00:00'];
+      const base = {
+        timestamps,
+        plan_snapshot_id: 'solve-1',
+        logical_ev_planned_demand: {
+          vehicle_id: 'shared_ev_profile_a',
+          timestamps: [...timestamps],
+          planned_demand_w: [0, 7200],
+          plan_snapshot_id: 'solve-1',
+        },
+      };
+      const accepted = _logicalPlannedDemandSeries(base);
+      if (!accepted || accepted.vehicleId !== 'shared_ev_profile_a' || accepted.values[1] !== 7200) {
+        throw new Error('exact checked logical demand was rejected');
+      }
+      for (const schedule of [
+        {...base, logical_ev_planned_demand: {...base.logical_ev_planned_demand, plan_snapshot_id: 'old'}},
+        {...base, logical_ev_planned_demand: {...base.logical_ev_planned_demand, timestamps: timestamps.slice(0, 1)}},
+        {...base, logical_ev_planned_demand: {...base.logical_ev_planned_demand, planned_demand_w: [7200]}},
+        {...base, logical_ev_planned_demand: {...base.logical_ev_planned_demand, planned_demand_w: [0, -1]}},
+      ]) {
+        if (_logicalPlannedDemandSeries(schedule)) throw new Error('unsafe logical series was accepted');
+      }
+    """
+    subprocess.run(["node", "-e", source[helper_start:helper_end] + runtime], check=True)
+
+
 def test_lp_solar_chart_uses_explicit_segmented_curtailment_provenance():
     source = STRATEGY_PATH.read_text()
     chart_source = source[

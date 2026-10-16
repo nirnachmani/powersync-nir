@@ -1811,6 +1811,47 @@ const OPTIMIZATION_PLAN_PENDING_RETRY_MS = 5000;
 const OPTIMIZATION_PLAN_CACHE = window.__powerSyncOptimizationPlanCache || new Map();
 window.__powerSyncOptimizationPlanCache = OPTIMIZATION_PLAN_CACHE;
 
+function _logicalSchedulePresentation(response) {
+  const entries = Array.isArray(response?.diagnostics) ? response.diagnostics : [];
+  for (const entry of entries) {
+    const snapshot = entry?.schedule_presentation;
+    if (!snapshot || !['active', 'next', 'no_plan', 'stale', 'unavailable'].includes(snapshot.state)) continue;
+    if (snapshot.source !== null && snapshot.source !== undefined
+      && !['Smart Schedule (solar)', 'Smart Schedule (grid)'].includes(snapshot.source)) continue;
+    if (['active', 'next'].includes(snapshot.state)
+      && (!snapshot.window_start || !snapshot.window_end || !snapshot.source)) continue;
+    return snapshot;
+  }
+  return null;
+}
+
+function _formatLogicalScheduleWindow(snapshot) {
+  if (!snapshot?.window_start || !snapshot?.window_end) return '';
+  const start = new Date(snapshot.window_start);
+  const end = new Date(snapshot.window_end);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return '';
+  const format = value => value.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return `${format(start)} – ${format(end)}`;
+}
+
+function _logicalPlannedDemandSeries(schedule) {
+  const demand = schedule?.logical_ev_planned_demand;
+  const timestamps = schedule?.timestamps;
+  if (!demand || !Array.isArray(timestamps) || !timestamps.length
+    || !Array.isArray(demand.timestamps) || !Array.isArray(demand.planned_demand_w)
+    || typeof demand.vehicle_id !== 'string' || !demand.vehicle_id
+    || typeof schedule.plan_snapshot_id !== 'string' || !schedule.plan_snapshot_id
+    || demand.plan_snapshot_id !== schedule.plan_snapshot_id
+    || demand.timestamps.length !== timestamps.length
+    || demand.planned_demand_w.length !== timestamps.length) return null;
+  for (let index = 0; index < timestamps.length; index += 1) {
+    if (demand.timestamps[index] !== timestamps[index]) return null;
+    const value = demand.planned_demand_w[index];
+    if (!Number.isFinite(value) || value < 0) return null;
+  }
+  return { vehicleId: demand.vehicle_id, values: [...demand.planned_demand_w] };
+}
+
 class PowerSyncOptimizationPlan extends HTMLElement {
   constructor() {
     super();
@@ -1944,7 +1985,13 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     OPTIMIZATION_PLAN_CACHE.set(path, { ...(previous || {}), promise: request });
     try {
       const response = await request;
-      this._data = response || null;
+      let diagnostics = null;
+      try {
+        diagnostics = await this._hass.callApi('GET', 'power_sync/ev/shared_loadpoints/diagnostics');
+      } catch (_err) {
+        // The optional read-only diagnostics surface must never block the plan.
+      }
+      this._data = response ? { ...response, logical_schedule_diagnostics: diagnostics } : null;
       this._error = null;
       this._lastFetch = Date.now();
       OPTIMIZATION_PLAN_CACHE.set(path, {
@@ -2400,6 +2447,16 @@ class PowerSyncOptimizationPlan extends HTMLElement {
           border: 1px solid var(--divider-color);
           font-size: 13px;
         }
+        .logical-schedule {
+          margin: 0 0 14px;
+          padding: 10px 12px;
+          border: 1px solid var(--divider-color);
+          border-left: 4px solid #7E57C2;
+          border-radius: 10px;
+          background: rgba(126, 87, 194, 0.08);
+        }
+        .logical-schedule-title { font-size: 13px; font-weight: 800; }
+        .logical-schedule-detail { margin-top: 3px; font-size: 12px; color: var(--secondary-text-color); }
         @media (max-width: 560px) {
           ha-card {
             padding: 13px;
@@ -2441,6 +2498,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
         </div>
         ${this._renderChips(model, priceMeta)}
         ${this._renderNotice(hasSchedule)}
+        ${this._renderLogicalScheduleAdvisory(model.logicalSchedule)}
         <div class="section-title">Planned Battery Windows</div>
         ${this._renderBatteryWindows(batteryWindows, priceMeta)}
         ${model.priceLevelWindows.length ? `
@@ -2484,6 +2542,9 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     const consume = detailed ? schedule.battery_consume_w : [];
     const exportPower = detailed ? schedule.battery_export_w : [];
     const ev = Array.isArray(schedule.ev_charging_w) ? schedule.ev_charging_w : [];
+    const logicalDemand = typeof _logicalPlannedDemandSeries === 'function'
+      ? _logicalPlannedDemandSeries(schedule)
+      : null;
     const projection = schedule.ev_charging_projection?.schema_version === 1
       ? schedule.ev_charging_projection
       : null;
@@ -2539,6 +2600,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
         consumeKw: detailed ? this._kw(consume[i]) : 0,
         exportKw: detailed ? this._kw(exportPower[i]) : 0,
         evKw: this._kw(ev[i]),
+        logicalEvKw: logicalDemand ? this._kw(logicalDemand.values[i]) : 0,
         conditionalEvKw: this._kw(conditionalEv[i]),
         importPrice: this._minorPrice(importPrice[i]),
         exportPrice: this._minorPrice(exportPrice[i]),
@@ -2560,6 +2622,14 @@ class PowerSyncOptimizationPlan extends HTMLElement {
         ];
     if (hasEv) {
       powerSeries.push({ key: 'evKw', label: 'Planned EV load', color: '#7E57C2' });
+    }
+    if (logicalDemand) {
+      powerSeries.push({
+        key: 'logicalEvKw',
+        label: `Planned ${logicalDemand.vehicleId} demand`,
+        color: '#9575CD',
+        dashed: true,
+      });
     }
     if (points.some(point => point.conditionalEvKw > 0)) {
       powerSeries.push({
@@ -2588,6 +2658,9 @@ class PowerSyncOptimizationPlan extends HTMLElement {
 
     return {
       raw: data,
+      logicalSchedule: typeof _logicalSchedulePresentation === 'function'
+        ? _logicalSchedulePresentation(data.logical_schedule_diagnostics)
+        : null,
       points,
       intervalMinutes,
       reservePercent: reserve.percent,
@@ -2663,6 +2736,27 @@ class PowerSyncOptimizationPlan extends HTMLElement {
       return '<div class="notice">Detailed optimizer schedule is not available yet. Showing planned force windows from Home Assistant entities.</div>';
     }
     return '';
+  }
+
+  _renderLogicalScheduleAdvisory(snapshot) {
+    if (!snapshot) return '';
+    const labels = {
+      active: 'Active now',
+      next: 'Next window',
+      no_plan: 'No plan',
+      stale: 'Plan stale',
+      unavailable: 'Schedule unavailable',
+    };
+    const title = labels[snapshot.state];
+    if (!title) return '';
+    const window = _formatLogicalScheduleWindow(snapshot);
+    const details = [snapshot.source, window].filter(Boolean).join(' · ');
+    const explanatory = details || 'No current logical Smart Schedule window.';
+    return `<div class="logical-schedule" role="status">
+      <div class="logical-schedule-title">Smart Schedule — ${this._escHtml(title)}</div>
+      <div class="logical-schedule-detail">${this._escHtml(explanatory)}</div>
+      <div class="logical-schedule-detail">Advisory only. Measured charger status remains authoritative.</div>
+    </div>`;
   }
 
   _renderPowerChart(model, compact) {
