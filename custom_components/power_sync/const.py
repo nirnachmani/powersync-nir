@@ -1,11 +1,17 @@
 """Constants for the PowerSync integration."""
 from datetime import timedelta
 import json
+import logging
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlencode
+
+from .registry_compat import device_parent_info
 
 # Integration domain
 DOMAIN = "power_sync"
+
+_LOGGER = logging.getLogger(__name__)
 
 # Version from manifest.json (single source of truth)
 _MANIFEST_PATH = Path(__file__).parent / "manifest.json"
@@ -2532,23 +2538,65 @@ def family_device_info(entry_id: str, family: str) -> dict:
     }
 
 
-def powerwall_device_info(entry_id: str) -> dict:
+def _device_id_for_identifiers(
+    hass: Any | None,
+    identifiers: set[tuple[str, str]],
+    config_entry_id: str,
+) -> str | None:
+    """Return a registry device ID, creating the parent when needed."""
+    if hass is None:
+        return None
+
+    try:
+        from homeassistant.helpers import device_registry as dr
+
+        registry = dr.async_get(hass)
+        identifier = next(iter(identifiers))
+        get_by_identifier = getattr(registry, "async_get_device_by_identifier", None)
+        if callable(get_by_identifier):
+            device = get_by_identifier(identifier, config_entry_id)
+        else:
+            device = registry.async_get_device(identifiers=identifiers)
+        if device is None:
+            device = registry.async_get_or_create(
+                config_entry_id=config_entry_id,
+                identifiers=identifiers,
+            )
+        return getattr(device, "id", None)
+    except Exception as err:
+        _LOGGER.debug("Unable to resolve device registry parent: %s", err)
+        return None
+
+
+def _entry_device_id(hass: Any | None, entry_id: str) -> str | None:
+    """Return the registry ID for the main PowerSync config-entry device."""
+    return _device_id_for_identifiers(hass, {(DOMAIN, entry_id)}, entry_id)
+
+
+def powerwall_device_info(entry_id: str, *, hass: Any | None = None) -> dict:
     """Tesla Powerwall device — sub-device of the main PowerSync entry.
 
     Holds Powerwall-specific telemetry (lifetime totals, backup time remaining,
     grid services state, alerts) so the HA device tree separates raw Powerwall
     diagnostics from the optimiser's user-facing controls.
     """
-    return {
+    info = {
         "identifiers": {(DOMAIN, f"{entry_id}_powerwall")},
         "name": "Tesla Powerwall",
         "manufacturer": "Tesla",
         "model": "Powerwall",
-        "via_device": (DOMAIN, entry_id),
     }
+    if parent_id := _entry_device_id(hass, entry_id):
+        info.update(device_parent_info(hass, parent_id, (DOMAIN, entry_id)))
+    return info
 
 
-def provider_pricing_device_info(entry_id: str, provider: str) -> dict:
+def provider_pricing_device_info(
+    entry_id: str,
+    provider: str,
+    *,
+    hass: Any | None = None,
+) -> dict:
     """Provider pricing/account device linked to the main PowerSync hub."""
     provider_key = provider.lower()
     if provider_key == SENSOR_FAMILY_GLOBIRD:
@@ -2561,26 +2609,45 @@ def provider_pricing_device_info(entry_id: str, provider: str) -> dict:
         name = f"{provider.title()} Pricing"
         manufacturer = provider.title()
 
-    return {
+    info = {
         "identifiers": {(DOMAIN, f"{entry_id}_{provider_key}_pricing")},
         "name": name,
         "manufacturer": manufacturer,
         "model": "Electricity Pricing",
-        "via_device": (DOMAIN, entry_id),
     }
+    if parent_id := _entry_device_id(hass, entry_id):
+        info.update(device_parent_info(hass, parent_id, (DOMAIN, entry_id)))
+    return info
 
 
-def powerwall_block_device_info(entry_id: str, index: int) -> dict:
+def powerwall_block_device_info(
+    entry_id: str,
+    index: int,
+    *,
+    hass: Any | None = None,
+) -> dict:
     """Per-Powerwall sub-device, used for individual battery-block sensors.
 
     Each in-service Powerwall gets its own device (Powerwall 1, Powerwall 2, …)
     via the Tesla Powerwall parent so SOC / voltage / temperature / SoH for
     each pack live on a distinct device card in HA.
     """
-    return {
+    info = {
         "identifiers": {(DOMAIN, f"{entry_id}_pw_{index + 1}")},
         "name": f"Powerwall {index + 1}",
         "manufacturer": "Tesla",
         "model": "Powerwall Battery",
-        "via_device": (DOMAIN, f"{entry_id}_powerwall"),
     }
+    if parent_id := _device_id_for_identifiers(
+        hass,
+        {(DOMAIN, f"{entry_id}_powerwall")},
+        entry_id,
+    ):
+        info.update(
+            device_parent_info(
+                hass,
+                parent_id,
+                (DOMAIN, f"{entry_id}_powerwall"),
+            )
+        )
+    return info

@@ -2517,10 +2517,44 @@ async def async_setup_entry(
     # Add GloBird portal/account sensors if the provider account is connected.
     globird_coordinator = domain_data.get("globird_coordinator")
     if electricity_provider == "globird" and globird_coordinator:
-        from .globird_sensors import build_globird_entities
+        from .globird_sensors import build_globird_entities, globird_entity_unique_id
 
         globird_entities = build_globird_entities(globird_coordinator, entry)
         entities.extend(globird_entities)
+        added_globird_ids = {
+            unique_id
+            for entity in globird_entities
+            if (unique_id := globird_entity_unique_id(entity)) is not None
+        }
+        domain_data["globird_sensor_unique_ids"] = added_globird_ids
+
+        if not (globird_coordinator.data or {}).get("services"):
+
+            def _add_globird_entities_after_recovery() -> None:
+                current_data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+                if (
+                    current_data is not domain_data
+                    or current_data.get("globird_coordinator") is not globird_coordinator
+                ):
+                    return
+                recovered_entities = build_globird_entities(globird_coordinator, entry)
+                new_entities = []
+                for entity in recovered_entities:
+                    unique_id = globird_entity_unique_id(entity)
+                    if unique_id is None or unique_id in added_globird_ids:
+                        continue
+                    added_globird_ids.add(unique_id)
+                    new_entities.append(entity)
+                if new_entities:
+                    async_add_entities(new_entities)
+                if (globird_coordinator.data or {}).get("services"):
+                    unsubscribe = domain_data.pop("globird_sensor_unsub", None)
+                    if unsubscribe:
+                        unsubscribe()
+
+            domain_data["globird_sensor_unsub"] = globird_coordinator.async_add_listener(
+                _add_globird_entities_after_recovery
+            )
         _LOGGER.info("GloBird portal sensors added (%d sensors)", len(globird_entities))
 
     # Always add battery health sensor
@@ -3084,7 +3118,10 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNumer
     @property
     def device_info(self):
         if self.entity_description.device_section == "powerwall":
-            return powerwall_device_info(self._entry.entry_id)
+            return powerwall_device_info(
+                self._entry.entry_id,
+                hass=getattr(self, "hass", None),
+            )
         return family_device_info(
             self._entry.entry_id,
             SENSOR_KEY_TO_FAMILY.get(self.entity_description.key, SENSOR_FAMILY_BATTERY),
@@ -3358,7 +3395,10 @@ class _PowerwallLocalSensorBase(CoordinatorEntity, SensorEntity):
 
     @property
     def device_info(self):
-        return powerwall_device_info(self._entry.entry_id)
+        return powerwall_device_info(
+            self._entry.entry_id,
+            hass=getattr(self, "hass", None),
+        )
 
     @property
     def _snap(self):
@@ -3585,7 +3625,7 @@ class _PowerwallBlockSensorBase(SensorEntity):
 
     @property
     def device_info(self):
-        return powerwall_device_info(self._entry.entry_id)
+        return powerwall_device_info(self._entry.entry_id, hass=self._hass)
 
     @property
     def _health_data(self) -> dict[str, Any] | None:
@@ -3840,7 +3880,7 @@ class PowerwallSolarStringVoltageSensor(SensorEntity):
 
     @property
     def device_info(self):
-        return powerwall_device_info(self._entry.entry_id)
+        return powerwall_device_info(self._entry.entry_id, hass=self._hass)
 
     @property
     def _diagnostics(self) -> dict[str, Any] | None:
@@ -4496,7 +4536,11 @@ class CovaUProviderSensor(SensorEntity):
 
     @property
     def device_info(self):
-        return provider_pricing_device_info(self._entry.entry_id, "covau")
+        return provider_pricing_device_info(
+            self._entry.entry_id,
+            "covau",
+            hass=getattr(self, "hass", None),
+        )
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
@@ -6223,7 +6267,11 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
 
     @property
     def device_info(self):
-        return provider_pricing_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
+        return provider_pricing_device_info(
+            self._entry.entry_id,
+            SENSOR_FAMILY_FLOW_POWER,
+            hass=getattr(self, "hass", None),
+        )
 
     def _get_config_value(self, key: str, default=None):
         """Get config value from options first, then data."""
@@ -6660,7 +6708,11 @@ class FlowPowerTWAPSensor(PowerSyncCurrencyMixin, SensorEntity):
 
     @property
     def device_info(self):
-        return provider_pricing_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
+        return provider_pricing_device_info(
+            self._entry.entry_id,
+            SENSOR_FAMILY_FLOW_POWER,
+            hass=getattr(self, "hass", None),
+        )
 
     def _get_config_value(self, key: str, default=None):
         """Get config value from options first, then data."""
@@ -6730,7 +6782,11 @@ class FlowPowerNetworkTariffSensor(PowerSyncCurrencyMixin, SensorEntity):
 
     @property
     def device_info(self):
-        return provider_pricing_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
+        return provider_pricing_device_info(
+            self._entry.entry_id,
+            SENSOR_FAMILY_FLOW_POWER,
+            hass=getattr(self, "hass", None),
+        )
 
     def _get_config_value(self, key: str, default=None):
         """Get config value from options first, then data."""
@@ -6802,7 +6858,11 @@ class FlowPowerAmberComparisonSensor(PowerSyncCurrencyMixin, SensorEntity):
 
     @property
     def device_info(self):
-        return provider_pricing_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
+        return provider_pricing_device_info(
+            self._entry.entry_id,
+            SENSOR_FAMILY_FLOW_POWER,
+            hass=getattr(self, "hass", None),
+        )
 
     def _get_config_value(self, key: str, default=None):
         """Get config value from options first, then data."""
@@ -6925,7 +6985,11 @@ class FlowPowerAccountSensor(SensorEntity):
 
     @property
     def device_info(self):
-        return provider_pricing_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
+        return provider_pricing_device_info(
+            self._entry.entry_id,
+            SENSOR_FAMILY_FLOW_POWER,
+            hass=getattr(self, "hass", None),
+        )
 
     @property
     def native_value(self) -> float | None:

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 from pathlib import Path
+import sys
 from types import SimpleNamespace
+import types
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -59,6 +62,7 @@ def _load_flow_power_cleanup(entity_registry, device_registry):
         ),
         "er": SimpleNamespace(async_get=lambda _hass: entity_registry),
         "dr": SimpleNamespace(async_get=lambda _hass: device_registry),
+        "iter_device_entries": lambda registry: registry.devices.values(),
     }
     module = ast.Module(body=[function], type_ignores=[])
     ast.fix_missing_locations(module)
@@ -87,16 +91,128 @@ class _FakeDeviceRegistry:
 
 
 def test_provider_pricing_device_helper_links_to_entry_device():
-    """Provider pricing devices should be linked under the PowerSync entry."""
+    """Provider pricing devices should resolve their entry device at registration."""
     source = (COMPONENT_ROOT / "const.py").read_text()
 
-    assert "def provider_pricing_device_info(entry_id: str, provider: str) -> dict:" in source
+    assert "def provider_pricing_device_info(" in source
     assert '"name": name' in source
     assert '"model": "Electricity Pricing"' in source
-    assert '"via_device": (DOMAIN, entry_id)' in source
+    assert "_entry_device_id(hass, entry_id)" in source
+    assert "device_parent_info(" in source
     assert 'f"{entry_id}_{provider_key}_pricing"' in source
     assert 'name = "GloBird Pricing"' in source
     assert 'name = "Flow Power Pricing"' in source
+
+
+def test_globird_cold_start_failure_keeps_recovery_and_defers_account_entities():
+    """A failed uncached portal refresh must remain retryable and attach later."""
+    init_source = (COMPONENT_ROOT / "__init__.py").read_text()
+    sensor_source = (COMPONENT_ROOT / "sensor.py").read_text()
+    coordinator_source = (COMPONENT_ROOT / "globird_coordinator.py").read_text()
+
+    init_tree = ast.parse(init_source)
+    globird_branch = next(
+        node
+        for node in ast.walk(init_tree)
+        if isinstance(node, ast.If)
+        and "electricity_provider == \"globird\""
+        in (ast.get_source_segment(init_source, node.test) or "")
+        and "GloBirdCoordinator" in (ast.get_source_segment(init_source, node) or "")
+    )
+    branch_source = ast.get_source_segment(init_source, globird_branch)
+
+    assert branch_source is not None
+    assert "globird_initial_refresh_failed = True" in branch_source
+    assert "async_shutdown()" not in branch_source
+    assert "globird_coordinator = None" not in branch_source
+    assert "async_start_initial_retry()" in init_source
+    assert "_initial_retry_task" in coordinator_source
+    assert "_GLOBIRD_MAX_INITIAL_RETRY_DELAY_SECONDS" in coordinator_source
+    assert "globird_sensor_unsub" in sensor_source
+    assert "globird_entity_unique_id" in sensor_source
+    assert "async_add_listener" in sensor_source
+
+
+def test_globird_initial_retry_recovers_after_transient_failure():
+    """The bounded cold-start retry must keep trying until data is published."""
+    source = (COMPONENT_ROOT / "globird_coordinator.py").read_text()
+    tree = ast.parse(source)
+    coordinator_class = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "GloBirdCoordinator"
+    )
+    retry_method = next(
+        node
+        for node in coordinator_class.body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "_async_retry_initial_refresh"
+    )
+    start_method = next(
+        node
+        for node in coordinator_class.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "async_start_initial_retry"
+    )
+
+    recorded_delays: list[int] = []
+
+    async def _sleep_and_record(delay: int) -> None:
+        recorded_delays.append(delay)
+
+    namespace = {
+        "asyncio": SimpleNamespace(
+            CancelledError=asyncio.CancelledError,
+            sleep=_sleep_and_record,
+            create_task=asyncio.create_task,
+        ),
+        "DOMAIN": "power_sync",
+        "_LOGGER": SimpleNamespace(
+            warning=lambda *_args, **_kwargs: None,
+            info=lambda *_args, **_kwargs: None,
+        ),
+        "_GLOBIRD_INITIAL_RETRY_DELAY_SECONDS": 30,
+        "_GLOBIRD_MAX_INITIAL_RETRY_DELAY_SECONDS": 300,
+    }
+    module = ast.Module(body=[retry_method, start_method], type_ignores=[])
+    ast.fix_missing_locations(module)
+    exec(compile(module, "globird_coordinator.py", "exec"), namespace)
+
+    async def exercise() -> int:
+        attempts = 0
+
+        class FakeHass:
+            def __init__(self) -> None:
+                self.tasks: list[asyncio.Task[None]] = []
+
+            def async_create_task(self, coroutine, *, name: str):
+                task = asyncio.create_task(coroutine, name=name)
+                self.tasks.append(task)
+                return task
+
+        coordinator = SimpleNamespace(
+            hass=FakeHass(),
+            _initial_retry_task=None,
+            last_update_success=False,
+        )
+
+        async def _refresh() -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("temporary portal failure")
+            coordinator.last_update_success = True
+
+        coordinator.async_refresh = _refresh
+        coordinator._async_retry_initial_refresh = namespace[
+            "_async_retry_initial_refresh"
+        ].__get__(coordinator)
+        namespace["async_start_initial_retry"].__get__(coordinator)()
+        await coordinator.hass.tasks[0]
+        return attempts
+
+    assert asyncio.run(exercise()) == 2
+    assert recorded_delays == [30, 60]
 
 
 def test_globird_setup_creates_coordinator_and_gated_sensors():
@@ -143,7 +259,9 @@ def test_flow_power_api_account_sensors_use_provider_device_and_object_ids():
     assert "CONF_FLOWPOWER_API_KEY" in source
     assert "if fp_api_key:" in source
     assert "FlowPowerAccountSensor(" in source
-    assert "return provider_pricing_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)" in source
+    assert "return provider_pricing_device_info(" in source
+    assert "SENSOR_FAMILY_FLOW_POWER" in source
+    assert "hass=getattr(self, \"hass\", None)" in source
     assert 'self._attr_suggested_object_id = f"power_sync_{sensor_type}"' in source
     assert "network_tariff_raw" in source
 
