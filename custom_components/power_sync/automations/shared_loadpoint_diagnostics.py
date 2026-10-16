@@ -119,6 +119,31 @@ def _compact_session_provenance(value: Any, selected_profile_id: str | None) -> 
     }
 
 
+def _compact_schedule_presentation(
+    presentations: Any,
+    selected_profile_id: str | None,
+) -> dict[str, Any] | None:
+    """Expose only the selected profile's advisory plan summary."""
+    if not selected_profile_id or not isinstance(presentations, Mapping):
+        return None
+    value = presentations.get(selected_profile_id)
+    if not isinstance(value, Mapping):
+        return None
+    state = value.get("state")
+    if state not in {"active", "next", "no_plan", "stale", "unavailable"}:
+        return None
+    return {
+        key: value.get(key) if isinstance(value.get(key), str) else None
+        for key in (
+            "window_start",
+            "window_end",
+            "source",
+            "plan_updated_at",
+            "plan_snapshot_id",
+        )
+    } | {"state": state}
+
+
 def project_shared_loadpoint_diagnostics(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     """Project persisted diagnostic facts without reading hardware or controlling it."""
     selected_profile_id = snapshot.get("selected_profile_id")
@@ -185,6 +210,10 @@ def project_shared_loadpoint_diagnostics(snapshot: Mapping[str, Any]) -> dict[st
             else (decision["reason"] if decision and not decision["allowed"] else None)
         ),
         "last_session": _compact_session_provenance(snapshot.get("last_session"), selected_profile),
+        "schedule_presentation": _compact_schedule_presentation(
+            snapshot.get("schedule_presentations"),
+            selected_profile,
+        ),
         "physical_active": physical_active if isinstance(physical_active, bool) else None,
         "origin": origin if isinstance(origin, str) else None,
         "evidence": evidence if isinstance(evidence, str) else None,
@@ -370,6 +399,21 @@ def persisted_shared_loadpoint_diagnostics(hass: Any, config_entry: Any) -> dict
     )
     _lease_id, ownership = get_ev_ownership(hass, config_entry, binding_id) if binding_id else (None, None)
     last_command = get_ev_last_commands(hass, config_entry).get(binding_id) if binding_id else None
+    schedule_presentations: dict[str, dict[str, Any]] = {}
+    try:
+        from .ev_charging_planner import get_auto_schedule_executor
+
+        executor = get_auto_schedule_executor()
+        if (
+            executor is not None
+            and getattr(getattr(executor, "config_entry", None), "entry_id", None)
+            == getattr(config_entry, "entry_id", None)
+        ):
+            schedule_presentations = executor.get_logical_schedule_presentations()
+    except Exception:
+        # Diagnostics remain available when planner startup or presentation
+        # projection is unavailable; this must never affect control paths.
+        schedule_presentations = {}
     return project_shared_loadpoint_diagnostics({
         "binding_id": binding_id,
         "selected_profile_id": selected_profile_id,
@@ -389,6 +433,7 @@ def persisted_shared_loadpoint_diagnostics(hass: Any, config_entry: Any) -> dict
         ),
         "last_session": _last_profile_session(selected_profile_id)
         if selected_profile_id else None,
+        "schedule_presentations": schedule_presentations,
         "external_control_policy": (
             get_external_control_policy(hass, config_entry, selected_profile_id)
             if selected_profile_id is not None

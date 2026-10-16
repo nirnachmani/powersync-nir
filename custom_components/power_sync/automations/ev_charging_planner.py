@@ -72,6 +72,7 @@ from .ev_vehicle_capacity import (
     vehicle_ids_match,
 )
 from .external_session_reconciler import reconcile_shared_external_session
+from .shared_schedule_presentation import logical_schedule_snapshot
 
 
 class SensitiveDataFilter(logging.Filter):
@@ -5414,6 +5415,37 @@ class AutoScheduleExecutor:
             states[vehicle_id] = state_data
 
         return states
+
+    def get_logical_schedule_presentations(
+        self,
+        now: datetime | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Return advisory plan snapshots for each configured shared profile.
+
+        This reads only the configured selector and cached executor state.  It
+        deliberately does not inspect a charger, mutate schedule state, or
+        participate in command/lease/ownership arbitration.
+        """
+        from .shared_loadpoint import (
+            PROFILE_A_ID,
+            PROFILE_B_ID,
+            binding_for_entry,
+            resolve_active_shared_profile,
+        )
+
+        if binding_for_entry(self.config_entry) is None:
+            return {}
+        presentation_now = now or dt_util.now() or datetime.now(timezone.utc)
+        selected_profile_id = resolve_active_shared_profile(self.hass, self.config_entry)
+        return {
+            profile_id: logical_schedule_snapshot(
+                profile_id=profile_id,
+                selected_profile_id=selected_profile_id,
+                state=self._state.get(profile_id),
+                now=presentation_now,
+            )
+            for profile_id in (PROFILE_A_ID, PROFILE_B_ID)
+        }
 
     async def _cache_vehicle_soc(self, vehicle_id: str, soc: int) -> None:
         """Cache the vehicle SoC for use when vehicle is asleep.

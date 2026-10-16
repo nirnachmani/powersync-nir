@@ -49,6 +49,36 @@ def test_generic_external_override_without_allowed_decision_projects_stop():
     assert result["selected_profile"] == {"id": "shared_ev_profile_a", "name": "Tank"}
 
 
+def test_selected_schedule_presentation_is_additive_and_hides_sibling_data():
+    result = module.project_shared_loadpoint_diagnostics(
+        _snapshot(
+            schedule_presentations={
+                "shared_ev_profile_a": {
+                    "state": "next",
+                    "window_start": "2026-10-10T05:00:00+00:00",
+                    "window_end": "2026-10-10T06:00:00+00:00",
+                    "source": "Smart Schedule (solar)",
+                    "plan_updated_at": NOW.isoformat(),
+                    "plan_snapshot_id": "a-plan",
+                },
+                "shared_ev_profile_b": {
+                    "state": "active",
+                    "window_start": "must-not-appear",
+                },
+            }
+        )
+    )
+
+    assert result["schedule_presentation"] == {
+        "state": "next",
+        "window_start": "2026-10-10T05:00:00+00:00",
+        "window_end": "2026-10-10T06:00:00+00:00",
+        "source": "Smart Schedule (solar)",
+        "plan_updated_at": NOW.isoformat(),
+        "plan_snapshot_id": "a-plan",
+    }
+
+
 def test_evac_external_yield_projects_allow_without_control_side_effects():
     result = module.project_shared_loadpoint_diagnostics(
         _snapshot(binding_id="sigenergy_charger", external_control_policy="yield")

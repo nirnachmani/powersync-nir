@@ -44,6 +44,7 @@ focused_tests=(
     tests/test_shared_loadpoint_action_guard.py
     tests/test_shared_loadpoint_cycle_context.py
     tests/test_shared_loadpoint_diagnostics.py
+    tests/test_shared_schedule_presentation.py
     tests/test_external_session_reconciler.py
     tests/test_android_app_contract.py
     tests/test_android_app_multi_vehicle_contract.py
