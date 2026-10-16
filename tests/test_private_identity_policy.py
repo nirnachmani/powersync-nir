@@ -149,3 +149,9 @@ def test_private_maintainer_guidance_permanently_rejects_optimizer_paywall_impor
         "docs/private-fork/powersync-private-updates-reference.md",
     ):
         _assert_no_paywall_maintenance_policy(_read(relative_path))
+
+
+def test_default_private_gate_runs_identity_policy_contract():
+    runner = _read("scripts/private-fork/run_private_tests.sh")
+
+    assert "tests/test_private_identity_policy.py" in runner

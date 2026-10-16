@@ -9,6 +9,7 @@ operations are used.
 from __future__ import annotations
 
 import argparse
+import ast
 from pathlib import Path
 import re
 from typing import Iterable
@@ -39,10 +40,6 @@ NO_PAYWALL_SOURCE_PATTERNS = (
     ),
     (re.compile(r"\bsubscription_required\b"), "subscription-required guard"),
     (re.compile(r"\bLicensedBatteryController\b"), "LicensedBatteryController reference"),
-    (
-        re.compile(r"\bfrom\s+(?:\.+)?(?:power_sync\.)?licensing\b|\bimport\s+(?:power_sync\.)?licensing\b"),
-        "licensing import",
-    ),
 )
 
 
@@ -60,6 +57,24 @@ def _require_all(source: str, relative_path: Path, markers: Iterable[str], issue
         issues.append(f"{relative_path}: missing {label}")
 
 
+def _has_licensing_import(source: str) -> bool:
+    """Return whether parsed Python imports any licensing module or symbol."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any("licensing" in imported.name.split(".") for imported in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            module_parts = (node.module or "").split(".")
+            if "licensing" in module_parts or any(imported.name == "licensing" for imported in node.names):
+                return True
+    return False
+
+
 def _reject_no_paywall_artifacts(root: Path, issues: list[str]) -> None:
     """Reject only concrete upstream optimizer-licensing artifacts."""
     licensing_root = root / LICENSING
@@ -75,6 +90,8 @@ def _reject_no_paywall_artifacts(root: Path, issues: list[str]) -> None:
         for pattern, label in NO_PAYWALL_SOURCE_PATTERNS:
             if pattern.search(source):
                 issues.append(f"{relative_path}: forbidden {label}")
+        if _has_licensing_import(source):
+            issues.append(f"{relative_path}: forbidden licensing import")
 
 
 def validate_repository(root: Path) -> list[str]:

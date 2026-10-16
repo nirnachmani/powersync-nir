@@ -130,6 +130,10 @@ def test_validator_rejects_no_paywall_paths_and_exact_optimizer_artifacts(tmp_pa
         ("custom_components/power_sync/optimization/battery_controller.py", "controller = LicensedBatteryController()\n", "LicensedBatteryController"),
         ("custom_components/power_sync/optimization/battery_controller.py", "from power_sync.licensing import LicensedBatteryController\n", "licensing import"),
         ("custom_components/power_sync/optimization/battery_controller.py", "from ..licensing import OptimizerAccess\n", "licensing import"),
+        ("custom_components/power_sync/optimization/battery_controller.py", "from .. import licensing\n", "licensing import"),
+        ("custom_components/power_sync/optimization/battery_controller.py", "from custom_components.power_sync.licensing import OptimizerAccess\n", "licensing import"),
+        ("custom_components/power_sync/optimization/battery_controller.py", "import custom_components.power_sync.licensing\n", "licensing import"),
+        ("custom_components/power_sync/optimization/battery_controller.py", "import custom_components.power_sync.licensing as power_sync_licensing\n", "licensing import"),
     )
 
     for relative_path, content, expected in cases:
@@ -137,6 +141,17 @@ def test_validator_rejects_no_paywall_paths_and_exact_optimizer_artifacts(tmp_pa
         _write_fixture(tmp_path, relative_path, content)
 
         assert any(expected in issue for issue in validator.validate_repository(tmp_path))
+
+
+def test_validator_does_not_treat_licensing_import_text_as_an_import(tmp_path):
+    _valid_fixture(tmp_path)
+    _write_fixture(
+        tmp_path,
+        "custom_components/power_sync/optimization/battery_controller.py",
+        'example = "from custom_components.power_sync.licensing import OptimizerAccess"\n',
+    )
+
+    assert validator.validate_repository(tmp_path) == []
 
 
 def test_validator_allows_unrelated_provider_authentication_and_pairing(tmp_path):
