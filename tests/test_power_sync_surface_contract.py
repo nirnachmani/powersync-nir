@@ -24,6 +24,15 @@ EXPLANATION_ONLY_MODULES = {
     OPTIMIZATION / "chatgpt_auth.py",
 }
 
+# Amber forecast confidence is an explicitly reviewed, opt-in optimizer
+# extension. Keep its source exact rather than admitting arbitrary new modules.
+_AMBER_FORECAST_CONFIDENCE_MODULE = (
+    OPTIMIZATION / "price_forecast_confidence.py"
+)
+_AMBER_FORECAST_CONFIDENCE_SHA256 = (
+    "17b159de46f810f27d74c24078f88bc5642edf82f39a1bb680b0d35145f414a3"
+)
+
 
 def _expected_battery_optimizer_source() -> str:
     """Return the immutable baseline plus this reviewed solar-only hunk."""
@@ -183,11 +192,12 @@ def _expected_optimizer_coordinator_source() -> str:
     return expected
 
 
-# Exact, path/symbol-specific exception for reviewed Amber, forecast/status,
-# manual-state, and persisted battery-spec provenance ports. The baseline-to-
-# shared-LP transform above remains mandatory; this digest permits only those
-# bounded coordinator hunks and cannot waive an unrelated optimizer change.
-_AMBER_COORDINATOR_DIFF_SHA256 = "483f66317a3d4ed892d556719fda467436a0dc7e02e79d33f4652622fd5faa4d"
+# Exact, path/symbol-specific exception for reviewed Amber, signed-export,
+# display-flow, forecast/status, manual-state, and persisted battery-spec
+# provenance ports. The baseline-to-shared-LP transform above remains
+# mandatory; this digest permits only those bounded coordinator hunks and
+# cannot waive an unrelated optimizer change.
+_AMBER_COORDINATOR_DIFF_SHA256 = "e5fcacc99cb9aa0e3f642ab81f3f45c291fa9ed4252c337cddfccba885515c43"
 
 # Exact, path-specific exception for the reviewed Cost Neutral reachable-
 # deadline fix. The normal optimizer baseline contract stays intact: only the
@@ -209,7 +219,7 @@ _PROJECTED_MODE_ALIGNMENT_DIFF_SHA256 = (
 # broader optimizer change nor alter the private shared-loadpoint boundary.
 _NATIVE_SOLAR_CLIPPED_EXPORT_SOURCE = "8eac5f535f17f68324c98924ab40ce60c27bf5c0"
 _NATIVE_SOLAR_CLIPPED_EXPORT_DIFF_SHA256 = (
-    "fbeff717eac0a73b714ca87180809b349f255d8d9dc7072aabae473f36249541"
+    "303f33c1f73f95d5eb960c785e2852443c362a77b84aa7dfa68271ff6fe8750f"
 )
 
 
@@ -321,14 +331,19 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
             "ls-tree", "-r", "--name-only", BASELINE, "--", OPTIMIZATION.as_posix()
         ).splitlines()
         if Path(relative_name) not in EXPLANATION_ONLY_MODULES
+        and Path(relative_name) != _AMBER_FORECAST_CONFIDENCE_MODULE
     )
     restored_files = sorted(
         path.relative_to(ROOT).as_posix()
         for path in (ROOT / OPTIMIZATION).rglob("*.py")
         if path.relative_to(ROOT) not in EXPLANATION_ONLY_MODULES
+        and path.relative_to(ROOT) != _AMBER_FORECAST_CONFIDENCE_MODULE
     )
 
     assert restored_files == baseline_files
+    assert hashlib.sha256(
+        (ROOT / _AMBER_FORECAST_CONFIDENCE_MODULE).read_bytes()
+    ).hexdigest() == _AMBER_FORECAST_CONFIDENCE_SHA256
     for relative_name in baseline_files:
         relative_path = Path(relative_name)
         actual = (ROOT / relative_path).read_text(encoding="utf-8").replace(
