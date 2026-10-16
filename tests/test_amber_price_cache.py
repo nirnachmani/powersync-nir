@@ -96,6 +96,7 @@ _ps.__path__ = [str(ROOT)]
 sys.modules["power_sync"] = _ps
 
 coordinator = importlib.import_module("power_sync.coordinator")
+tariff_converter = importlib.import_module("power_sync.tariff_converter")
 
 
 class _FakeHass:
@@ -187,6 +188,37 @@ def _forecast_30min():
             "duration": 30,
         }
     ]
+
+
+def test_current_interval_rejects_expired_cached_price_and_uses_live_pair():
+    """Only a live five-minute CurrentInterval can populate the active TOU slot."""
+    now = datetime(2026, 5, 1, 11, 31, tzinfo=timezone.utc)
+    stale = [
+        {
+            "channelType": channel,
+            "type": "CurrentInterval",
+            "nemTime": "2026-05-01T11:30:00+00:00",
+            "perKwh": price,
+            "duration": 5,
+        }
+        for channel, price in (("general", 62.0), ("feedIn", -47.0))
+    ]
+    fresh = [
+        {
+            "channelType": channel,
+            "type": "CurrentInterval",
+            "nemTime": "2026-05-01T11:35:00+00:00",
+            "perKwh": price,
+            "duration": 5,
+        }
+        for channel, price in (("general", 25.6), ("feedIn", -13.2))
+    ]
+
+    assert tariff_converter.extract_current_price_interval(stale, now=now) is None
+    assert tariff_converter.extract_current_price_interval(fresh, now=now) == {
+        "general": fresh[0],
+        "feedIn": fresh[1],
+    }
 
 
 def test_amber_extended_forecast_cache_reduces_rest_calls(monkeypatch):

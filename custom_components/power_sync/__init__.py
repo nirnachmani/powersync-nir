@@ -26498,7 +26498,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         from .tariff_converter import (
             convert_amber_to_tesla_tariff,
             convert_custom_tariff_to_tesla_tariff,
-            extract_most_recent_actual_interval,
+            extract_current_price_interval,
             compare_forecast_types,
             detect_price_spikes,
             format_spike_alert_time,
@@ -26691,9 +26691,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await amber_coordinator.async_request_refresh()
 
             if amber_coordinator.data:
-                # Extract most recent CurrentInterval/ActualInterval from 5-min forecast data
-                forecast_5min = amber_coordinator.data.get("forecast_5min", [])
-                current_actual_interval = extract_most_recent_actual_interval(forecast_5min)
+                # The separately cached five-minute forecast may be stale at a
+                # tariff boundary; only the refreshed endpoint is authoritative.
+                current_prices = amber_coordinator.data.get("current", [])
+                current_actual_interval = extract_current_price_interval(current_prices)
 
                 if current_actual_interval:
                     general_price = current_actual_interval.get('general', {}).get('perKwh') if current_actual_interval.get('general') else None
