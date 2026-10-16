@@ -4845,6 +4845,132 @@ def test_generic_cloud_start_settles_delayed_readback_safely(monkeypatch, readba
         ]
 
 
+@pytest.mark.parametrize("authority_change", ("selector", "lease"))
+def test_delayed_shared_generic_ack_after_authority_transfer_never_cleans_up(
+    monkeypatch, authority_change
+):
+    """A late physical acknowledgement cannot turn off the new shared owner."""
+    now = datetime.now(timezone.utc) - timedelta(minutes=1)
+    selector = _State("sensor.connected_vehicle", "tank")
+    status = _State("sensor.garage_ev_status", "Preparing", last_updated=now)
+    hass = _Hass([
+        selector,
+        _State("switch.garage_ev", "off"),
+        status,
+        _State("number.garage_ev_current", "8", {"min": 6, "max": 32}),
+    ])
+    entry = _Entry()
+    entry.options = {
+        "generic_charger_enabled": True,
+        "shared_loadpoint_connected_vehicle_entity": selector.entity_id,
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Tesla",
+        "shared_loadpoint_profile_b_state": "tesla",
+    }
+
+    async def delayed_ack(*_args, **_kwargs):
+        if authority_change == "selector":
+            selector.state = "tesla"
+        else:
+            from power_sync.automations.ev_ownership import claim_ev_ownership
+            claim_ev_ownership(
+                hass,
+                entry,
+                "generic_ev",
+                owner_mode="scheduled",
+                extra={"active_profile_id": "shared_ev_profile_b"},
+            )
+        status.state = "Charging"
+        status.last_reported = datetime.now(timezone.utc)
+        return True, "sensor.garage_ev_status=charging"
+
+    monkeypatch.setattr(actions, "_wait_for_generic_physical_start", delayed_ack)
+
+    assert asyncio.run(actions._action_start_ev_charging_dynamic(
+        hass,
+        entry,
+        {
+            "vehicle_id": "shared_ev_profile_a",
+            "logical_vehicle_id": "shared_ev_profile_a",
+            "owner_mode": "scheduled",
+            "dynamic_mode": "battery_target",
+            "charger_type": "generic",
+            "charger_switch_entity": "switch.garage_ev",
+            "charger_amps_entity": "number.garage_ev_current",
+            "charger_status_entity": status.entity_id,
+            "require_physical_start_confirmation": True,
+        },
+    )) is False
+
+    assert [call[1] for call in hass.services.calls] == ["set_value", "turn_on"]
+    assert not any(call[1] == "turn_off" for call in hass.services.calls)
+    assert actions._dynamic_ev_state == {}
+
+
+@pytest.mark.parametrize("pending_change", ("cancel", "replace"))
+def test_delayed_shared_generic_ack_with_invalidated_pending_start_never_cleans_up(
+    monkeypatch, pending_change
+):
+    """Cancellation and replacement invalidate a late acknowledgement before I/O."""
+    now = datetime.now(timezone.utc) - timedelta(minutes=1)
+    status = _State("sensor.garage_ev_status", "Preparing", last_updated=now)
+    hass = _Hass([
+        _State("sensor.connected_vehicle", "tank"),
+        _State("switch.garage_ev", "off"),
+        status,
+        _State("number.garage_ev_current", "8", {"min": 6, "max": 32}),
+    ])
+    entry = _Entry()
+    entry.options = {
+        "generic_charger_enabled": True,
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Tesla",
+        "shared_loadpoint_profile_b_state": "tesla",
+    }
+    replacement = {"cancelled": False}
+
+    async def delayed_ack(*_args, **_kwargs):
+        pending = hass.data["power_sync"][entry.entry_id]["_pending_generic_ev_starts"]
+        if pending_change == "cancel":
+            await actions._action_stop_ev_charging_dynamic(
+                hass, entry, {"vehicle_id": "shared_ev_profile_a", "charger_type": "generic"}
+            )
+        else:
+            pending["generic_ev"] = replacement
+        status.state = "Charging"
+        status.last_reported = datetime.now(timezone.utc)
+        return True, "sensor.garage_ev_status=charging"
+
+    monkeypatch.setattr(actions, "_wait_for_generic_physical_start", delayed_ack)
+
+    assert asyncio.run(actions._action_start_ev_charging_dynamic(
+        hass,
+        entry,
+        {
+            "vehicle_id": "shared_ev_profile_a",
+            "logical_vehicle_id": "shared_ev_profile_a",
+            "owner_mode": "scheduled",
+            "dynamic_mode": "battery_target",
+            "charger_type": "generic",
+            "charger_switch_entity": "switch.garage_ev",
+            "charger_amps_entity": "number.garage_ev_current",
+            "charger_status_entity": status.entity_id,
+            "require_physical_start_confirmation": True,
+        },
+    )) is False
+
+    assert [call[1] for call in hass.services.calls] == ["set_value", "turn_on"]
+    assert not any(call[1] == "turn_off" for call in hass.services.calls)
+    pending = hass.data["power_sync"][entry.entry_id].get("_pending_generic_ev_starts", {})
+    if pending_change == "cancel":
+        assert pending == {}
+    else:
+        assert pending == {"generic_ev": replacement}
+
+
 def test_generic_setup_telemetry_cannot_confirm_later_switch_start():
     now = datetime.now(timezone.utc) - timedelta(minutes=1)
     power = _State("sensor.garage_ev_power", "0",

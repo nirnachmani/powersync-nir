@@ -14783,7 +14783,11 @@ async def _action_start_ev_charging_dynamic_locked(
                     hass, config_entry, vehicle_id, start_amps, start_params
                 )
             finally:
-                if pending_starts is not None:
+                if (
+                    pending_starts is not None
+                    and pending_starts.get(vehicle_id)
+                    is start_params.get("_generic_pending_start")
+                ):
                     pending_starts.pop(vehicle_id, None)
             if start_success:
                 start_amps = _phase_applied_amps(start_params, start_amps)
