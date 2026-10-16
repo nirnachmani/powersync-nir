@@ -628,6 +628,50 @@ def extract_most_recent_actual_interval(
     return None
 
 
+def extract_current_price_interval(
+    price_data: list[dict[str, Any]],
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Return currently covering Amber CurrentInterval values by channel."""
+    if not price_data:
+        return None
+
+    reference_now = now or dt_util.now()
+    candidates: dict[tuple[datetime, float], dict[str, Any]] = {}
+    for interval in price_data:
+        if not isinstance(interval, dict) or interval.get("type") != "CurrentInterval":
+            continue
+        channel = interval.get("channelType")
+        if channel not in ("general", "feedIn"):
+            continue
+        try:
+            duration_minutes = float(interval.get("duration", 0))
+            interval_end = datetime.fromisoformat(
+                str(interval.get("nemTime", "")).replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError):
+            continue
+        if duration_minutes != 5:
+            continue
+        compare_now = reference_now
+        if interval_end.tzinfo is None and compare_now.tzinfo is not None:
+            interval_end = interval_end.replace(tzinfo=compare_now.tzinfo)
+        elif interval_end.tzinfo is not None and compare_now.tzinfo is None:
+            compare_now = compare_now.replace(tzinfo=interval_end.tzinfo)
+        elif interval_end.tzinfo is not None and compare_now.tzinfo is not None:
+            compare_now = compare_now.astimezone(interval_end.tzinfo)
+        if not interval_end - timedelta(minutes=duration_minutes) <= compare_now < interval_end:
+            continue
+        candidates.setdefault((interval_end, duration_minutes), {})[channel] = interval
+
+    if not candidates:
+        _LOGGER.warning("No currently covering Amber CurrentInterval found")
+        return None
+    _, channels = max(candidates.items(), key=lambda item: item[0][0])
+    result = {"general": channels.get("general"), "feedIn": channels.get("feedIn")}
+    return result if result["general"] or result["feedIn"] else None
+
+
 def compare_forecast_types(
     forecast_data: list[dict[str, Any]],
     threshold: float = 10.0,
