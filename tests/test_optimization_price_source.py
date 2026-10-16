@@ -790,6 +790,77 @@ def _dynamic_price_entry(
     return entry
 
 
+@pytest.mark.parametrize("spike_status", ["spike", "potential"])
+def test_amber_fresh_spike_interval_excludes_automatic_grid_charge_but_not_solar(
+    opt_module,
+    spike_status,
+):
+    """Amber spike flags are an automatic-grid-charge gate, not a price rewrite."""
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._entry = SimpleNamespace(
+        data={},
+        options={
+            "electricity_provider": "amber",
+            "spike_protection_enabled": True,
+        },
+    )
+    now = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    timestamps = [now + timedelta(minutes=5 * index) for index in range(6)]
+    general = [
+        {
+            "channelType": "general",
+            "type": "CurrentInterval",
+            "spikeStatus": spike_status,
+            "valid_from": now.isoformat(),
+            "valid_to": (now + timedelta(minutes=30)).isoformat(),
+        }
+    ]
+
+    protected = coordinator._amber_spike_grid_charge_mask(
+        timestamps,
+        general,
+    )
+
+    assert protected == [True] * 6
+    assert [allowed and not blocked for allowed, blocked in zip([True] * 6, protected)] == [False] * 6
+    # Solar charging remains governed by the independent battery charge mask.
+    assert [not blocked for blocked in [False] * 6] == [True] * 6
+
+
+def test_amber_spike_grid_charge_mask_is_noop_when_disabled_or_not_amber(opt_module):
+    now = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    timestamps = [now]
+    general = [{"spikeStatus": "spike", "valid_from": now.isoformat(), "valid_to": (now + timedelta(minutes=5)).isoformat()}]
+    for provider, enabled in (("amber", False), ("octopus", True)):
+        coordinator = object.__new__(opt_module.OptimizationCoordinator)
+        coordinator._entry = SimpleNamespace(
+            data={},
+            options={"electricity_provider": provider, "spike_protection_enabled": enabled},
+        )
+        assert coordinator._amber_spike_grid_charge_mask(timestamps, general) == [False]
+
+
+def test_amber_spike_status_preserves_actual_import_price(opt_module):
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    forecast = [
+        _dynamic_price_entry(
+            start,
+            900.0,
+            "general",
+            advanced_price={"predicted": 900.0},
+        ),
+        _dynamic_price_entry(start, 20.0, "feedIn"),
+    ]
+    forecast[0]["spikeStatus"] = "spike"
+    coordinator = _coordinator_with_dynamic_price_provider(opt_module, "amber", forecast)
+    coordinator._entry.options["spike_protection_enabled"] = True
+
+    import_prices, _ = asyncio.run(coordinator._get_price_forecast())
+
+    assert import_prices == pytest.approx([9.0] * 12)
+    assert coordinator._last_display_import_prices == pytest.approx([9.0] * 6)
+
+
 def test_ev_integration_defaults_to_initial_config_data(opt_module):
     entry = SimpleNamespace(
         data={"optimization_ev_integration": True},
