@@ -16,6 +16,65 @@ BASELINE = "v2.12.1363"
 BASELINE_COMMIT = "85f99ea62a174cd9153d5ff2ce71023dda2c9a5c"
 OPTIMIZATION = Path("custom_components/power_sync/optimization")
 COORDINATOR = OPTIMIZATION / "coordinator.py"
+BATTERY_OPTIMIZER = OPTIMIZATION / "battery_optimizer.py"
+
+
+def _expected_battery_optimizer_source() -> str:
+    """Return the immutable baseline plus this reviewed solar-only hunk."""
+    baseline = _git_show(BASELINE_COMMIT, BATTERY_OPTIMIZER)
+    expected = baseline.replace(
+        '''            Known-free stored energy can make a lower-FIT export slot
+            profitable without making grid-import-to-export passthrough safe.
+            Preserve that distinction while allowing forecast solar to refill
+            the battery for a later premium export window.
+            """
+            return (
+                p_mode[t] in (None, "self_use")
+                and not p_block_charge[t]
+                and not _priority_export_slot(t)
+                and getattr(self, "_acquisition_cost_known_zero", False)
+                and _profitable_export_slot(t)
+                and p_price_valid_slots[t]
+                and not future_self_consumption_values[t]
+                and p_solar[t] > p_load[t] + 1e-9
+            )
+''',
+        '''            Known-free or already-profitable stored energy can make a
+            lower-FIT export slot profitable without making
+            grid-import-to-export passthrough safe. Preserve that distinction
+            while allowing forecast solar to refill the battery for a later
+            premium export window.
+            """
+            return (
+                p_mode[t] in (None, "self_use")
+                and not p_block_charge[t]
+                and not _priority_export_slot(t)
+                and (
+                    getattr(self, "_acquisition_cost_known_zero", False)
+                    or (
+                        acquisition_cost_kwh > 0
+                        and any(
+                            p_allow_export[future]
+                            and (
+                                _priority_export_slot(future)
+                                or p_export[future] + p_export_bonus[future]
+                                > p_import[future] + 1e-9
+                            )
+                            for future in range(t + 1, p_n)
+                        )
+                    )
+                )
+                and _profitable_export_slot(t)
+                and p_export[t] + p_export_bonus[t] < p_import[t] - 1e-9
+                and p_price_valid_slots[t]
+                and not future_self_consumption_values[t]
+                and p_solar[t] > p_load[t] + 1e-9
+            )
+''',
+        1,
+    )
+    assert expected != baseline
+    return expected
 
 
 def _expected_optimizer_coordinator_source() -> str:
@@ -190,6 +249,8 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
         expected = (
             _expected_optimizer_coordinator_source()
             if relative_path == COORDINATOR
+            else _expected_battery_optimizer_source()
+            if relative_path == BATTERY_OPTIMIZER
             else _git_show(BASELINE_COMMIT, relative_path)
         )
         if relative_path == COORDINATOR:
@@ -211,6 +272,21 @@ def test_amber_optimizer_allowlist_rejects_an_unreviewed_coordinator_change():
             "return protected\n        # unreviewed optimizer change\n\n    def _provider_priced_reference_prices",
             1,
         ),
+    )
+
+
+def test_solar_only_refill_allowlist_rejects_a_nearby_predicate_mutation():
+    """The solar-refill exception is an exact reviewed source variant."""
+    expected = _expected_battery_optimizer_source()
+    actual = (ROOT / BATTERY_OPTIMIZER).read_text(encoding="utf-8").replace(
+        "\r\n", "\n"
+    )
+
+    assert actual == expected
+    assert actual != expected.replace(
+        "acquisition_cost_kwh > 0",
+        "acquisition_cost_kwh >= 0",
+        1,
     )
 
 
