@@ -103,17 +103,24 @@ def _foxess_wrapper_method_node():
     )
 
 
-def _foxess_runtime(*, outcome="true"):
-    """Load the real private-domain service branch with a fake transport."""
+def _foxess_runtime(*, outcome="true", coordinator=True, curtailment=False):
+    """Load the real service branch and wrapper with a fake transport boundary."""
     restore_calls = []
+    state = {"outcome": outcome}
 
     async def restore_normal():
         restore_calls.append(True)
-        if outcome == "exception":
+        if state["outcome"] == "exception":
             raise TimeoutError("simulated Modbus timeout")
-        return outcome == "true"
+        return state["outcome"] == "true"
 
-    entry_data = {"foxess_coordinator": SimpleNamespace(restore_normal=restore_normal)}
+    entry_data = {}
+    if coordinator:
+        entry_data["foxess_coordinator"] = SimpleNamespace(
+            restore_normal=restore_normal
+        )
+    if curtailment:
+        entry_data["foxess_curtailment_state"] = "curtailed"
     service_hass = SimpleNamespace(data={"power_sync": {"entry": entry_data}})
     handler = _load_ast_node(
         _foxess_service_handler_node(),
@@ -128,6 +135,7 @@ def _foxess_runtime(*, outcome="true"):
         },
         _INIT_PATH,
     )
+
     service_calls = []
 
     async def async_call(domain, service, data, blocking):
@@ -142,7 +150,17 @@ def _foxess_runtime(*, outcome="true"):
         {"_LOGGER": logging.getLogger(__name__)},
         _BATTERY_CONTROLLER_PATH,
     )
-    return wrapper, wrapper_self, restore_calls, service_calls
+
+    async def set_self_consumption_mode():
+        return await wrapper(wrapper_self)
+
+    return (
+        SimpleNamespace(set_self_consumption_mode=set_self_consumption_mode),
+        entry_data,
+        restore_calls,
+        service_calls,
+        state,
+    )
 
 
 @pytest.fixture()
@@ -329,17 +347,65 @@ def test_successful_self_consumption_restore_advances_marker(opt_module):
     asyncio.run(_run())
 
 
-@pytest.mark.parametrize("outcome", ["false", "exception"])
-def test_foxess_restore_failure_returns_false_from_private_service_wrapper(outcome):
-    """An unconfirmed FoxESS restore must reach the optimizer retry boundary."""
+@pytest.mark.parametrize("failure", ["false", "exception"])
+def test_foxess_service_failure_reaches_optimizer_retry(opt_module, failure):
+    """A FoxESS restore failure must cross service and wrapper boundaries."""
     async def _run():
-        wrapper, wrapper_self, restore_calls, service_calls = _foxess_runtime(
-            outcome=outcome
+        battery, _entry_data, restore_calls, service_calls, state = _foxess_runtime(
+            outcome=failure
         )
+        coordinator = _execute_coordinator(opt_module, battery)
+        coordinator.battery_system = "foxess"
 
-        assert await wrapper(wrapper_self) is False
+        await coordinator._execute_optimizer_action(_self_consumption_action())
         assert len(service_calls) == 1
         assert len(restore_calls) == 1
+        assert coordinator._last_executed_action == "charge"
+
+        state["outcome"] = "true"
+        await coordinator._execute_optimizer_action(_self_consumption_action())
+        assert len(service_calls) == 2
+        assert len(restore_calls) == 2
+        assert coordinator._last_executed_action == "self_consumption"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("outcome", ["false", "exception"])
+def test_foxess_service_failure_returns_false_from_wrapper(outcome):
+    """The wrapper must not acknowledge an unconfirmed FoxESS restore."""
+    async def _run():
+        battery, _entry_data, restore_calls, service_calls, _state = _foxess_runtime(
+            outcome=outcome
+        )
+        assert await battery.set_self_consumption_mode() is False
+        assert len(service_calls) == 1
+        assert len(restore_calls) == 1
+
+    asyncio.run(_run())
+
+
+def test_foxess_missing_coordinator_is_not_acknowledged():
+    async def _run():
+        battery, _entry_data, restore_calls, service_calls, _state = _foxess_runtime(
+            coordinator=False
+        )
+        assert await battery.set_self_consumption_mode() is False
+        assert len(service_calls) == 1
+        assert restore_calls == []
+
+    asyncio.run(_run())
+
+
+def test_foxess_optimizer_curtailment_ownership_blocks_restore():
+    """Optimizer-owned curtailment remains an explicit no-write boundary."""
+    async def _run():
+        battery, _entry_data, restore_calls, service_calls, _state = _foxess_runtime(
+            curtailment=True
+        )
+        assert await battery.set_self_consumption_mode() is True
+        assert len(service_calls) == 1
+        assert restore_calls == []
 
     asyncio.run(_run())
 
