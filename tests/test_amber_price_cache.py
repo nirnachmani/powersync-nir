@@ -190,35 +190,102 @@ def _forecast_30min():
     ]
 
 
-def test_current_interval_rejects_expired_cached_price_and_uses_live_pair():
-    """Only a live five-minute CurrentInterval can populate the active TOU slot."""
-    now = datetime(2026, 5, 1, 11, 31, tzinfo=timezone.utc)
-    stale = [
+def _current_interval(nem_time: str, buy: float, sell: float):
+    return [
         {
-            "channelType": channel,
+            "channelType": "general",
             "type": "CurrentInterval",
-            "nemTime": "2026-05-01T11:30:00+00:00",
-            "perKwh": price,
+            "nemTime": nem_time,
+            "perKwh": buy,
             "duration": 5,
-        }
-        for channel, price in (("general", 62.0), ("feedIn", -47.0))
-    ]
-    fresh = [
+        },
         {
-            "channelType": channel,
+            "channelType": "feedIn",
             "type": "CurrentInterval",
-            "nemTime": "2026-05-01T11:35:00+00:00",
-            "perKwh": price,
+            "nemTime": nem_time,
+            "perKwh": sell,
             "duration": 5,
-        }
-        for channel, price in (("general", 25.6), ("feedIn", -13.2))
+        },
     ]
 
-    assert tariff_converter.extract_current_price_interval(stale, now=now) is None
-    assert tariff_converter.extract_current_price_interval(fresh, now=now) == {
-        "general": fresh[0],
-        "feedIn": fresh[1],
-    }
+
+def _full_30min_forecast():
+    start = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    forecast = []
+    for slot in range(48):
+        interval_end = start + timedelta(minutes=(slot + 1) * 30)
+        for channel, price in (("general", 26.0), ("feedIn", -13.0)):
+            forecast.append({
+                "channelType": channel,
+                "type": "ForecastInterval",
+                "nemTime": interval_end.isoformat(),
+                "perKwh": price,
+                "duration": 30,
+                "advancedPrice": {"predicted": price},
+            })
+    return forecast
+
+
+def test_amber_tou_uses_refreshed_current_after_cached_boundary(monkeypatch):
+    """A cached five-minute interval must not become the new TOU period."""
+    clock = {"now": datetime(2026, 5, 1, 11, 29, 50, tzinfo=timezone.utc)}
+    old_current = _current_interval("2026-05-01T11:30:00+00:00", 62.0, -47.0)
+    fresh_current = _current_interval("2026-05-01T11:35:00+00:00", 25.6, -13.2)
+    refresh_count = {"current": 0}
+
+    async def fake_fetch(session, url, headers, **kwargs):
+        params = kwargs.get("params")
+        if params is None:
+            refresh_count["current"] += 1
+            return old_current if refresh_count["current"] == 1 else fresh_current
+        if params == {"resolution": 5}:
+            return old_current
+        if params == {"next": 288, "resolution": 30}:
+            return _forecast_30min()
+        raise AssertionError(f"unexpected Amber request params: {params}")
+
+    monkeypatch.setattr(coordinator.dt_util, "utcnow", lambda: clock["now"])
+    monkeypatch.setattr(tariff_converter.dt_util, "now", lambda: clock["now"])
+    monkeypatch.setattr(coordinator, "_fetch_with_retry", fake_fetch)
+
+    amber = coordinator.AmberPriceCoordinator(_FakeHass(), "token", site_id="site-1")
+    asyncio.run(amber._async_update_data())
+
+    clock["now"] = datetime(2026, 5, 1, 11, 31, tzinfo=timezone.utc)
+    result = asyncio.run(amber._async_update_data())
+
+    assert result["forecast_5min"] == old_current
+    assert tariff_converter.extract_current_price_interval(
+        result["forecast_5min"], now=clock["now"]
+    ) is None
+    selected = tariff_converter.extract_current_price_interval(
+        result["current"], now=clock["now"]
+    )
+    assert selected["general"]["perKwh"] == 25.6
+    assert selected["feedIn"]["perKwh"] == -13.2
+
+    real_datetime = tariff_converter.datetime
+
+    class FixedDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            current = real_datetime(2026, 5, 1, 11, 31, tzinfo=timezone.utc)
+            return current.astimezone(tz) if tz else current
+
+    monkeypatch.setattr(tariff_converter, "datetime", FixedDatetime)
+    tariff = tariff_converter.convert_amber_to_tesla_tariff(
+        _full_30min_forecast(),
+        tesla_energy_site_id="none",
+        powerwall_timezone="UTC",
+        current_actual_interval=selected,
+        electricity_provider="amber",
+    )
+    buy_rates = tariff["energy_charges"]["Summer"]["rates"]
+    sell_rates = tariff["sell_tariff"]["energy_charges"]["Summer"]["rates"]
+    assert buy_rates["PERIOD_11_30"] == 0.256
+    assert sell_rates["PERIOD_11_30"] == 0.132
+    assert buy_rates["PERIOD_11_30"] != 0.62
+    assert sell_rates["PERIOD_11_30"] != 0.47
 
 
 def test_amber_extended_forecast_cache_reduces_rest_calls(monkeypatch):
