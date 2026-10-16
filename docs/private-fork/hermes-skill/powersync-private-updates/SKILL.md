@@ -50,6 +50,29 @@ The focused runner includes Android-contract and private shared-loadpoint/
 reconciliation tests. Use `--broader` only when required; report every failure
 and do not suppress baseline failures.
 
+## No-paywall upstream classification
+
+- **Never wholesale rebase or merge upstream 1404+**. Treat each upstream
+  change as a source-level classification and review its changed paths,
+  imports, symbols, and tests before proposing a candidate.
+- Reject every `custom_components/power_sync/licensing/**` file and any
+  licensing import, optimiser-access entitlement/permission guard, entitlement
+  pairing UI, hosted `api.powersync.cc/ha-license` dependency, subscription UI,
+  entitlement storage, command/service fence, or licence-recovery wrapper.
+- Do not port `subscription_required`, `LicensedBatteryController`,
+  `optimizer_access`, or an optimiser entitlement pairing flow. These are
+  concrete paywall symbols, not ordinary provider authentication mechanics.
+- A hunk coupled to licensing is **incompatible until disentangled**. Do not
+  resolve it by importing a guard, a recovery path, or an access-status UI.
+- Port an eligible optimiser fix only as manually reviewed, minimal hunks into
+  the existing no-paywall optimiser; never use a wholesale 1404+ integration
+  as a substitute for hunk review.
+- Preserve upstream source attribution and licence notices for every adapted
+  hunk, and retain this private fork's noncommercial scope.
+- Before a candidate can be proposed, run the current source-only gates:
+  `python scripts/private-fork/validate_local_architecture.py` and
+  `scripts/private-fork/run_private_tests.sh`.
+
 ## Workflow
 
 1. Record `git status --short`, private starting SHA, last reviewed upstream
@@ -58,7 +81,7 @@ and do not suppress baseline failures.
    `docs/private-fork/powersync-private-updates-reference.md`.
 3. Fetch and compare the explicit upstream range deterministically using the
    repository tools; identify changed paths, symbols, tests, and release notes.
-4. Classify the delta as one of:
+4. Apply the no-paywall classification above, then classify the delta as one of:
    - **No overlap:** no private modules/direct tests touched.
    - **Mechanical overlap:** same file, separable hunks.
    - **Compatible semantic overlap:** private invariants can be preserved with

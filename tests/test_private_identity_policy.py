@@ -61,6 +61,20 @@ def _assert_deployment_policy(document: str) -> None:
     ), "deployment policy must require explicit authorization and deny updater gates that authority"
 
 
+def _assert_no_paywall_maintenance_policy(document: str) -> None:
+    """Require the maintainer guidance to reject, rather than merge, paywall code."""
+    lowered = document.lower()
+    assert "1404+" in document and "rebase" in lowered and "wholesale" in lowered
+    assert _has_nearby_terms(document, ("licensing",), ("import", "guard", "pairing"))
+    assert _has_nearby_terms(document, ("hosted",), ("api",), ("entitlement", "permission"))
+    assert _has_nearby_terms(document, ("subscription",), ("ui", "storage", "recovery", "fence"))
+    assert _has_nearby_terms(document, ("optimizer", "optimiser"), ("manual(?:ly)?",), ("hunk",))
+    assert _has_nearby_terms(document, ("incompatible",), ("licensing",))
+    assert _has_nearby_terms(document, ("source attribution",), ("noncommercial",))
+    assert "validate_local_architecture.py" in document
+    assert "run_private_tests.sh" in document
+
+
 def test_private_repository_metadata_uses_restored_component_path_and_private_slug():
     workflow = _read(".github/workflows/release.yml")
     hacs = json.loads(_read("hacs.json"))
@@ -127,3 +141,11 @@ def test_private_updater_material_uses_restored_component_path_and_never_authori
     skill = material["docs/private-fork/hermes-skill/powersync-private-updates/SKILL.md"].lower()
     assert "separate authorisation" in skill
     assert "never deploy" in skill
+
+
+def test_private_maintainer_guidance_permanently_rejects_optimizer_paywall_imports():
+    for relative_path in (
+        "docs/private-fork/hermes-skill/powersync-private-updates/SKILL.md",
+        "docs/private-fork/powersync-private-updates-reference.md",
+    ):
+        _assert_no_paywall_maintenance_policy(_read(relative_path))

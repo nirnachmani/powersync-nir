@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 from typing import Iterable
 
 
@@ -22,6 +23,26 @@ INIT = COMPONENT / "__init__.py"
 ANDROID_CONTRACT_TEST = Path("tests/test_android_app_contract.py")
 ANDROID_CONTRACT_FIXTURE = Path(
     "tests/contracts/android_app/fixtures/android-1.0.7-336-static-routes.json"
+)
+LICENSING = COMPONENT / "licensing"
+
+# These deliberately identify upstream's licensing implementation by its
+# concrete path, endpoint, and symbols. Generic provider credentials and
+# provider-owned pairing are valid integration mechanics and are not evidence
+# of an optimizer paywall.
+NO_PAYWALL_SOURCE_PATTERNS = (
+    (re.compile(r"api\.powersync\.cc/ha-license"), "hosted licensing API dependency"),
+    (re.compile(r"\boptimizer_access\b"), "optimizer access entitlement"),
+    (
+        re.compile(r"\boptimizer_access\.(?:start_pairing|finish_pairing)\b"),
+        "optimizer entitlement pairing",
+    ),
+    (re.compile(r"\bsubscription_required\b"), "subscription-required guard"),
+    (re.compile(r"\bLicensedBatteryController\b"), "LicensedBatteryController reference"),
+    (
+        re.compile(r"\bfrom\s+(?:\.+)?(?:power_sync\.)?licensing\b|\bimport\s+(?:power_sync\.)?licensing\b"),
+        "licensing import",
+    ),
 )
 
 
@@ -39,6 +60,23 @@ def _require_all(source: str, relative_path: Path, markers: Iterable[str], issue
         issues.append(f"{relative_path}: missing {label}")
 
 
+def _reject_no_paywall_artifacts(root: Path, issues: list[str]) -> None:
+    """Reject only concrete upstream optimizer-licensing artifacts."""
+    licensing_root = root / LICENSING
+    if licensing_root.exists():
+        issues.append(f"{LICENSING}: licensing path is forbidden in the private no-paywall fork")
+
+    component_root = root / COMPONENT
+    if not component_root.is_dir():
+        return
+    for path in sorted(component_root.rglob("*.py")):
+        relative_path = path.relative_to(root)
+        source = path.read_text(encoding="utf-8")
+        for pattern, label in NO_PAYWALL_SOURCE_PATTERNS:
+            if pattern.search(source):
+                issues.append(f"{relative_path}: forbidden {label}")
+
+
 def validate_repository(root: Path) -> list[str]:
     """Return deterministic architecture violations for ``root`` without writing."""
     root = Path(root)
@@ -48,6 +86,8 @@ def validate_repository(root: Path) -> list[str]:
     planner = _read(root, PLANNER, issues)
     reconciler = _read(root, RECONCILER, issues)
     init = _read(root, INIT, issues)
+
+    _reject_no_paywall_artifacts(root, issues)
 
     # Selection is explicit and must fail closed rather than use either profile
     # as a default physical-command identity.

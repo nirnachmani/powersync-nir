@@ -116,3 +116,36 @@ def test_validator_rejects_missing_shared_diagnostics_route(tmp_path):
     _write_fixture(tmp_path, "custom_components/power_sync/__init__.py", "resolve_shared_loadpoint_command()\n")
 
     assert any("diagnostic route" in issue for issue in validator.validate_repository(tmp_path))
+
+
+def test_validator_rejects_no_paywall_paths_and_exact_optimizer_artifacts(tmp_path):
+    """Upstream licensing artifacts must not enter the private component."""
+    cases = (
+        ("custom_components/power_sync/licensing/client.py", "def request(): pass\n", "licensing path"),
+        ("custom_components/power_sync/config_flow.py", 'LICENSE_API = "https://api.powersync.cc/ha-license"\n', "hosted licensing API"),
+        ("custom_components/power_sync/optimization/coordinator.py", "optimizer_access.check_entitlement()\n", "optimizer access entitlement"),
+        ("custom_components/power_sync/optimization/coordinator.py", "optimizer_access.start_pairing()\n", "optimizer entitlement pairing"),
+        ("custom_components/power_sync/optimization/coordinator.py", "optimizer_access.finish_pairing()\n", "optimizer entitlement pairing"),
+        ("custom_components/power_sync/switch.py", "if subscription_required:\n    return False\n", "subscription-required guard"),
+        ("custom_components/power_sync/optimization/battery_controller.py", "controller = LicensedBatteryController()\n", "LicensedBatteryController"),
+        ("custom_components/power_sync/optimization/battery_controller.py", "from power_sync.licensing import LicensedBatteryController\n", "licensing import"),
+        ("custom_components/power_sync/optimization/battery_controller.py", "from ..licensing import OptimizerAccess\n", "licensing import"),
+    )
+
+    for relative_path, content, expected in cases:
+        _valid_fixture(tmp_path)
+        _write_fixture(tmp_path, relative_path, content)
+
+        assert any(expected in issue for issue in validator.validate_repository(tmp_path))
+
+
+def test_validator_allows_unrelated_provider_authentication_and_pairing(tmp_path):
+    """Provider mechanics are not evidence of an optimizer entitlement paywall."""
+    _valid_fixture(tmp_path)
+    _write_fixture(
+        tmp_path,
+        "custom_components/power_sync/providers/powerwall.py",
+        """\ndef start_pairing(provider_token):\n    return provider_token\n\ndef finish_pairing(provider_token):\n    return provider_token\n""",
+    )
+
+    assert validator.validate_repository(tmp_path) == []

@@ -36,6 +36,33 @@ The validator is read-only and checks the restored
 fallback, Generic/EVAC guard seams, reconciler isolation from hardware and mode
 calculation, Android contract coverage, and the diagnostics route.
 
+## No-paywall upstream classification
+
+Never wholesale rebase or merge upstream `1404+`. Review every proposed port
+as manually reviewed source hunks, including its paths, imports, symbols,
+tests, and licence notices. An optimiser hunk is eligible only after that manual
+hunk review and only when it can be adapted into the existing no-paywall
+optimiser.
+
+Reject `custom_components/power_sync/licensing/**`, licensing imports,
+optimiser-access entitlement or permission guards, optimiser entitlement
+pairing UI, hosted `api.powersync.cc/ha-license` APIs, subscription UI,
+entitlement storage, command/service fences, and licence recovery wrappers.
+In particular, do not introduce `optimizer_access`, `subscription_required`,
+or `LicensedBatteryController`. A hunk coupled to licensing is **incompatible
+until disentangled**, rather than a reason to copy its guard or recovery code.
+
+These rejections are intentionally path/symbol-specific: unrelated provider
+authentication tokens and provider pairing flows remain allowed. Preserve
+source attribution and licence notices for every adapted hunk and keep the
+private fork's noncommercial scope. Before proposing any candidate, run the
+current source-only gates:
+
+```bash
+python scripts/private-fork/validate_local_architecture.py
+scripts/private-fork/run_private_tests.sh
+```
+
 ## Allowed operations
 
 - Inspect local git history, diffs, source, tests, and tracked documentation.
