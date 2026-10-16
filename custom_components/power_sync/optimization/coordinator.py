@@ -10612,7 +10612,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 cap_cancelled_for_new_action = False
 
                 if force_type == "charge":
-                    price_data = getattr(self.price_coordinator, "data", {}) or {}
+                    price_data = getattr(
+                        getattr(self, "price_coordinator", None), "data", {}
+                    ) or {}
                     fresh_spike_now = any(
                         self._amber_spike_grid_charge_mask(
                             [dt_util.now()],
