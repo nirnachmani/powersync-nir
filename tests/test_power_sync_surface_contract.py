@@ -17,6 +17,12 @@ BASELINE_COMMIT = "85f99ea62a174cd9153d5ff2ce71023dda2c9a5c"
 OPTIMIZATION = Path("custom_components/power_sync/optimization")
 COORDINATOR = OPTIMIZATION / "coordinator.py"
 BATTERY_OPTIMIZER = OPTIMIZATION / "battery_optimizer.py"
+# These separately approved plan-explanation modules do not contain optimizer
+# control code and therefore do not belong to this baseline corpus.
+EXPLANATION_ONLY_MODULES = {
+    OPTIMIZATION / "ai_summary.py",
+    OPTIMIZATION / "chatgpt_auth.py",
+}
 
 
 def _expected_battery_optimizer_source() -> str:
@@ -311,11 +317,16 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
     assert _git("rev-parse", f"{BASELINE}^{{}}").strip() == BASELINE_COMMIT
 
     baseline_files = sorted(
-        _git("ls-tree", "-r", "--name-only", BASELINE, "--", OPTIMIZATION.as_posix()).splitlines()
+        relative_name
+        for relative_name in _git(
+            "ls-tree", "-r", "--name-only", BASELINE, "--", OPTIMIZATION.as_posix()
+        ).splitlines()
+        if Path(relative_name) not in EXPLANATION_ONLY_MODULES
     )
     restored_files = sorted(
         path.relative_to(ROOT).as_posix()
         for path in (ROOT / OPTIMIZATION).rglob("*.py")
+        if path.relative_to(ROOT) not in EXPLANATION_ONLY_MODULES
     )
 
     assert restored_files == baseline_files
