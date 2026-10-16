@@ -190,6 +190,14 @@ _COST_NEUTRAL_REACHABLE_DEADLINE_DIFF_SHA256 = (
     "1a31032e30981313684b5a6b0d37f800519f8b76669836de22056873c3aa0298"
 )
 
+# Exact, path-specific candidate allowance for upstream 2cc05e2b adapted on
+# top of the reviewed private e3c17217 optimizer source. It may neither admit
+# a broader optimizer change nor alter the private shared-loadpoint boundary.
+_PROJECTED_MODE_ALIGNMENT_SOURCE = "e3c172173565eb7fefd5b2fdee280722b65dd66d"
+_PROJECTED_MODE_ALIGNMENT_DIFF_SHA256 = (
+    "1a956ec2ccfa2e498a3ac67ad85664a544e06bef3641a24df29f7cebeb1d5ec8"
+)
+
 
 def _amber_coordinator_diff_is_allowlisted(expected: str, actual: str) -> bool:
     diff = "\n".join(
@@ -219,6 +227,24 @@ def _cost_neutral_reachable_deadline_diff_is_allowlisted(
     return (
         hashlib.sha256(diff.encode("utf-8")).hexdigest()
         == _COST_NEUTRAL_REACHABLE_DEADLINE_DIFF_SHA256
+    )
+
+
+def _projected_mode_alignment_diff_is_allowlisted(actual: str) -> bool:
+    """Accept only the reviewed 2cc05e2b semantic adaptation at this path."""
+    expected = _git_show(_PROJECTED_MODE_ALIGNMENT_SOURCE, BATTERY_OPTIMIZER)
+    diff = "\n".join(
+        difflib.unified_diff(
+            expected.splitlines(),
+            actual.splitlines(),
+            fromfile="private_e3c17217",
+            tofile="projected_mode_alignment_candidate",
+            lineterm="",
+        )
+    )
+    return (
+        hashlib.sha256(diff.encode("utf-8")).hexdigest()
+        == _PROJECTED_MODE_ALIGNMENT_DIFF_SHA256
     )
 
 
@@ -281,9 +307,14 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
         if relative_path == COORDINATOR:
             assert _amber_coordinator_diff_is_allowlisted(expected, actual)
         elif relative_path == BATTERY_OPTIMIZER:
+            # Preserve proof that e3c17217 itself contains only the earlier,
+            # reviewed solar-refill and reachable-deadline changes before
+            # allowing the exact projected-mode candidate delta.
             assert _cost_neutral_reachable_deadline_diff_is_allowlisted(
-                expected, actual
+                expected,
+                _git_show(_PROJECTED_MODE_ALIGNMENT_SOURCE, BATTERY_OPTIMIZER),
             )
+            assert _projected_mode_alignment_diff_is_allowlisted(actual)
         else:
             assert actual == expected
 
@@ -307,9 +338,7 @@ def test_amber_optimizer_allowlist_rejects_an_unreviewed_coordinator_change():
 def test_solar_only_refill_allowlist_rejects_a_nearby_predicate_mutation():
     """The solar-refill exception is an exact reviewed source variant."""
     expected = _expected_battery_optimizer_source()
-    actual = (ROOT / BATTERY_OPTIMIZER).read_text(encoding="utf-8").replace(
-        "\r\n", "\n"
-    )
+    actual = _git_show(_PROJECTED_MODE_ALIGNMENT_SOURCE, BATTERY_OPTIMIZER)
 
     assert _cost_neutral_reachable_deadline_diff_is_allowlisted(expected, actual)
     assert not _cost_neutral_reachable_deadline_diff_is_allowlisted(
@@ -325,9 +354,7 @@ def test_solar_only_refill_allowlist_rejects_a_nearby_predicate_mutation():
 def test_cost_neutral_deadline_allowlist_rejects_a_nearby_mode_mutation():
     """The b20bffb2 exception is exact rather than a general optimizer waiver."""
     expected = _expected_battery_optimizer_source()
-    actual = (ROOT / BATTERY_OPTIMIZER).read_text(encoding="utf-8").replace(
-        "\r\n", "\n"
-    )
+    actual = _git_show(_PROJECTED_MODE_ALIGNMENT_SOURCE, BATTERY_OPTIMIZER)
 
     assert _cost_neutral_reachable_deadline_diff_is_allowlisted(expected, actual)
     assert not _cost_neutral_reachable_deadline_diff_is_allowlisted(
@@ -337,6 +364,22 @@ def test_cost_neutral_deadline_allowlist_rejects_a_nearby_mode_mutation():
             "b_ub.append(0.0)",
             1,
         ),
+    )
+
+
+def test_projected_mode_alignment_allowlist_rejects_a_nearby_flow_mutation():
+    """The 2cc05e2b bridge remains an exact path/symbol-specific allowance."""
+    actual = (ROOT / BATTERY_OPTIMIZER).read_text(encoding="utf-8").replace(
+        "\r\n", "\n"
+    )
+
+    assert _projected_mode_alignment_diff_is_allowlisted(actual)
+    assert not _projected_mode_alignment_diff_is_allowlisted(
+        actual.replace(
+            'if action in ("export", "solar_export"):',
+            'if action == "export":',
+            1,
+        )
     )
 
 
