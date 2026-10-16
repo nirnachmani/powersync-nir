@@ -12173,6 +12173,7 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             return None
 
         additional_lookup = {f.get("period_end"): f for f in additional}
+        canonical_estimate_field = estimate_fields[0]
 
         combined = []
         for forecast in base:
@@ -12181,11 +12182,31 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
 
             if period_end in additional_lookup:
                 add_f = additional_lookup[period_end]
-                if result.get("pv_estimate") is not None and add_f.get("pv_estimate") is not None:
+                # Each resource may expose a different compatible fallback
+                # field. Normalize the selected estimate before summing so a
+                # valid secondary contribution cannot be dropped merely
+                # because its field name differs from the primary resource.
+                result[canonical_estimate_field] = (
+                    self._get_pv_estimate(forecast)
+                    + self._get_pv_estimate(add_f)
+                )
+                if (
+                    canonical_estimate_field != "pv_estimate"
+                    and result.get("pv_estimate") is not None
+                    and add_f.get("pv_estimate") is not None
+                ):
                     result["pv_estimate"] = result["pv_estimate"] + add_f["pv_estimate"]
-                if result.get("pv_estimate10") is not None and add_f.get("pv_estimate10") is not None:
+                if (
+                    canonical_estimate_field != "pv_estimate10"
+                    and result.get("pv_estimate10") is not None
+                    and add_f.get("pv_estimate10") is not None
+                ):
                     result["pv_estimate10"] = result["pv_estimate10"] + add_f["pv_estimate10"]
-                if result.get("pv_estimate90") is not None and add_f.get("pv_estimate90") is not None:
+                if (
+                    canonical_estimate_field != "pv_estimate90"
+                    and result.get("pv_estimate90") is not None
+                    and add_f.get("pv_estimate90") is not None
+                ):
                     result["pv_estimate90"] = result["pv_estimate90"] + add_f["pv_estimate90"]
 
             combined.append(result)

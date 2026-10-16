@@ -177,6 +177,24 @@ def test_complete_multi_resource_response_is_combined_and_cached():
     assert tracked() == 2
 
 
+def test_mixed_estimate_fallback_fields_are_normalized_before_aggregation():
+    coordinator, saved, _tracked = _make_coordinator(
+        [
+            [_period("2026-10-10T01:00:00+10:00", 4.58)],
+            [{"period_end": "2026-10-10T01:00:00+10:00", "pv_estimate10": 8.44}],
+        ]
+    )
+
+    result = _run_update(coordinator)
+
+    assert result["available"] is True
+    assert result["today_forecast_kwh"] == 6.51
+    assert result["forecasts"] == [
+        _period("2026-10-10T01:00:00+10:00", 13.02)
+    ]
+    assert saved == [result]
+
+
 def test_secondary_failure_preserves_only_a_known_complete_fallback():
     coordinator, saved, _tracked = _make_coordinator(
         [
