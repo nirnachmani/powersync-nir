@@ -213,7 +213,7 @@ def test_private_fork_runner_includes_delta_tool_tests():
 
 MANIFEST_PATH = ROOT / "docs/private-fork/upstream-1363-1408-port-manifest.md"
 MANIFEST_BASELINE = "85f99ea62a174cd9153d5ff2ce71023dda2c9a5c"
-MANIFEST_TARGET = "e3e107409b18add2213a9de617cc23591e73c873"
+MANIFEST_TARGET = "c76675e1cfb14902dc240d81245482a00a223693"
 MANIFEST_CLASSIFICATIONS = {
     "low-risk compatible port",
     "manual semantic review",
@@ -229,7 +229,7 @@ def _manifest_records(document: str) -> dict[str, str]:
     return {match.group(1): match.group(0) for match in __import__("re").finditer(pattern, document, __import__("re").M | __import__("re").S)}
 
 
-def test_1363_1408_manifest_is_exhaustive_and_matches_git_range():
+def test_1363_1414_manifest_is_exhaustive_and_matches_git_range():
     document = MANIFEST_PATH.read_text(encoding="utf-8")
     collector = _load_module("collect_upstream_delta_manifest", COLLECTOR_PATH)
     delta = collector.collect_delta(ROOT, MANIFEST_BASELINE, MANIFEST_TARGET)
@@ -237,7 +237,7 @@ def test_1363_1408_manifest_is_exhaustive_and_matches_git_range():
     records = _manifest_records(document)
 
     assert "v2.12.1363" in document and MANIFEST_BASELINE in document
-    assert "v2.12.1408" in document and MANIFEST_TARGET in document
+    assert "v2.12.1414" in document and MANIFEST_TARGET in document
     assert set(records) == set(expected)
     for sha, subject in expected.items():
         record = records[sha]
@@ -248,7 +248,7 @@ def test_1363_1408_manifest_is_exhaustive_and_matches_git_range():
         assert "**Intended gate:**" in record
 
 
-def test_1363_1408_manifest_preserves_private_rejects_and_review_gates():
+def test_1363_1414_manifest_preserves_private_rejects_and_relevance_policy():
     document = MANIFEST_PATH.read_text(encoding="utf-8")
     records = _manifest_records(document)
 
@@ -266,8 +266,27 @@ def test_1363_1408_manifest_preserves_private_rejects_and_review_gates():
     assert "**Classification:** admin/no-port" in records["297bada9f54a72d2833ca50c7c0f45fb10d13afb"]
     assert "**Classification:** redundant/incompatible private shared-EV" in records["59d8618c1eac952cb88ee4b25bae2511085bcecc"]
     assert "ev_loadpoint_profiles.py" in records["59d8618c1eac952cb88ee4b25bae2511085bcecc"]
-    assert "**Classification:** manual semantic review" in records[MANIFEST_TARGET]
-    assert "presentation" in records[MANIFEST_TARGET].lower()
+    assert "**Classification:** admin/no-port" in records[MANIFEST_TARGET]
+
+    assert "**Classification:** paywall/subscription reject" in records[
+        "93b769acc61cc76b1006b0062c1f10788689ba6d"
+    ]
+    for sha in (
+        "f31512004a1f961a9f5f63cd7e3832b38a50685d",
+        "b552f0d255dcb6ecea3a231f570647515e434379",
+        "e0616a33009c5efed85f5de7da9fa3feff2570c9",
+    ):
+        assert "**Classification:** low-risk compatible port" in records[sha]
+        assert "no new private test" in records[sha].lower()
+    assert "**Classification:** excluded backend reject" in records[
+        "a17abdd59ce33f6b583be11272ce9fca9f5df6be"
+    ]
+    assert "**Classification:** redundant/incompatible private shared-EV" in records[
+        "0f23f78d47844ce56b093a0ef4c28225603fe248"
+    ]
+    assert "irrelevant/incompatible" in records[
+        "0f23f78d47844ce56b093a0ef4c28225603fe248"
+    ]
 
     for required in (
         "resolve_shared_loadpoint_command()",
@@ -277,5 +296,10 @@ def test_1363_1408_manifest_preserves_private_rejects_and_review_gates():
         "run_private_tests.sh",
         "licensing/",
         "ChatGPT plan-explanation sign-in",
+        "classifies relevance and private compatibility, not upstream QA",
+        "no new private tests",
+        "smallest interaction regression",
+        "end of the update cycle",
+        "ask the user",
     ):
         assert required in document

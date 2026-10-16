@@ -1,11 +1,11 @@
-# Upstream v2.12.1363–v2.12.1408 port manifest
+# Upstream v2.12.1363–v2.12.1414 port manifest
 
 ## Scope and reproducibility
 
 - **Baseline:** `v2.12.1363` / `85f99ea62a174cd9153d5ff2ce71023dda2c9a5c`
-- **Target:** `v2.12.1408` / `e3e107409b18add2213a9de617cc23591e73c873`
-- **Range command:** `python scripts/private-fork/collect_upstream_delta.py 85f99ea62a174cd9153d5ff2ce71023dda2c9a5c e3e107409b18add2213a9de617cc23591e73c873 --repo .`
-- **Commit evidence command:** `git log --reverse --format="%H%x09%s" 85f99ea62a174cd9153d5ff2ce71023dda2c9a5c..e3e107409b18add2213a9de617cc23591e73c873`
+- **Target:** `v2.12.1414` / `c76675e1cfb14902dc240d81245482a00a223693`
+- **Range command:** `python scripts/private-fork/collect_upstream_delta.py 85f99ea62a174cd9153d5ff2ce71023dda2c9a5c c76675e1cfb14902dc240d81245482a00a223693 --repo .`
+- **Commit evidence command:** `git log --reverse --format="%H%x09%s" 85f99ea62a174cd9153d5ff2ce71023dda2c9a5c..c76675e1cfb14902dc240d81245482a00a223693`
 - **Per-commit file evidence command:** `git diff-tree --no-commit-id --name-only -r -m <commit>`
 - **Contract:** `tests/test_private_fork_upstream_delta.py` derives the range from Git and requires exactly one complete record for every commit. This document intentionally classifies review work; it authorizes no production-code port.
 
@@ -25,6 +25,15 @@
 - **paywall/subscription reject:** reject optimiser licensing, entitlement, and hosted optimiser access. ChatGPT plan-explanation sign-in is a separate manual AI review category.
 - **excluded backend reject:** reject out-of-scope backend/protocol work.
 - **admin/no-port:** retain no release/version/merge metadata.
+
+## Current updater policy
+
+This policy supersedes historic per-record gate wording below. The updater classifies relevance and private compatibility, not upstream QA: it relies on upstream's own validation for an unamended compatible port and does not investigate theoretical upstream defects.
+
+- A directly relevant port with no private two-logical-EV, external-session, ownership, or other private interaction receives **no new private tests**. Record the compatibility assessment and run the architecture validator and private compatibility gate once for the update cycle.
+- If a relevant port needs a private amendment, add only the **smallest interaction regression** that proves that amendment. Do not use it to re-qualify unrelated upstream behavior.
+- Reject unavailable-vendor, licensing, backend, release, README, wiki, and other non-relevant work with a factual reason. A shared-charger change that is irrelevant/incompatible with the private model is rejected rather than adapted by default.
+- At the end of the update cycle, report every considered update with its outcome and one-sentence reason. If a conflict or compatibility result is genuinely unclear, present the alternatives and ask the user before deciding.
 
 ## Exhaustive commit records
 
@@ -863,3 +872,123 @@ The key-file lists below are taken from the per-commit Git command above; an ell
 - **Key files:** `RELEASE_NOTES.md`, `custom_components/power_sync/automations/ev_charging_planner.py`, `custom_components/power_sync/frontend/power-sync-strategy.js`, `custom_components/power_sync/manifest.json` (+4 more)
 - **Rationale:** Adapt presentation manually to private logical-profile IDs and snapshot alignment; do not import upstream physical/profile identity assumptions or command behavior.
 - **Intended gate:** Task-specific RED/GREEN private schedule-presentation regression + `validate_local_architecture.py` + `run_private_tests.sh`.
+
+### `561001d1e46e255c53ad86ad3c7391ca1c7f83a9` — docs(release): clear RELEASE_NOTES.md after v2.12.1408
+- **Classification:** admin/no-port
+- **Key files:** `.github/discord-release-last-posted.txt`, `RELEASE_NOTES.md`
+- **Rationale:** Release-note bookkeeping has no private runtime behavior to port.
+- **Intended gate:** No code port; manifest contract test only.
+
+### `93b769acc61cc76b1006b0062c1f10788689ba6d` — fix(config): clarify HA optimiser access and pairing guidance
+- **Classification:** paywall/subscription reject
+- **Key files:** `custom_components/power_sync/config_flow.py`, `custom_components/power_sync/licensing/presentation.py`, `custom_components/power_sync/strings.json`, `custom_components/power_sync/translations/en.json`, `docs/ha-optimizer-licensing.md`, `tests/test_ha_optimizer_access_flow.py`
+- **Rationale:** Optimiser licensing/access and pairing guidance are forbidden by the private no-paywall boundary.
+- **Intended gate:** No port; architecture validator confirms no licensing/entitlement path is introduced.
+
+### `a8af48134d7247d4efb575b02909477d8390ab99` — chore(manifest): bump version to 2.12.1409
+- **Classification:** admin/no-port
+- **Key files:** `RELEASE_NOTES.md`, `custom_components/power_sync/manifest.json`
+- **Rationale:** Version metadata has no independent private behavior to port.
+- **Intended gate:** No code port; manifest contract test only.
+
+### `d0929a925d8fbef3b7c5fe96d2f555df21b78165` — docs(release): clear RELEASE_NOTES.md after v2.12.1409
+- **Classification:** admin/no-port
+- **Key files:** `.github/discord-release-last-posted.txt`, `RELEASE_NOTES.md`
+- **Rationale:** Release-note bookkeeping has no private runtime behavior to port.
+- **Intended gate:** No code port; manifest contract test only.
+
+### `f31512004a1f961a9f5f63cd7e3832b38a50685d` — fix(config): align curtailment help and validate form behavior
+- **Classification:** low-risk compatible port
+- **Key files:** `custom_components/power_sync/strings.json`, `custom_components/power_sync/translations/en.json`, `tests/test_config_flow_weather_options.py`, `tests/test_same_endpoint_curtailment_guard.py`
+- **Rationale:** Generic curtailment UI/config validation is relevant and has no private logical-EV, external-session, or ownership interaction.
+- **Intended gate:** Direct relevant no-interaction candidate; no new private test. Include in the update-cycle architecture validator and private compatibility gate.
+
+### `fb4a58d4a4fc3756849b0f13b0a30e6406e993a1` — chore(manifest): bump version to 2.12.1410
+- **Classification:** admin/no-port
+- **Key files:** `RELEASE_NOTES.md`, `custom_components/power_sync/manifest.json`
+- **Rationale:** Version metadata has no independent private behavior to port.
+- **Intended gate:** No code port; manifest contract test only.
+
+### `3dd0bdfe7c207296b1b463bd6708aab5145b45da` — docs(release): clear RELEASE_NOTES.md after v2.12.1410
+- **Classification:** admin/no-port
+- **Key files:** `.github/discord-release-last-posted.txt`, `RELEASE_NOTES.md`
+- **Rationale:** Release-note bookkeeping has no private runtime behavior to port.
+- **Intended gate:** No code port; manifest contract test only.
+
+### `b552f0d255dcb6ecea3a231f570647515e434379` — feat(dashboard): label forecast summary time windows
+- **Classification:** low-risk compatible port
+- **Key files:** `custom_components/power_sync/frontend/power-sync-strategy.js`, `custom_components/power_sync/optimization/coordinator.py`, `custom_components/power_sync/sensor.py`, `tests/test_lp_forecast_summary.py`
+- **Rationale:** The generic forecast-window dashboard label is relevant and does not interact with private EV identity or charger control.
+- **Intended gate:** Direct relevant no-interaction candidate; no new private test. Include in the update-cycle architecture validator and private compatibility gate.
+
+### `272e956e5acd69b368f80037cd066e7639f66b0f` — chore(manifest): bump version to 2.12.1411
+- **Classification:** admin/no-port
+- **Key files:** `RELEASE_NOTES.md`, `custom_components/power_sync/manifest.json`
+- **Rationale:** Version metadata has no independent private behavior to port.
+- **Intended gate:** No code port; manifest contract test only.
+
+### `7edd42321c4f54e9ff625701664c5f82036eddb0` — docs(release): clear RELEASE_NOTES.md after v2.12.1411
+- **Classification:** admin/no-port
+- **Key files:** `.github/discord-release-last-posted.txt`, `RELEASE_NOTES.md`
+- **Rationale:** Release-note bookkeeping has no private runtime behavior to port.
+- **Intended gate:** No code port; manifest contract test only.
+
+### `3a615c6c7f77060c6bcd5886a57fe2e16998a734` — docs: map Home Assistant configuration to the wiki
+- **Classification:** admin/no-port
+- **Key files:** `.github/workflows/wiki-docs.yml`, `docs/wiki-configuration-map.json`, `docs/wiki-maintenance.md`
+- **Rationale:** Wiki-maintenance documentation is administrative and has no private runtime behavior to port.
+- **Intended gate:** No code port; manifest contract test only.
+
+### `ab839a0533e383ed9c4399d0f7dde027948ae3c6` — docs: align README with rebuilt configuration wiki
+- **Classification:** admin/no-port
+- **Key files:** `README.md`, `docs/wiki-maintenance.md`
+- **Rationale:** README/wiki alignment is administrative and has no private runtime behavior to port.
+- **Intended gate:** No code port; manifest contract test only.
+
+### `e0616a33009c5efed85f5de7da9fa3feff2570c9` — fix: preserve manual action status after plan clear
+- **Classification:** low-risk compatible port
+- **Key files:** `custom_components/power_sync/optimization/coordinator.py`, `tests/test_battery_export_allowed_slots.py`
+- **Rationale:** Manual-action status is relevant generic optimizer UI/state behavior and has no private EV/session interaction.
+- **Intended gate:** Direct relevant no-interaction candidate; no new private test. Include in the update-cycle architecture validator and private compatibility gate.
+
+### `aaa2fb313c0be1afdfaf75a7c303a5b83f4b71d0` — chore(manifest): bump version to 2.12.1412
+- **Classification:** admin/no-port
+- **Key files:** `RELEASE_NOTES.md`, `custom_components/power_sync/manifest.json`
+- **Rationale:** Version metadata has no independent private behavior to port.
+- **Intended gate:** No code port; manifest contract test only.
+
+### `59ecf30fd2d487262dbb9c33eb31979fbdf48caf` — docs(release): clear RELEASE_NOTES.md after v2.12.1412
+- **Classification:** admin/no-port
+- **Key files:** `.github/discord-release-last-posted.txt`, `RELEASE_NOTES.md`
+- **Rationale:** Release-note bookkeeping has no private runtime behavior to port.
+- **Intended gate:** No code port; manifest contract test only.
+
+### `a17abdd59ce33f6b583be11272ce9fca9f5df6be` — fix: accept Tesla zero-normalized TOU readback
+- **Classification:** excluded backend reject
+- **Key files:** `custom_components/power_sync/__init__.py`, `tests/test_force_mode_controls.py`, `tests/test_static_tesla_tariff_sync.py`
+- **Rationale:** Tesla TOU readback is outside the private Generic/Sigenergy and Amber scope.
+- **Intended gate:** No port; record excluded-backend rationale.
+
+### `373c7b5c769070c1169b3ff95bc683b38e2cee27` — chore(manifest): bump version to 2.12.1413
+- **Classification:** admin/no-port
+- **Key files:** `RELEASE_NOTES.md`, `custom_components/power_sync/manifest.json`
+- **Rationale:** Version metadata has no independent private behavior to port.
+- **Intended gate:** No code port; manifest contract test only.
+
+### `fd7736fc46f8a1c2b538ef1c197e56265e033669` — docs(release): clear RELEASE_NOTES.md after v2.12.1413
+- **Classification:** admin/no-port
+- **Key files:** `.github/discord-release-last-posted.txt`, `RELEASE_NOTES.md`
+- **Rationale:** Release-note bookkeeping has no private runtime behavior to port.
+- **Intended gate:** No code port; manifest contract test only.
+
+### `0f23f78d47844ce56b093a0ef4c28225603fe248` — fix(ev): reconcile shared charger session policy
+- **Classification:** redundant/incompatible private shared-EV
+- **Key files:** `custom_components/power_sync/__init__.py`, `custom_components/power_sync/automations/ev_charging_planner.py`, `tests/test_ev_shared_profile_runtime.py`
+- **Rationale:** Upstream shared-charger session policy is irrelevant/incompatible with the user's private selector-led Generic/EVAC logical-profile, physical-lease, and reconciliation model.
+- **Intended gate:** No port; retain the private shared-loadpoint architecture and report the incompatibility at cycle end.
+
+### `c76675e1cfb14902dc240d81245482a00a223693` — chore(manifest): bump version to 2.12.1414
+- **Classification:** admin/no-port
+- **Key files:** `RELEASE_NOTES.md`, `custom_components/power_sync/manifest.json`
+- **Rationale:** Version metadata has no independent private behavior to port.
+- **Intended gate:** No code port; manifest contract test only.
