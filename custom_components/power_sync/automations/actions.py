@@ -6727,6 +6727,82 @@ def _reserve_automated_shared_loadpoint_sequence(
     params[_AUTOMATED_SHARED_SEQUENCE_TOKEN_KEY] = reservation["token"]
     return True
 
+
+def _generic_shared_start_still_authorized(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry | None,
+    vehicle_id: str,
+    params: Mapping[str, Any],
+) -> bool:
+    """Require the original private fences after delayed Generic readback.
+
+    A cloud acknowledgement is evidence only; it cannot restore command
+    authority after selector, physical lease, handoff, or evaluation-cycle
+    authority has moved while the readback wait was in flight.
+    """
+    if not params.get("shared_loadpoint_binding"):
+        return True
+    if config_entry is None:
+        return False
+
+    from .ev_ownership import get_ev_ownership, owner_family
+    from .shared_loadpoint import resolve_shared_loadpoint_command
+
+    profile_id = str(
+        params.get("active_logical_vehicle_id")
+        or params.get("logical_vehicle_id")
+        or ""
+    )
+    if not profile_id:
+        return False
+    resolved = resolve_shared_loadpoint_command(
+        hass, config_entry, profile_id, params
+    )
+    if (
+        resolved is None
+        or str(resolved.get("vehicle_id") or "") != str(vehicle_id)
+        or str(resolved.get("active_logical_vehicle_id") or "") != profile_id
+    ):
+        return False
+
+    entry_data = _automated_shared_sequence_entry_data(hass, config_entry)
+    if entry_data is None:
+        return False
+    pending = params.get("_generic_pending_start")
+    if isinstance(pending, dict):
+        pending_starts = entry_data.get("_pending_generic_ev_starts", {})
+        if pending.get("cancelled") or pending_starts.get(vehicle_id) is not pending:
+            return False
+
+    cycle_token = params.get(_AUTOMATED_SHARED_SEQUENCE_TOKEN_KEY)
+    if cycle_token is not None:
+        budget = entry_data.get(_AUTOMATED_SHARED_SEQUENCE_BUDGET_KEY)
+        reservation = (
+            budget.get("reservations", {}).get(vehicle_id)
+            if isinstance(budget, dict)
+            else None
+        )
+        if (
+            not isinstance(reservation, dict)
+            or reservation.get("logical_profile_id") != profile_id
+            or reservation.get("token") is not cycle_token
+        ):
+            return False
+
+    _lease_id, lease = get_ev_ownership(hass, config_entry, vehicle_id)
+    requested_mode = params.get("owner_mode") or params.get("dynamic_mode")
+    runtime = _dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id, {})
+    return bool(
+        isinstance(lease, dict)
+        and lease.get("owner") == "powersync"
+        and str(lease.get("active_profile_id") or "") == profile_id
+        and requested_mode
+        and lease.get("owner_mode") is not None
+        and owner_family(requested_mode) == owner_family(lease.get("owner_mode"))
+        and not bool(isinstance(runtime, dict) and runtime.get("handoff_settling"))
+    )
+
+
 # Global storage for regular EV charging scheduled stop (for stop_outside_window)
 _ev_scheduled_stop: Dict[str, Any] = {}
 
@@ -8649,10 +8725,22 @@ async def _set_vehicle_amps_unchecked(
                             params,
                             confirmation_started_at,
                         )
+                        if confirmed and not _generic_shared_start_still_authorized(
+                            hass, config_entry, vehicle_id, params
+                        ):
+                            confirmed = False
+                            evidence = (
+                                "fresh readback arrived after shared loadpoint "
+                                "authority changed"
+                            )
                     finally:
                         # Cancellation during cloud settlement must compensate
-                        # the accepted start before propagating to the caller.
-                        if not confirmed:
+                        # only while this start still owns the selected physical
+                        # lease. A late acknowledgement cannot stop a handoff,
+                        # external owner, or newer automated cycle.
+                        if not confirmed and _generic_shared_start_still_authorized(
+                            hass, config_entry, vehicle_id, params
+                        ):
                             cleanup_params = dict(params)
                             cleanup_params.pop("require_physical_start_confirmation", None)
                             try:

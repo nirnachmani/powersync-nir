@@ -2015,6 +2015,92 @@ def test_active_cycle_budget_blocks_competing_direct_shared_command_before_io(
         write.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    "transition",
+    ("selector_change", "idle_handoff", "live_handoff", "external_owner", "stale_cycle"),
+)
+def test_delayed_shared_generic_start_readback_cannot_revive_superseded_authority(
+    transition,
+):
+    """A late Generic acknowledgement needs the original selected lease and cycle."""
+    hass = _Hass()
+    entry = _Entry()
+    params = {
+        **_generic_params(),
+        "vehicle_id": "generic_ev",
+        "logical_vehicle_id": "shared_ev_profile_a",
+        "active_logical_vehicle_id": "shared_ev_profile_a",
+        "shared_loadpoint_binding": True,
+        "owner_mode": "scheduled",
+    }
+    actions._begin_automated_shared_loadpoint_cycle(hass, entry)
+    assert actions._reserve_automated_shared_loadpoint_sequence(hass, entry, params) is True
+    marker = {"cancelled": False}
+    params["_generic_pending_start"] = marker
+    hass.data["power_sync"][entry.entry_id]["_pending_generic_ev_starts"] = {
+        "generic_ev": marker
+    }
+    _claim_shared_loadpoint(hass, profile_id="shared_ev_profile_a")
+
+    if transition in ("selector_change", "idle_handoff", "live_handoff"):
+        hass.states.get("sensor.connected_vehicle").state = "tesla"
+    if transition == "idle_handoff":
+        ownership.claim_ev_ownership(
+            hass,
+            entry,
+            "generic_ev",
+            owner_mode="scheduled",
+            extra={"active_profile_id": "shared_ev_profile_b"},
+        )
+    elif transition == "live_handoff":
+        existing = {
+            "active": False,
+            "handoff_settling": True,
+            "active_profile_id": "shared_ev_profile_a",
+        }
+        actions._dynamic_ev_state[entry.entry_id] = {"generic_ev": existing}
+    elif transition == "external_owner":
+        ownership.claim_ev_ownership(
+            hass,
+            entry,
+            "generic_ev",
+            owner="external",
+            owner_mode="external",
+            extra={"active_profile_id": "shared_ev_profile_a"},
+        )
+    elif transition == "stale_cycle":
+        actions._begin_automated_shared_loadpoint_cycle(hass, entry)
+
+    still_authorized = getattr(actions, "_generic_shared_start_still_authorized", None)
+    assert still_authorized is not None
+    assert still_authorized(hass, entry, "generic_ev", params) is False
+
+
+def test_delayed_shared_generic_readback_is_rechecked_before_start_succeeds(monkeypatch):
+    """Selector movement while awaiting readback must fail the accepted start."""
+    hass = _Hass()
+    entry = _Entry()
+    params = {
+        **_generic_params(),
+        "vehicle_id": "shared_ev_profile_a",
+        "owner_mode": "scheduled",
+        "require_physical_start_confirmation": True,
+    }
+
+    async def delayed_fresh_readback(*_args, **_kwargs):
+        hass.states.get("sensor.connected_vehicle").state = "tesla"
+        return True, "sensor.shared_ev_status=charging"
+
+    monkeypatch.setattr(actions, "_generic_charger_ready_for_start", lambda *_args: (True, None))
+    monkeypatch.setattr(actions, "_normalize_generic_charger_amps", lambda *_args: 8)
+    monkeypatch.setattr(actions, "_start_generic_charger_switch", AsyncMock(return_value=True))
+    monkeypatch.setattr(actions, "_wait_for_generic_physical_start", delayed_fresh_readback)
+
+    assert asyncio.run(
+        actions._set_vehicle_amps(hass, entry, "shared_ev_profile_a", 8, params)
+    ) is False
+
+
 @pytest.mark.parametrize(("charger_type", "physical_id"), (("generic", "generic_ev"), ("sigenergy", "sigenergy_charger")))
 def test_external_session_guarded_stop_uses_selected_profile_route(monkeypatch, charger_type, physical_id):
     hass = _Hass()

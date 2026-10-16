@@ -115,6 +115,15 @@ canonical identity and ownership checks; they are not API payload bypasses.
   private reconciliation/physical leases use owner absence as insufficient
   proof and require fresh telemetry before transfer or command. No upstream
   multi-profile identity or licensing code was imported.
+- From upstream `f2c0e07f`, the Generic delayed-start/readback safety is adapted
+  only at the private command boundary. A fresh delayed acknowledgement is
+  rejected, and its cleanup suppressed, if `resolve_shared_loadpoint_command()`
+  no longer selects the originating logical profile, the canonical physical
+  lease/profile changes, a live handoff is fenced, the pending marker is
+  replaced/cancelled, or its automated-cycle token is stale. The private action
+  guard tests cover selector change, idle/live handoff, external ownership, and
+  newer-cycle invalidation. OCPP price-policy changes and configuration/UI
+  timeout model are intentionally excluded from this private safety slice.
 
 ## Android and diagnostics contracts
 
