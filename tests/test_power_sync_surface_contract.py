@@ -198,6 +198,14 @@ _PROJECTED_MODE_ALIGNMENT_DIFF_SHA256 = (
     "1a956ec2ccfa2e498a3ac67ad85664a544e06bef3641a24df29f7cebeb1d5ec8"
 )
 
+# Exact, path/symbol-specific candidate allowance for upstream 2a53f413 adapted
+# on top of the reviewed private projected-mode source. It may neither admit a
+# broader optimizer change nor alter the private shared-loadpoint boundary.
+_NATIVE_SOLAR_CLIPPED_EXPORT_SOURCE = "8eac5f535f17f68324c98924ab40ce60c27bf5c0"
+_NATIVE_SOLAR_CLIPPED_EXPORT_DIFF_SHA256 = (
+    "fbeff717eac0a73b714ca87180809b349f255d8d9dc7072aabae473f36249541"
+)
+
 
 def _amber_coordinator_diff_is_allowlisted(expected: str, actual: str) -> bool:
     diff = "\n".join(
@@ -245,6 +253,24 @@ def _projected_mode_alignment_diff_is_allowlisted(actual: str) -> bool:
     return (
         hashlib.sha256(diff.encode("utf-8")).hexdigest()
         == _PROJECTED_MODE_ALIGNMENT_DIFF_SHA256
+    )
+
+
+def _native_solar_clipped_export_diff_is_allowlisted(actual: str) -> bool:
+    """Accept only the reviewed 2a53f413 semantic adaptation at this path."""
+    expected = _git_show(_NATIVE_SOLAR_CLIPPED_EXPORT_SOURCE, BATTERY_OPTIMIZER)
+    diff = "\n".join(
+        difflib.unified_diff(
+            expected.splitlines(),
+            actual.splitlines(),
+            fromfile="private_8eac5f53",
+            tofile="native_solar_clipped_export_candidate",
+            lineterm="",
+        )
+    )
+    return (
+        hashlib.sha256(diff.encode("utf-8")).hexdigest()
+        == _NATIVE_SOLAR_CLIPPED_EXPORT_DIFF_SHA256
     )
 
 
@@ -314,7 +340,10 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
                 expected,
                 _git_show(_PROJECTED_MODE_ALIGNMENT_SOURCE, BATTERY_OPTIMIZER),
             )
-            assert _projected_mode_alignment_diff_is_allowlisted(actual)
+            assert _projected_mode_alignment_diff_is_allowlisted(
+                _git_show(_NATIVE_SOLAR_CLIPPED_EXPORT_SOURCE, BATTERY_OPTIMIZER)
+            )
+            assert _native_solar_clipped_export_diff_is_allowlisted(actual)
         else:
             assert actual == expected
 
@@ -369,15 +398,29 @@ def test_cost_neutral_deadline_allowlist_rejects_a_nearby_mode_mutation():
 
 def test_projected_mode_alignment_allowlist_rejects_a_nearby_flow_mutation():
     """The 2cc05e2b bridge remains an exact path/symbol-specific allowance."""
-    actual = (ROOT / BATTERY_OPTIMIZER).read_text(encoding="utf-8").replace(
-        "\r\n", "\n"
-    )
+    actual = _git_show(_NATIVE_SOLAR_CLIPPED_EXPORT_SOURCE, BATTERY_OPTIMIZER)
 
     assert _projected_mode_alignment_diff_is_allowlisted(actual)
     assert not _projected_mode_alignment_diff_is_allowlisted(
         actual.replace(
             'if action in ("export", "solar_export"):',
             'if action == "export":',
+            1,
+        )
+    )
+
+
+def test_native_solar_clipped_export_allowlist_rejects_a_nearby_flow_mutation():
+    """The 2a53f413 allowance fails closed outside its exact bounded hunk."""
+    actual = (ROOT / BATTERY_OPTIMIZER).read_text(encoding="utf-8").replace(
+        "\r\n", "\n"
+    )
+
+    assert _native_solar_clipped_export_diff_is_allowlisted(actual)
+    assert not _native_solar_clipped_export_diff_is_allowlisted(
+        actual.replace(
+            "native_solar_surplus_kw = max(0.0, solar[t] - load[t])",
+            "native_solar_surplus_kw = 0.0",
             1,
         )
     )
