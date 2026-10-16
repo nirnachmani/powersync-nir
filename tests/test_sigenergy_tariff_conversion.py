@@ -104,6 +104,22 @@ def _day_intervals(day: datetime) -> list[dict]:
     return prices
 
 
+def test_sigenergy_spike_protection_never_lowers_import_or_allows_export_arbitrage(
+    sigenergy_api_module,
+):
+    buy = [{"timeRange": "08:00-08:30", "price": 900.0}]
+    sell = [{"timeRange": "08:00-08:30", "price": 950.0}]
+
+    protected = sigenergy_api_module.apply_spike_protection_sigenergy(
+        buy,
+        sell,
+        threshold_cents=100.0,
+    )
+
+    assert protected[0]["price"] > 950.0
+    assert protected[0]["price"] >= 900.0
+
+
 def test_tesla_tariff_keeps_negative_live_and_forecast_rates(
     tariff_converter_module, monkeypatch,
 ):

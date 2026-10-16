@@ -1602,67 +1602,9 @@ def _build_rolling_24h_tariff(
         if feedin_prices[key] is None:
             feedin_prices[key] = 0
 
-    # SPIKE PROTECTION: Prevent grid charging during Amber price spikes
-    # When Amber reports spikeStatus='potential' or 'spike' for specific periods,
-    # the Powerwall may see an arbitrage opportunity and charge from grid.
-    # This defeats the purpose of buying cheap and selling high during the spike.
-    # Solution: Override buy prices to max(all_sell_prices) + $1.00 to eliminate arbitrage.
-    #
-    # Uses Amber's per-period spikeStatus from the API - only protects periods that
-    # Amber identifies as having spike potential, not arbitrary time windows.
-    # Note: spikeStatus only applies to HIGH price events. Low/negative prices use descriptor='extremelyLow'.
-    if spike_protection_enabled and spike_lookup:
-        # Find maximum sell price across all periods (for override calculation)
-        max_sell_price = max(feedin_prices.values()) if feedin_prices else 0
-
-        # Account for Export Boost: if enabled, the final sell prices will be higher
-        # We must set buy price above the BOOSTED sell price, not original
-        if export_boost_enabled:
-            export_offset_dollars = export_price_offset / 100  # cents to dollars
-            export_min_dollars = export_min_price / 100  # cents to dollars
-            # Calculate what the max boosted sell price will be after export boost is applied
-            max_boosted_sell = max(max_sell_price + export_offset_dollars, export_min_dollars)
-            _LOGGER.info(
-                "Export boost enabled - adjusting spike protection: "
-                "max_sell $%.4f -> max_boosted $%.4f (offset=$%.4f, min=$%.4f)",
-                max_sell_price, max_boosted_sell, export_offset_dollars, export_min_dollars
-            )
-            max_sell_price = max_boosted_sell
-
-        # Override buy prices to max(sell) + $1.00
-        override_buy = max_sell_price + 1.00
-        periods_overridden = 0
-
-        # Build set of period keys that have spike status
-        # spike_lookup maps (date_str, hour, minute) -> spikeStatus
-        spike_period_keys = set()
-        for (date_str, hour, minute), status in spike_lookup.items():
-            period_key = f"PERIOD_{hour:02d}_{minute:02d}"
-            spike_period_keys.add(period_key)
-
-        _LOGGER.info(
-            "Spike protection active for %d periods (from Amber spikeStatus): %s",
-            len(spike_period_keys), sorted(spike_period_keys)
-        )
-
-        for period_key, buy_price in list(general_prices.items()):
-            # Only protect periods that Amber reports as having spike status
-            if period_key not in spike_period_keys:
-                continue
-
-            if override_buy > buy_price:
-                _LOGGER.info(
-                    "%s: SPIKE OVERRIDE - BUY $%.4f -> $%.4f (max_sell=$%.4f)",
-                    period_key, buy_price, override_buy, max_sell_price
-                )
-                general_prices[period_key] = override_buy
-                periods_overridden += 1
-
-        _LOGGER.warning(
-            "SPIKE PROTECTION ACTIVE: Overriding %d buy prices to $%.4f/kWh "
-            "(max_sell=$%.4f + $1.00 margin)",
-            periods_overridden, override_buy, max_sell_price
-        )
+    # Amber spike status is enforced as an optimizer automatic-grid-charge gate.
+    # Keep this tariff's actual buy prices unchanged; tariff rewrites hide the
+    # settlement spike and can create provider-specific arbitrage artifacts.
 
     return general_prices, feedin_prices, now
 

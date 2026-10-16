@@ -1400,41 +1400,34 @@ def apply_chip_mode_sigenergy(
 
 def apply_spike_protection_sigenergy(
     buy_prices: list[dict],
+    sell_prices: list[dict],
     threshold_cents: float = 100.0,
-    replacement_cents: float = 50.0,
 ) -> list[dict]:
-    """Apply spike protection to Sigenergy buy prices.
+    """Make flagged high Sigenergy buy slots non-arbitrageable without capping them.
 
-    During price spikes, this caps buy prices to prevent the battery from
-    charging from the grid at extremely high prices.
-
-    Args:
-        buy_prices: List of {timeRange: "HH:MM-HH:MM", price: float} in cents
-        threshold_cents: Price threshold above which to apply protection (c/kWh)
-        replacement_cents: Price to use when spike is detected (c/kWh)
-
-    Returns:
-        Modified list with capped buy prices
+    The real import spike is retained.  A protected slot is raised only when
+    necessary to exceed its scheduled export price, so a cloud tariff cannot
+    turn a genuine high-price interval into a grid-charge opportunity.
     """
     protected_count = 0
+    sell_by_range = {
+        str(slot.get("timeRange", "")): float(slot.get("price", 0) or 0)
+        for slot in sell_prices
+    }
 
     for slot in buy_prices:
-        time_range = slot.get("timeRange", "")
-        original_price = slot.get("price", 0)
+        original_price = float(slot.get("price", 0) or 0)
+        if original_price <= threshold_cents:
+            continue
+        scheduled_export = sell_by_range.get(str(slot.get("timeRange", "")), 0.0)
+        protected_price = max(original_price, scheduled_export + 0.01)
+        slot["price"] = round(protected_price, 2)
+        protected_count += 1
 
-        # If price exceeds threshold, cap it
-        if original_price > threshold_cents:
-            protected_count += 1
-            _LOGGER.debug(
-                "%s: Spike protection - price %.2fc → %.2fc (threshold=%.1fc)",
-                time_range, original_price, replacement_cents, threshold_cents
-            )
-            slot["price"] = round(replacement_cents, 2)
-
-    if protected_count > 0:
+    if protected_count:
         _LOGGER.info(
-            "Sigenergy spike protection: %d periods capped (threshold=%.1fc, replacement=%.1fc)",
-            protected_count, threshold_cents, replacement_cents
+            "Sigenergy spike protection retained %d high import periods above "
+            "their scheduled export price",
+            protected_count,
         )
-
     return buy_prices

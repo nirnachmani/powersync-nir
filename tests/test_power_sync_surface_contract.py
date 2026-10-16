@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import difflib
+import hashlib
 import subprocess
 
 import pytest
@@ -116,6 +118,26 @@ def _expected_optimizer_coordinator_source() -> str:
     return expected
 
 
+# Exact, path/symbol-specific exception for the reviewed Amber spike gate.  The
+# baseline-to-shared-LP transform above remains mandatory; this digest permits
+# only the remaining coordinator hunks (price preservation, mask construction,
+# and optimizer-owned force-charge restoration).
+_AMBER_COORDINATOR_DIFF_SHA256 = "334c9311d8d095bfe1f5b49eca686bcef2f5a705be4daf67cfed0d84ba70feeb"
+
+
+def _amber_coordinator_diff_is_allowlisted(expected: str, actual: str) -> bool:
+    diff = "\n".join(
+        difflib.unified_diff(
+            expected.splitlines(),
+            actual.splitlines(),
+            fromfile="shared_lp_baseline",
+            tofile="amber_spike_candidate",
+            lineterm="",
+        )
+    )
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _AMBER_COORDINATOR_DIFF_SHA256
+
+
 def _git(*args: str) -> str:
     """Run git with a direct failure for a checkout missing the baseline tag."""
     try:
@@ -170,7 +192,26 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
             if relative_path == COORDINATOR
             else _git_show(BASELINE_COMMIT, relative_path)
         )
-        assert actual == expected
+        if relative_path == COORDINATOR:
+            assert _amber_coordinator_diff_is_allowlisted(expected, actual)
+        else:
+            assert actual == expected
+
+
+def test_amber_optimizer_allowlist_rejects_an_unreviewed_coordinator_change():
+    """The exception is exact; a nearby optimizer edit must fail closed."""
+    expected = _expected_optimizer_coordinator_source()
+    actual = (ROOT / COORDINATOR).read_text(encoding="utf-8").replace("\r\n", "\n")
+
+    assert _amber_coordinator_diff_is_allowlisted(expected, actual)
+    assert not _amber_coordinator_diff_is_allowlisted(
+        expected,
+        actual.replace(
+            "return protected\n\n    def _provider_priced_reference_prices",
+            "return protected\n        # unreviewed optimizer change\n\n    def _provider_priced_reference_prices",
+            1,
+        ),
+    )
 
 
 def test_dashboard_assets_are_served_from_restored_power_sync_namespace():

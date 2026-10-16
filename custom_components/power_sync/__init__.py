@@ -26148,18 +26148,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 sell_prices = [dict(slot) for slot in buy_prices]
 
             # Apply price modifications (same features as Tesla)
-            # 1. Spike Protection - cap buy prices during extreme spikes
+            # 1. Spike Protection - retain real high buy prices above scheduled export.
             spike_protection_enabled = entry.options.get(
                 CONF_SPIKE_PROTECTION_ENABLED,
                 entry.data.get(CONF_SPIKE_PROTECTION_ENABLED, False)
             )
             if spike_protection_enabled:
-                # Use 100c/kWh as threshold (same as Tesla's $1/kWh spike threshold)
-                # Replace with 50c/kWh (moderate price to discourage but not completely block)
                 buy_prices = apply_spike_protection_sigenergy(
                     buy_prices,
+                    sell_prices,
                     threshold_cents=100.0,
-                    replacement_cents=50.0,
                 )
 
             _LOGGER.info(
