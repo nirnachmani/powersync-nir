@@ -10630,10 +10630,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         optimizer_force_snapshot = dict(self._optimizer_force_state)
                         self._clear_optimizer_force_state()
                         restore_success = True
-                        if hasattr(battery, "restore_normal"):
-                            restore_success = await battery.restore_normal()
-                        elif hasattr(battery, "set_self_consumption_mode"):
-                            restore_success = await battery.set_self_consumption_mode()
+                        try:
+                            if hasattr(battery, "restore_normal"):
+                                restore_success = await battery.restore_normal()
+                            elif hasattr(battery, "set_self_consumption_mode"):
+                                restore_success = await battery.set_self_consumption_mode()
+                        except Exception as err:
+                            self._optimizer_force_state = optimizer_force_snapshot
+                            _LOGGER.warning(
+                                "Optimizer: Amber spike restore raised %s; retaining "
+                                "force state for retry",
+                                err,
+                            )
+                            return
                         if restore_success is False:
                             self._optimizer_force_state = optimizer_force_snapshot
                             _LOGGER.warning(
