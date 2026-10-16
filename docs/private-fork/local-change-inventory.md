@@ -110,6 +110,18 @@ canonical identity and ownership checks; they are not API payload bypasses.
   physical demand; selector A/B handoff and unknown-selector zero demand are
   already covered by `test_shared_schedule_keeps_only_the_selected_profile_plan`
   and the shared-loadpoint optimizer tests.
+- Upstream `5404735c` is rejected as incompatible: its anonymous `_default`
+  profile-to-config mapping would reintroduce upstream profile selection and
+  policy fields. The private resolver already derives `override`/`yield` only
+  from the selected shared profile and fresh cycle evidence; no upstream
+  mapping, OCPP, or profile-policy storage is imported.
+- Upstream `fbd33c0b`'s delayed Generic pending-marker outcome is redundant
+  with the private `2b12e687`/`cab62150` command-boundary fence. The compatible
+  reconciliation adaptation additionally rejects a fresh but stale selected
+  profile when an external physical lease is now attributed to another logical
+  profile. That prevents `yield` from retagging it and `override` from stopping
+  it for both Generic and Sigenergy EVAC; fresh evidence remains necessary for
+  every resolver stop or cleanup.
 - The upstream stale solar-controller rearm hunk is intentionally not ported.
   It infers that no owner means a stale session and clears executor state;
   private reconciliation/physical leases use owner absence as insufficient

@@ -676,6 +676,15 @@ async def resolve_end_of_cycle_external_shared_session(
 
     temporary_lease_token = state.temporary_external_lease_token
     lease = get_lease()
+    # A current physical read does not prove that this selected profile still
+    # owns an existing external lease.  Do not retag, stop, or release a lease
+    # that a newer selector/profile transition attributed elsewhere.
+    if (
+        isinstance(lease, Mapping)
+        and lease.get("active_profile_id") is not None
+        and lease.get("active_profile_id") != active_profile_id
+    ):
+        return False
     if (
         state.stop_outcome == {"status": "confirmed"}
         and temporary_lease_token is not None
