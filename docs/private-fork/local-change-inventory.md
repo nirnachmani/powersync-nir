@@ -7,13 +7,14 @@ current repository only; it is not a deployment or upstream-update procedure.
 
 - The reviewed upstream baseline is `v2.12.1363` /
   `85f99ea62a174cd9153d5ff2ce71023dda2c9a5c`; the reviewed target is
-  `v2.12.1408` / `e3e107409b18add2213a9de617cc23591e73c873`.
+  `v2.12.1414` / `c76675e1cfb14902dc240d81245482a00a223693`.
 - `upstream-1363-1408-port-manifest.md` is the exhaustive, Git-derived
   classification for that range. It is a review record, not permission to
   cherry-pick or merge upstream production code.
-- Any future selected port must preserve the inventory below, first add its
-  behavior regression, and pass `validate_local_architecture.py` plus
-  `run_private_tests.sh`.
+- Any future selected port must preserve the inventory below and pass
+  `validate_local_architecture.py` plus `run_private_tests.sh`; an unamended
+  relevant no-interaction port preserves its upstream regression without adding
+  a private test.
 
 ## Shared physical loadpoint selection and binding
 

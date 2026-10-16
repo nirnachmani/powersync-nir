@@ -183,12 +183,11 @@ def _expected_optimizer_coordinator_source() -> str:
     return expected
 
 
-# Exact, path/symbol-specific exception for the reviewed Amber spike gate.  The
-# baseline-to-shared-LP transform above remains mandatory; this digest permits
-# only the remaining coordinator hunks (price preservation, mask construction,
-# optimizer-owned force-charge restoration, forecast-window metadata, and
-# manual self-consumption status after a cleared plan).
-_AMBER_COORDINATOR_DIFF_SHA256 = "6f500649c33a182ba03dced09b1acb8a0f1a16db5a914918b5479f6ed6cb1f95"
+# Exact, path/symbol-specific exception for reviewed Amber, forecast/status,
+# manual-state, and persisted battery-spec provenance ports. The baseline-to-
+# shared-LP transform above remains mandatory; this digest permits only those
+# bounded coordinator hunks and cannot waive an unrelated optimizer change.
+_AMBER_COORDINATOR_DIFF_SHA256 = "483f66317a3d4ed892d556719fda467436a0dc7e02e79d33f4652622fd5faa4d"
 
 # Exact, path-specific exception for the reviewed Cost Neutral reachable-
 # deadline fix. The normal optimizer baseline contract stays intact: only the
