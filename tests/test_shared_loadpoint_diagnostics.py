@@ -23,6 +23,7 @@ NOW = datetime(2026, 10, 10, 4, 0, tzinfo=timezone.utc)
 
 def _snapshot(**overrides):
     snapshot = {
+        "config_entry_id": "entry-1",
         "binding_id": "generic_ev",
         "selected_profile_id": "shared_ev_profile_a",
         "selected_profile_name": "Tank",
@@ -46,6 +47,11 @@ def test_generic_external_override_without_allowed_decision_projects_stop():
     assert result["desired_action"] == "stop"
     assert result["reason"] == "outside window"
     assert result["binding_id"] == "generic_ev"
+    assert result["identity"] == {
+        "config_entry_id": "entry-1",
+        "physical_loadpoint_id": "generic_ev",
+        "logical_profile_id": "shared_ev_profile_a",
+    }
     assert result["selected_profile"] == {"id": "shared_ev_profile_a", "name": "Tank"}
 
 
@@ -253,6 +259,8 @@ def test_endpoint_contract_is_authenticated_and_status_endpoint_is_unchanged():
     assert "class SharedLoadpointDiagnosticsView(HomeAssistantView):" in source
     assert "requires_auth = True" in source[source.index("class SharedLoadpointDiagnosticsView"):]
     assert 'return web.json_response({"success": True, "diagnostics": diagnostics})' in source
+    assert '"logical_schedule_identity"' in source
+    assert '"config_entry_id": optimization_entry_id or opt_coordinator.entry_id' in source
     status = source[source.index("class EVStatusView(HomeAssistantView):"):source.index("class SharedLoadpointDiagnosticsView(HomeAssistantView):")]
     assert 'url = "/api/power_sync/ev/status"' in status
     assert "shared_loadpoints/diagnostics" not in status

@@ -355,12 +355,19 @@ def test_optimizer_logical_schedule_presentation_is_advisory_and_preserves_local
     assert "Smart Schedule (solar)" in source
     assert "Advisory only" in source
     assert "Measured charger status remains authoritative" in source
+    assert "_logicalSchedulePresentation(data.logical_schedule_diagnostics, data.logical_schedule_identity)" in source
 
     helper_start = source.index("function _logicalSchedulePresentation")
     helper_end = source.index("\nclass PowerSyncOptimizationPlan", helper_start)
     runtime = r"""
+      const identity = {
+        config_entry_id: 'entry-a',
+        physical_loadpoint_id: 'generic_ev_a',
+        logical_profile_id: 'shared_ev_profile_a',
+      };
       const active = _logicalSchedulePresentation({
         diagnostics: [{
+          identity,
           schedule_presentation: {
             state: 'active',
             window_start: '2026-10-04T01:30:00+09:30',
@@ -368,7 +375,7 @@ def test_optimizer_logical_schedule_presentation_is_advisory_and_preserves_local
             source: 'Smart Schedule (solar)',
           },
         }],
-      });
+      }, identity);
       if (!active || active.state !== 'active' || active.source !== 'Smart Schedule (solar)') {
         throw new Error('active advisory snapshot was not accepted');
       }
@@ -380,11 +387,26 @@ def test_optimizer_logical_schedule_presentation_is_advisory_and_preserves_local
         const schedule_presentation = state === 'next'
           ? {state, window_start: '2026-10-04T04:00:00+10:30', window_end: '2026-10-04T05:00:00+10:30', source: 'Smart Schedule (solar)'}
           : {state};
-        const snapshot = _logicalSchedulePresentation({diagnostics: [{schedule_presentation}]});
+        const snapshot = _logicalSchedulePresentation({diagnostics: [{identity, schedule_presentation}]}, identity);
         if (!snapshot || snapshot.state !== state) throw new Error(`state lost: ${state}`);
       }
-      if (_logicalSchedulePresentation({diagnostics: [{schedule_presentation: {state: 'active', source: 'not smart'}}]})) {
+      if (_logicalSchedulePresentation({diagnostics: [{identity, schedule_presentation: {state: 'active', source: 'not smart'}}]}, identity)) {
         throw new Error('unreviewed source label was accepted');
+      }
+      const sibling = {
+        config_entry_id: 'entry-b',
+        physical_loadpoint_id: 'generic_ev_b',
+        logical_profile_id: 'shared_ev_profile_b',
+      };
+      const mismatch = _logicalSchedulePresentation({diagnostics: [
+        {identity: sibling, schedule_presentation: {state: 'active', window_start: '2026-10-04T01:30:00+09:30', window_end: '2026-10-04T03:30:00+10:30', source: 'Smart Schedule (solar)'}},
+        {identity, schedule_presentation: {state: 'next', window_start: '2026-10-04T04:00:00+10:30', window_end: '2026-10-04T05:00:00+10:30', source: 'Smart Schedule (grid)'}},
+      ]}, identity);
+      if (!mismatch || mismatch.state !== 'next' || mismatch.source !== 'Smart Schedule (grid)') {
+        throw new Error('an arbitrary diagnostics entry was selected instead of the exact logical identity');
+      }
+      if (_logicalSchedulePresentation({diagnostics: [{identity, schedule_presentation: {state: 'active', source: 'Smart Schedule (solar)'}}]})) {
+        throw new Error('an advisory rendered without a complete target identity');
       }
     """
     subprocess.run(["node", "-e", source[helper_start:helper_end] + runtime], check=True)

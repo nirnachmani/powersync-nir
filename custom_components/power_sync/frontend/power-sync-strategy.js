@@ -1811,9 +1811,15 @@ const OPTIMIZATION_PLAN_PENDING_RETRY_MS = 5000;
 const OPTIMIZATION_PLAN_CACHE = window.__powerSyncOptimizationPlanCache || new Map();
 window.__powerSyncOptimizationPlanCache = OPTIMIZATION_PLAN_CACHE;
 
-function _logicalSchedulePresentation(response) {
+function _logicalSchedulePresentation(response, targetIdentity) {
+  const keys = ['config_entry_id', 'physical_loadpoint_id', 'logical_profile_id'];
+  if (!targetIdentity || !keys.every(key => typeof targetIdentity[key] === 'string' && targetIdentity[key])) {
+    return null;
+  }
   const entries = Array.isArray(response?.diagnostics) ? response.diagnostics : [];
   for (const entry of entries) {
+    const identity = entry?.identity;
+    if (!identity || !keys.every(key => identity[key] === targetIdentity[key])) continue;
     const snapshot = entry?.schedule_presentation;
     if (!snapshot || !['active', 'next', 'no_plan', 'stale', 'unavailable'].includes(snapshot.state)) continue;
     if (snapshot.source !== null && snapshot.source !== undefined
@@ -2659,7 +2665,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     return {
       raw: data,
       logicalSchedule: typeof _logicalSchedulePresentation === 'function'
-        ? _logicalSchedulePresentation(data.logical_schedule_diagnostics)
+        ? _logicalSchedulePresentation(data.logical_schedule_diagnostics, data.logical_schedule_identity)
         : null,
       points,
       intervalMinutes,

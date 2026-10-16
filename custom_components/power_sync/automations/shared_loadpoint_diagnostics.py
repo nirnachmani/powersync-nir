@@ -185,10 +185,21 @@ def project_shared_loadpoint_diagnostics(snapshot: Mapping[str, Any]) -> dict[st
     selected_name = snapshot.get("selected_profile_name")
     selected_profile = selected_profile_id if isinstance(selected_profile_id, str) and selected_profile_id else None
     binding_id = snapshot.get("binding_id") if isinstance(snapshot.get("binding_id"), str) else None
+    config_entry_id = snapshot.get("config_entry_id") if isinstance(snapshot.get("config_entry_id"), str) else None
+    identity = (
+        {
+            "config_entry_id": config_entry_id,
+            "physical_loadpoint_id": binding_id,
+            "logical_profile_id": selected_profile,
+        }
+        if config_entry_id and binding_id and selected_profile
+        else None
+    )
     live_soc = _compact_soc(snapshot.get("live_soc")) if selected_profile else None
     cached_soc = _compact_soc(snapshot.get("cached_soc"), cache=True) if selected_profile else None
     return {
         "binding_id": binding_id,
+        "identity": identity,
         "selected_profile": {
             "id": selected_profile,
             "name": selected_name if selected_profile and isinstance(selected_name, str) else None,
@@ -415,6 +426,7 @@ def persisted_shared_loadpoint_diagnostics(hass: Any, config_entry: Any) -> dict
         # projection is unavailable; this must never affect control paths.
         schedule_presentations = {}
     return project_shared_loadpoint_diagnostics({
+        "config_entry_id": getattr(config_entry, "entry_id", None),
         "binding_id": binding_id,
         "selected_profile_id": selected_profile_id,
         "selected_profile_name": selected_name,

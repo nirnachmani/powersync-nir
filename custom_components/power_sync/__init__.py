@@ -44907,6 +44907,27 @@ class OptimizationView(HomeAssistantView):
 
         api_data = opt_coordinator.get_api_data()
         api_data.setdefault("features", {})["ai_summary"] = True
+        logical_schedule_identity = None
+        schedule = api_data.get("schedule") if isinstance(api_data, dict) else None
+        logical_demand = schedule.get("logical_ev_planned_demand") if isinstance(schedule, dict) else None
+        profile_id = logical_demand.get("vehicle_id") if isinstance(logical_demand, dict) else None
+        if isinstance(profile_id, str) and profile_id and config_entry is not None:
+            from .automations.shared_loadpoint import (
+                binding_for_entry,
+                canonical_shared_loadpoint_id,
+            )
+
+            if binding_for_entry(config_entry) is not None:
+                loadpoint_id = canonical_shared_loadpoint_id(config_entry, profile_id)
+                if isinstance(loadpoint_id, str) and loadpoint_id:
+                    logical_schedule_identity = {
+                        "config_entry_id": optimization_entry_id or opt_coordinator.entry_id,
+                        "physical_loadpoint_id": loadpoint_id,
+                        "logical_profile_id": profile_id,
+                    }
+        # This stable, non-secret identity lets the dashboard bind its advisory
+        # to the same entry/profile/loadpoint as the returned optimizer plan.
+        api_data["logical_schedule_identity"] = logical_schedule_identity
         service = _optimization_ai_service(
             self._hass,
             optimization_entry_id or opt_coordinator.entry_id,
