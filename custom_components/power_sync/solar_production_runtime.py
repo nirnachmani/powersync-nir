@@ -36,6 +36,8 @@ class SolarProductionRuntime:
         self.paused = False
         self._terminal = False
         self._lifecycle_lock = asyncio.Lock()
+        self._temporary_handoffs = 0
+        self._temporary_handoff_base_paused = False
         self.after_restore = None
         self._tick_running = False
 
@@ -205,18 +207,25 @@ class SolarProductionRuntime:
         """Restore owned PV controls without permanently retiring this runtime."""
         if self._terminal:
             return False
-        async with self._lifecycle_lock:
-            if self._terminal:
-                return False
-            was_paused = self.paused
-            self.paused = True
-            try:
+        # Acquire a pause lease before waiting for serialized lifecycle work.
+        # This closes the gap where one handoff could resume ticks while a
+        # second caller was already queued for the lifecycle lock.
+        if self._temporary_handoffs == 0:
+            self._temporary_handoff_base_paused = self.paused
+        self._temporary_handoffs += 1
+        self.paused = True
+        try:
+            async with self._lifecycle_lock:
+                if self._terminal:
+                    return False
                 return await self.manager.release()
-            finally:
-                # Serialized handoffs restore their prior state, but a shutdown
-                # request is irreversible even if it arrived during the release.
-                self.paused = was_paused or self._terminal
-                self.publish()
+        finally:
+            self._temporary_handoffs -= 1
+            if self._temporary_handoffs == 0:
+                self.paused = self._temporary_handoff_base_paused or self._terminal
+            else:
+                self.paused = True
+            self.publish()
 
     async def shutdown(self):
         self._terminal = True

@@ -538,15 +538,19 @@ def test_overlapping_temporary_handoffs_remain_paused_until_both_finish(runtime_
         await asyncio.sleep(0)
         assert calls == 1
         assert runtime.paused
+        assert runtime._temporary_handoffs == 2
 
         releases[0].set()
+        assert await first
+        assert runtime.paused
+        assert runtime._temporary_handoffs == 1
         await started[1].wait()
         assert runtime.paused
         releases[1].set()
 
-        assert await first
         assert await second
         assert runtime.paused is False
+        assert runtime._temporary_handoffs == 0
 
     run(scenario())
 
