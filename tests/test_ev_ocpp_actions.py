@@ -12936,6 +12936,9 @@ def test_solar_surplus_retries_failed_external_generic_stop(monkeypatch):
     assert state["current_amps"] == 12
 
     asyncio.run(actions._dynamic_ev_update_surplus(hass, entry, "entry-1", "generic_ev"))
+    assert stop_calls == [0]
+    state["_battery_floor_stop_retry_at"] = 0
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, entry, "entry-1", "generic_ev"))
     assert stop_calls == [0, 0]
     assert state["stop_outcome"]["status"] == "unconfirmed"
     assert state["current_amps"] == 12
@@ -13034,6 +13037,177 @@ def test_surplus_stop_outcome_lifecycle(monkeypatch, recovery):
     else:
         assert state["stop_outcome"]["status"] == "failed"
     # Status reconciliation must not manufacture a command/ownership settlement.
+    assert state["current_amps"] == 5
+
+
+@pytest.mark.parametrize("charger_type", ["generic", "sigenergy"])
+@pytest.mark.parametrize("outcome", [False, None])
+def test_battery_floor_stop_retains_failed_command_and_retries_after_30s(
+    monkeypatch, charger_type, outcome
+):
+    """Adapt upstream 50ef9cc0 without losing Generic/EVAC demand state."""
+    hass = _Hass([])
+    state = _solar_surplus_state(current_amps=5)
+    state["params"].update(
+        charger_type=charger_type,
+        min_battery_soc=80,
+        pause_below_soc=70,
+        notify_on_error=False,
+    )
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {"shared_ev_profile_a": state}
+    _install_solar_surplus_runtime_stubs(monkeypatch, {
+        "battery_soc": 46,
+        "grid_power": 0,
+        "battery_power": 2400,
+        "solar_power": 0,
+        "load_power": 2400,
+    })
+    stop = AsyncMock(return_value=outcome)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", stop)
+    demand_kw = []
+    calculate_surplus = actions._calculate_solar_surplus
+
+    def capture_demand(live_status, total_ev_power_kw, params, hass):
+        demand_kw.append(total_ev_power_kw)
+        return calculate_surplus(live_status, total_ev_power_kw, params, hass)
+
+    monkeypatch.setattr(actions, "_calculate_solar_surplus", capture_demand)
+
+    def tick():
+        asyncio.run(
+            actions._dynamic_ev_update_surplus(
+                hass, _Entry(), "entry-1", "shared_ev_profile_a"
+            )
+        )
+
+    tick()
+    assert state["current_amps"] == 5
+    assert state["target_amps"] == 0
+    assert state["stop_outcome"]["status"] == (
+        "failed" if outcome is False else "unconfirmed"
+    )
+    assert state["stop_outcome"]["battery_floor"] is True
+    tick()
+    stop.assert_awaited_once()
+    assert demand_kw[-1] == pytest.approx(1.2)
+
+    state["_battery_floor_stop_retry_at"] = 0
+    tick()
+    assert stop.await_count == 2
+    stop.return_value = True
+    state["_battery_floor_stop_retry_at"] = 0
+    tick()
+    assert stop.await_count == 3
+    assert state["current_amps"] == 0
+    assert state.get("stop_outcome") is None
+
+
+def test_external_generic_battery_floor_success_waits_for_fresh_readback(monkeypatch):
+    now = datetime.now(timezone.utc)
+    power = _State(
+        "sensor.charger_power",
+        "1200",
+        {"unit_of_measurement": "W"},
+        last_updated=now,
+    )
+    invalid_power = _State(
+        "sensor.invalid_power",
+        "unavailable",
+        {"unit_of_measurement": "W"},
+        last_updated=now,
+    )
+    hass = _Hass([power, invalid_power, _State("switch.charger", "on")])
+    state = _solar_surplus_state(current_amps=5)
+    state.update(external_generic_session=True)
+    state["params"].update(
+        charger_type="generic",
+        charger_power_entity="sensor.invalid_power",
+        ev_power_entity="sensor.charger_power",
+        charger_switch_entity="switch.charger",
+        min_battery_soc=80,
+        pause_below_soc=70,
+        notify_on_error=False,
+    )
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {"generic_ev": state}
+    _install_solar_surplus_runtime_stubs(monkeypatch, {
+        "battery_soc": 46,
+        "grid_power": 0,
+        "battery_power": 2400,
+        "solar_power": 0,
+        "load_power": 2400,
+    })
+    monkeypatch.setattr(
+        actions, "_get_observed_ev_power_reading_kw", AsyncMock(return_value=(1.2, True))
+    )
+    stop = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", stop)
+
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", "generic_ev"))
+    assert state["current_amps"] == 5
+    assert state["stop_outcome"]["status"] == "unconfirmed"
+    assert state["stop_outcome"]["battery_floor"] is True
+
+    monkeypatch.setattr(
+        actions, "_get_observed_ev_power_reading_kw", AsyncMock(return_value=(0.0, True))
+    )
+    power.state = "0"
+    invalid_power.last_updated = datetime.now(timezone.utc)
+    # A newer unusable alias cannot validate an older zero from the source used.
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", "generic_ev"))
+    assert state["current_amps"] == 5
+    assert state["stop_outcome"]["status"] == "unconfirmed"
+
+    confirmed_at = datetime.now(timezone.utc)
+    power.last_updated = confirmed_at
+    power.last_reported = confirmed_at
+    assert actions._configured_ev_power_reading_with_timestamp(
+        hass, state["params"]
+    ) == (0.0, True, confirmed_at)
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", "generic_ev"))
+    assert state["current_amps"] == 0
+    assert state.get("stop_outcome") is None
+    stop.assert_awaited_once()
+
+
+@pytest.mark.parametrize("charger_type", ["generic", "sigenergy"])
+def test_battery_floor_stop_does_not_settle_replacement_shared_session(
+    monkeypatch, charger_type
+):
+    hass = _Hass([])
+    state = _solar_surplus_state(current_amps=5)
+    state["params"].update(
+        charger_type=charger_type,
+        min_battery_soc=80,
+        pause_below_soc=70,
+        notify_on_error=False,
+    )
+    replacement = _solar_surplus_state(current_amps=16)
+    replacement["params"]["charger_type"] = charger_type
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {"shared_ev_profile_a": state}
+    _install_solar_surplus_runtime_stubs(monkeypatch, {
+        "battery_soc": 46,
+        "grid_power": 0,
+        "battery_power": 2400,
+        "solar_power": 0,
+        "load_power": 2400,
+    })
+
+    async def replace_session(*_args):
+        actions._dynamic_ev_state["entry-1"]["shared_ev_profile_a"] = replacement
+        return True
+
+    monkeypatch.setattr(actions, "_set_vehicle_amps", replace_session)
+    asyncio.run(
+        actions._dynamic_ev_update_surplus(
+            hass, _Entry(), "entry-1", "shared_ev_profile_a"
+        )
+    )
+
+    assert replacement["current_amps"] == replacement["target_amps"] == 16
+    assert replacement.get("stop_outcome") is None
     assert state["current_amps"] == 5
 
 

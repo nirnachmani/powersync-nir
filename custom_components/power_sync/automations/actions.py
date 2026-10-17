@@ -1841,6 +1841,34 @@ async def _get_observed_ev_power_reading_kw(
     return 0.0, False
 
 
+def _configured_ev_power_reading_with_timestamp(
+    hass: HomeAssistant,
+    params: dict,
+) -> tuple[float, bool, Optional[datetime]]:
+    """Return one configured meter value with its own observation timestamp."""
+    for key in (
+        "charger_power_entity",
+        "charger_power_sensor",
+        "charger_power_sensor_entity",
+        "ev_power_entity",
+        "ev_power_sensor",
+        "power_entity",
+    ):
+        entity_id = params.get(key)
+        if not entity_id:
+            continue
+        state = hass.states.get(str(entity_id))
+        power_kw, available = _power_state_kw_reading(state)
+        observed_at = (
+            getattr(state, "last_reported", None)
+            or getattr(state, "last_updated", None)
+            or getattr(state, "last_changed", None)
+        )
+        if available and is_current_ev_power_observation(observed_at):
+            return power_kw, True, observed_at
+    return 0.0, False, None
+
+
 async def _get_observed_ev_power_kw(
     hass: HomeAssistant,
     vehicle_id: str,
@@ -6107,6 +6135,7 @@ _BATTERY_ACCEPTANCE_MARGIN_KW = 0.3
 _BATTERY_ACCEPTANCE_STABLE_SAMPLES = 2
 _BATTERY_ACCEPTANCE_EMA_ALPHA = 0.35
 _ACTIVE_EV_POWER_EPSILON_KW = 0.05
+_BATTERY_FLOOR_STOP_RETRY_SECONDS = 30
 
 # Lock to prevent duplicate dynamic EV charging sessions from concurrent triggers
 _start_dynamic_lock = asyncio.Lock()
@@ -10704,7 +10733,7 @@ async def _dynamic_ev_update_surplus(
         if v_state.get("paused") and not (
             vid == vehicle_id
             and str((v_state.get("params") or {}).get("charger_type") or "").lower()
-            == "generic"
+            in {"generic", "sigenergy"}
             and v_state.get("stop_outcome")
         ):
             continue
@@ -10780,15 +10809,23 @@ async def _dynamic_ev_update_surplus(
         == EXTERNAL_CONTROL_POLICY_YIELD
     )
 
+    generic_readback_kw, generic_readback_available, generic_readback_at = (
+        _configured_ev_power_reading_with_timestamp(hass, params)
+    )
     generic_stop_readback_confirmed = (
         params.get("charger_type", "tesla") == "generic"
         and bool(state.get("external_generic_session"))
         and bool(state.get("stop_outcome"))
-        and current_vehicle_power_available
-        and observed_current_power_kw <= _ACTIVE_EV_POWER_EPSILON_KW
+        and generic_readback_available
+        and generic_readback_kw <= _ACTIVE_EV_POWER_EPSILON_KW
+        and _datetime_is_after(
+            generic_readback_at,
+            (state.get("stop_outcome") or {}).get("requested_at"),
+        )
     )
     if generic_stop_readback_confirmed:
         state.pop("stop_outcome", None)
+        state.pop("_battery_floor_stop_retry_at", None)
         state.pop("external_generic_session", None)
         state.pop("last_stop_command_at", None)
         state["current_amps"] = 0
@@ -10798,7 +10835,11 @@ async def _dynamic_ev_update_surplus(
         state["reason"] = "Generic Charger stop confirmed by fresh power readback"
         current_amps = 0
 
-    async def _request_external_generic_stop(stop_reason: str) -> bool | None:
+    async def _request_external_generic_stop(
+        stop_reason: str,
+        *,
+        battery_floor: bool = False,
+    ) -> bool | None:
         """Request a stop while retaining the physical session until readback."""
         if not (
             params.get("charger_switch_entity")
@@ -10811,6 +10852,7 @@ async def _dynamic_ev_update_surplus(
                     "Generic Charger is still drawing power, but no configured "
                     "stop entity is available"
                 ),
+                "battery_floor": battery_floor,
             }
             return False
 
@@ -10818,6 +10860,7 @@ async def _dynamic_ev_update_surplus(
             "status": "pending",
             "requested_at": datetime.now(dt_timezone.utc),
             "reason": "Stop requested; awaiting fresh zero-power readback",
+            "battery_floor": battery_floor,
         }
         success = await _set_vehicle_amps(
             hass,
@@ -10857,6 +10900,70 @@ async def _dynamic_ev_update_surplus(
                 ),
             )
         return success
+
+    async def _request_battery_floor_stop() -> None:
+        """Retry an unsettled floor stop without erasing physical demand.
+
+        Compatible adaptation of upstream 50ef9cc0. Shared Generic/EVAC writes
+        deliberately remain behind ``_set_vehicle_amps`` so selector, canonical
+        loadpoint, physical-lease, and replacement-session fences still apply.
+        """
+        stop_outcome = state.get("stop_outcome") or {}
+        if state.get("current_amps", 0) <= 0 and not stop_outcome:
+            return
+        if (
+            stop_outcome.get("battery_floor")
+            and time.monotonic() < state.get("_battery_floor_stop_retry_at", 0)
+        ):
+            return
+
+        state["target_amps"] = 0
+        state["_battery_floor_stop_retry_at"] = (
+            time.monotonic() + _BATTERY_FLOOR_STOP_RETRY_SECONDS
+        )
+        if state.get("external_generic_session"):
+            await _request_external_generic_stop(
+                state.get("paused_reason") or "Battery floor stop requested",
+                battery_floor=True,
+            )
+            return
+
+        state["stop_outcome"] = {
+            "status": "pending",
+            "requested_at": datetime.now(dt_timezone.utc),
+            "reason": "Battery floor stop requested; awaiting result",
+            "battery_floor": True,
+        }
+        success = await _set_vehicle_amps(
+            hass,
+            config_entry,
+            vehicle_id,
+            0,
+            params,
+        )
+        if _session_was_replaced("battery-floor stop"):
+            return
+        record_ev_command(
+            hass,
+            config_entry,
+            vehicle_id,
+            command="stop",
+            success=bool(success),
+            reason=state.get("paused_reason"),
+        )
+        if success:
+            state.pop("stop_outcome", None)
+            state.pop("_battery_floor_stop_retry_at", None)
+            state["current_amps"] = 0
+        else:
+            state["stop_outcome"].update(
+                status="unconfirmed" if success is None else "failed",
+                reason=(
+                    "Battery floor stop unconfirmed; retry pending"
+                    if success is None
+                    else "Battery floor stop unsuccessful; retry pending"
+                ),
+            )
 
     if state.get("external_manual_override") and not yield_external_control:
         release_external_ev_ownership(
@@ -11175,10 +11282,9 @@ async def _dynamic_ev_update_surplus(
                 state["paused"] = True
                 state["paused_reason"] = f"Strict surplus paused - {unsafe_reason}"
                 _LOGGER.info(f"⚡ Solar surplus EV: {state['paused_reason']}")
-            await _set_vehicle_amps(hass, config_entry, vehicle_id, 0, params)
+            await _request_battery_floor_stop()
             if _session_was_replaced("strict-surplus pause"):
                 return
-            state["current_amps"] = 0
             return
 
     # Don't start charging until battery reaches min_soc (unless strict solar surplus is available)
@@ -11211,7 +11317,7 @@ async def _dynamic_ev_update_surplus(
                     state["paused_reason"] = f"Waiting for battery to reach {min_soc}% (currently {battery_soc:.0f}%)"
                 _LOGGER.debug(f"Solar surplus EV: {state['paused_reason']}")
                 if external_generic_floor_stop:
-                    await _request_external_generic_stop(state["paused_reason"])
+                    await _request_battery_floor_stop()
                 return
         else:
             state["paused"] = False
@@ -11229,15 +11335,15 @@ async def _dynamic_ev_update_surplus(
                 state["paused_reason"] = None
         else:
             # Normal mode: pause below pause_soc threshold
-            if not state.get("paused"):
+            newly_paused = not state.get("paused")
+            if newly_paused:
                 state["paused"] = True
                 state["paused_reason"] = f"Battery dropped to {battery_soc:.0f}% (pause threshold: {pause_soc}%)"
                 _LOGGER.info(f"⚡ Solar surplus EV: Pausing - {state['paused_reason']}")
-                await _set_vehicle_amps(hass, config_entry, vehicle_id, 0, params)
-                if _session_was_replaced("battery-floor pause"):
-                    return
-                state["current_amps"] = 0
-
+            await _request_battery_floor_stop()
+            if _session_was_replaced("battery-floor pause"):
+                return
+            if newly_paused:
                 # Send pause notification
                 notify_on_error = params.get("notify_on_error", True)
                 if notify_on_error:
@@ -11250,7 +11356,8 @@ async def _dynamic_ev_update_surplus(
                         await _send_expo_push(
                             hass,
                             "EV Charging",
-                            f"{vehicle_name} paused - battery low ({battery_soc:.0f}%)"
+                            f"{vehicle_name} {'stop pending' if state.get('stop_outcome') else 'paused'} "
+                            f"- battery low ({battery_soc:.0f}%)"
                         )
                     except Exception as e:
                         _LOGGER.debug(f"Could not send pause notification: {e}")
@@ -11314,6 +11421,8 @@ async def _dynamic_ev_update_surplus(
             # A paused session must not fall through to the surplus allocator.
             # Otherwise sustained solar can issue a new current/start command
             # while the battery is still below its resume threshold.
+            if (state.get("stop_outcome") or {}).get("battery_floor"):
+                await _request_battery_floor_stop()
             return
 
     # Calculate current EV power for THIS vehicle. Prefer measured charger

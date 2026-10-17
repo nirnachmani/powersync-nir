@@ -7,7 +7,7 @@ current repository only; it is not a deployment or upstream-update procedure.
 
 - The reviewed upstream baseline is `v2.12.1363` /
   `85f99ea62a174cd9153d5ff2ce71023dda2c9a5c`; the reviewed target is
-  `v2.12.1414` / `c76675e1cfb14902dc240d81245482a00a223693`.
+  `v2.12.1417` / `0863c7d2e85ca46d8ff1272cc246685c28321cca`.
 - `upstream-1363-1408-port-manifest.md` is the exhaustive, Git-derived
   classification for that range. It is a review record, not permission to
   cherry-pick or merge upstream production code.
@@ -137,6 +137,18 @@ canonical identity and ownership checks; they are not API payload bypasses.
   guard tests cover selector change, idle/live handoff, external ownership, and
   newer-cycle invalidation. OCPP price-policy changes and configuration/UI
   timeout model are intentionally excluded from this private safety slice.
+- From upstream `50ef9cc0`, unsuccessful Generic/Sigenergy solar battery-floor
+  stops retain physical demand and retry after a bounded delay. Shared writes
+  still pass the selected logical-profile, canonical loadpoint, physical lease,
+  and replacement-session fences. An adopted external Generic session settles
+  only from a usable power sample whose own timestamp follows the stop request.
+- Upstream `2ff8c9d2` is ported verbatim at the vendor-neutral Disable Idle
+  projection seam: charge-by-time feasibility now includes the effective
+  self-consumption action that runtime will execute. The exact optimizer source
+  delta remains fail-closed in the continuity allowlist.
+- Upstream `38e606e0` is deferred because its persisted zero-cost provenance
+  caller and tests depend on unported upstream `3f90add6`; applying only its
+  mechanically matching hunks would add inert behavior.
 
 ## Android and diagnostics contracts
 

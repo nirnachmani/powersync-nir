@@ -1199,6 +1199,47 @@ def test_set_vehicle_amps_claims_shared_lease_before_competing_profile_can_write
     set_amps.assert_awaited_once()
 
 
+@pytest.mark.parametrize("charger_type", ["generic", "sigenergy"])
+def test_battery_floor_retry_boundary_fails_closed_after_selector_change(
+    monkeypatch, charger_type
+):
+    """The 50ef9cc0 retry must retain the private selector/lease command fence."""
+    hass = _Hass(selector_state="tesla")
+    entry = _Entry()
+    params = {"charger_type": charger_type}
+    if charger_type == "generic":
+        params.update(_generic_params())
+        write = AsyncMock(return_value=True)
+        monkeypatch.setattr(actions, "_set_generic_charger_amps_entity", write)
+    else:
+        entry.options = {
+            **entry.options,
+            "generic_charger_enabled": False,
+            "sigenergy_charger_enabled": True,
+            "sigenergy_charger_type": "evac",
+        }
+        write = AsyncMock(return_value=True)
+        monkeypatch.setattr(actions, "_set_sigenergy_charger_amps", write)
+
+    result = asyncio.run(
+        actions._set_vehicle_amps(
+            hass,
+            entry,
+            "shared_ev_profile_a",
+            0,
+            params,
+        )
+    )
+
+    assert result is False
+    write.assert_not_awaited()
+    assert ownership.get_ev_ownership(
+        hass,
+        entry,
+        "generic_ev" if charger_type == "generic" else "sigenergy_charger",
+    )[1] is None
+
+
 def test_direct_shared_current_write_reaches_current_physical_lease_owner(monkeypatch):
     hass = _Hass()
     _claim_shared_loadpoint(hass, profile_id="shared_ev_profile_a")

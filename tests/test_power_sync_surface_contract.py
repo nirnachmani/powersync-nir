@@ -222,6 +222,14 @@ _NATIVE_SOLAR_CLIPPED_EXPORT_DIFF_SHA256 = (
     "303f33c1f73f95d5eb960c785e2852443c362a77b84aa7dfa68271ff6fe8750f"
 )
 
+# Exact allowance for upstream 2ff8c9d2 on top of the fully reviewed private
+# optimizer source. Disable Idle must project the self-consumption action that
+# runtime will actually execute; no broader optimizer delta is admitted.
+_DISABLE_IDLE_DEADLINE_SOURCE = "25f388110c1159fbaf08d614e77af6ef4dc32f03"
+_DISABLE_IDLE_DEADLINE_DIFF_SHA256 = (
+    "439af72abf5bebc40606628da6517cac7773365a41fbe3da7c1dded53ba21b20"
+)
+
 
 def _amber_coordinator_diff_is_allowlisted(expected: str, actual: str) -> bool:
     diff = "\n".join(
@@ -287,6 +295,24 @@ def _native_solar_clipped_export_diff_is_allowlisted(actual: str) -> bool:
     return (
         hashlib.sha256(diff.encode("utf-8")).hexdigest()
         == _NATIVE_SOLAR_CLIPPED_EXPORT_DIFF_SHA256
+    )
+
+
+def _disable_idle_deadline_diff_is_allowlisted(actual: str) -> bool:
+    """Accept only the reviewed upstream 2ff8c9d2 optimizer hunk."""
+    expected = _git_show(_DISABLE_IDLE_DEADLINE_SOURCE, BATTERY_OPTIMIZER)
+    diff = "\n".join(
+        difflib.unified_diff(
+            expected.splitlines(),
+            actual.splitlines(),
+            fromfile="private_25f38811",
+            tofile="disable_idle_deadline_candidate",
+            lineterm="",
+        )
+    )
+    return (
+        hashlib.sha256(diff.encode("utf-8")).hexdigest()
+        == _DISABLE_IDLE_DEADLINE_DIFF_SHA256
     )
 
 
@@ -369,7 +395,10 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
             assert _projected_mode_alignment_diff_is_allowlisted(
                 _git_show(_NATIVE_SOLAR_CLIPPED_EXPORT_SOURCE, BATTERY_OPTIMIZER)
             )
-            assert _native_solar_clipped_export_diff_is_allowlisted(actual)
+            assert _native_solar_clipped_export_diff_is_allowlisted(
+                _git_show(_DISABLE_IDLE_DEADLINE_SOURCE, BATTERY_OPTIMIZER)
+            )
+            assert _disable_idle_deadline_diff_is_allowlisted(actual)
         else:
             assert actual == expected
 
@@ -438,9 +467,7 @@ def test_projected_mode_alignment_allowlist_rejects_a_nearby_flow_mutation():
 
 def test_native_solar_clipped_export_allowlist_rejects_a_nearby_flow_mutation():
     """The 2a53f413 allowance fails closed outside its exact bounded hunk."""
-    actual = (ROOT / BATTERY_OPTIMIZER).read_text(encoding="utf-8").replace(
-        "\r\n", "\n"
-    )
+    actual = _git_show(_DISABLE_IDLE_DEADLINE_SOURCE, BATTERY_OPTIMIZER)
 
     assert _native_solar_clipped_export_diff_is_allowlisted(actual)
     assert not _native_solar_clipped_export_diff_is_allowlisted(
@@ -449,6 +476,18 @@ def test_native_solar_clipped_export_allowlist_rejects_a_nearby_flow_mutation():
             "native_solar_surplus_kw = 0.0",
             1,
         )
+    )
+
+
+def test_disable_idle_deadline_allowlist_rejects_a_nearby_policy_mutation():
+    """The 2ff8c9d2 allowance fails closed outside its exact reviewed hunk."""
+    actual = (ROOT / BATTERY_OPTIMIZER).read_text(encoding="utf-8").replace(
+        "\r\n", "\n"
+    )
+
+    assert _disable_idle_deadline_diff_is_allowlisted(actual)
+    assert not _disable_idle_deadline_diff_is_allowlisted(
+        actual.replace("not disable_idle", "disable_idle", 1)
     )
 
 
