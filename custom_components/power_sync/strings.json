@@ -1304,7 +1304,10 @@
       "duplicate_shared_loadpoint_state": "Logical EV A and B must have different selector states.",
       "duplicate_shared_loadpoint_soc_entity": "Logical EV A and B must use different battery SoC sensors.",
       "shared_loadpoint_multiple_backends": "A shared loadpoint supports exactly one physical backend: Generic Charger or Sigenergy EVAC.",
-      "shared_loadpoint_no_supported_backend": "A shared loadpoint requires exactly one enabled supported backend: Generic Charger or Sigenergy EVAC."
+      "shared_loadpoint_no_supported_backend": "A shared loadpoint requires exactly one enabled supported backend: Generic Charger or Sigenergy EVAC.",
+      "solar_production_control_required": "Select PV production controls or configure Sigenergy.",
+      "invalid_solar_production_entity": "Select available PV production switches or production-limit numbers that support zero.",
+      "solar_production_grid_status_required": "Select a sensor that confirms the utility grid is connected before stopping solar."
     },
     "step": {
       "init": {
@@ -2531,7 +2534,7 @@
       },
       "curtailment_options": {
         "title": "Curtailment settings",
-        "description": "Configure automatic curtailment. By default, it begins only when export earnings are negative; earnings of 0 c/kWh are not curtailed. Changes take effect immediately.",
+        "description": "Configure export curtailment and optional PV production stopping during negative retail import prices. Each has its own permission and controls.",
         "data": {
           "battery_curtailment_enabled": "Enable battery export curtailment",
           "ac_inverter_curtailment_enabled": "Enable separate AC-coupled inverter shutdown",
@@ -2539,7 +2542,13 @@
           "curtailment_control_in_monitoring_mode": "Allow curtailment control in Monitoring Mode",
           "powerwall_offgrid_as_curtailment": "Enable Powerwall off-grid fallback",
           "sigenergy_dc_curtailment_enabled": "Enable DC solar curtailment",
-          "openweathermap_api_key": "OpenWeatherMap API key"
+          "openweathermap_api_key": "OpenWeatherMap API key",
+          "negative_import_solar_enabled": "Stop solar when the import price is negative",
+          "solar_production_control_entities": "PV production controls (optional with Sigenergy)",
+          "negative_import_solar_controls_all_pv": "These controls cover all solar generation",
+          "solar_production_power_entity": "Controlled solar production power sensor (optional)",
+          "solar_production_import_price_entity": "Retail import price sensor (optional)",
+          "solar_production_grid_connected_entity": "Grid connected sensor"
         },
         "data_description": {
           "battery_curtailment_enabled": "Stop battery export when earnings fall below the configured threshold (negative earnings by default). This controls the battery/Tesla path only; supported DC solar curtailment has its own opt-in.",
@@ -2548,7 +2557,13 @@
           "curtailment_control_in_monitoring_mode": "When explicitly enabled, automatic curtail and restore commands may run while Monitoring Mode continues to block every unrelated battery, EV, and inverter dispatch command. Curtailment can change solar output or inverter export settings.",
           "powerwall_offgrid_as_curtailment": "Allow PowerSync to temporarily island the Powerwall when export curtailment is needed but no AC inverter curtailment path is configured or available.",
           "sigenergy_dc_curtailment_enabled": "Reduce DC solar output when export earnings drop below the configured threshold (negative earnings by default). This is independent of battery export curtailment and requires Modbus write access; Monitoring Mode also requires curtailment-control permission.",
-          "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny, cloudy, rain, snow, and storm triggers). Leave blank to disable."
+          "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny, cloudy, rain, snow, and storm triggers). Leave blank to disable.",
+          "negative_import_solar_enabled": "Stop PV generation below 0 c/kWh retail import price, independently of export earnings or battery SOC. Restores the saved setting at 0 or above, or when the current price expires. Disabled by default.",
+          "solar_production_control_entities": "Select PV-only production-enable switches or production-limit numbers that accept zero. Never select export limits, grid switches, battery controls, or load relays. Leave empty to use Sigenergy's native DC PV limit.",
+          "negative_import_solar_controls_all_pv": "Enable only if these controls cover every PV source at the site. The optimiser then plans zero solar during negative import slots.",
+          "solar_production_power_entity": "Power in W or kW from controlled PV. A fresh post-command sample is required to confirm that production stopped.",
+          "solar_production_import_price_entity": "Optional timestamped retail import sensor with supported minor-unit/kWh or currency/kWh units. Raw wholesale prices must not be used.",
+          "solar_production_grid_connected_entity": "Required fresh utility-grid connection proof. Lost or stale status restores owned PV controls."
         },
         "submit": "Save"
       },
@@ -2867,6 +2882,9 @@
         },
         "submit": "Save"
       }
+    },
+    "abort": {
+      "solar_production_restore_pending": "The saved PV production setting could not be restored. Settings were not changed. Check device availability and retry."
     }
   },
   "issues": {

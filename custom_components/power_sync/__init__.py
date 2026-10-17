@@ -24004,6 +24004,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "_calibration_check_unsub": None,
     }
 
+    # Adapted from upstream 24fcc7d. Production stopping is independent of
+    # export-price and battery routes and restores its durable journal first.
+    from .solar_production_runtime import SolarProductionRuntime
+
+    solar_production_runtime = SolarProductionRuntime(
+        hass,
+        entry,
+        hass.data[DOMAIN][entry.entry_id],
+        lambda: _aemo_dispatch_entry_data() is not None
+        and _monitoring_mode_allows_curtailment(True),
+        amber_coordinator,
+    )
+    hass.data[DOMAIN][entry.entry_id][
+        "solar_production_runtime"
+    ] = solar_production_runtime
+
     if globird_coordinator and globird_initial_refresh_failed:
         globird_coordinator.async_start_initial_retry()
 
@@ -25136,6 +25152,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """
         entry_data = _aemo_dispatch_entry_data()
         if entry_data is None:
+            return False
+
+        production = entry_data.get("solar_production_runtime")
+        if production and production.blocks_export_control:
             return False
 
         if ac_inverter_is_same_hybrid():
@@ -42504,6 +42524,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.data[DOMAIN][entry.entry_id]["fp_account_cancel"] = fp_account_cancel
             _LOGGER.info("Flow Power API account data refresh scheduled (every 30min)")
 
+    async def _reconcile_export_after_production_restore():
+        """Re-evaluate Amber export curtailment after PV production is restored."""
+        data = _aemo_dispatch_entry_data()
+        if data is None or not _monitoring_mode_allows_curtailment(True):
+            return
+        feedin, import_price, _ = get_current_prices_for_curtailment(
+            data, (amber_coordinator,)
+        )
+        if feedin is not None:
+            await apply_inverter_curtailment(
+                export_earnings_are_uneconomic(-feedin, False, entry),
+                import_price=import_price,
+                export_earnings=-feedin,
+            )
+
+    solar_production_runtime.after_restore = (
+        _reconcile_export_after_production_restore
+    )
+    await solar_production_runtime.tick()
+
     # Set up fast load-following update for responsive power limiting.
     # Enphase DPEL can time out quickly, so it is checked every 15 seconds;
     # other brands keep the existing effective 30-second cadence.
@@ -42513,6 +42553,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry_data = _aemo_dispatch_entry_data()
             if entry_data is None:
                 return
+            production = entry_data.get("solar_production_runtime")
+            if production:
+                await production.tick()
+                if production.blocks_export_control:
+                    return
 
             if ac_inverter_is_same_hybrid():
                 return
@@ -46780,6 +46825,19 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if vpp_aemo_cancel := entry_data.get("vpp_aemo_cancel"):
         vpp_aemo_cancel()
         _LOGGER.debug("Cancelled VPP AEMO spike timer")
+
+    if production := entry_data.get("solar_production_runtime"):
+        try:
+            if not await production.shutdown():
+                _LOGGER.warning(
+                    "PV production restore remains pending; durable recovery "
+                    "will retry on setup"
+                )
+        except Exception:
+            _LOGGER.exception(
+                "PV production cleanup failed; durable restore journal retained"
+            )
+
     if vpp_aemo_initial_task := entry_data.get("vpp_aemo_initial_task"):
         vpp_aemo_initial_task.cancel()
         _LOGGER.debug("Cancelled initial VPP AEMO spike check")

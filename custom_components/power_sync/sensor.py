@@ -2381,6 +2381,10 @@ async def async_setup_entry(
     )
     _LOGGER.info("Tariff schedule sensor added for TOU visualization")
 
+    from .solar_production_sensor import SolarProductionControlSensor
+
+    entities.append(SolarProductionControlSensor(entry))
+
     # Add solar curtailment sensor if curtailment is enabled
     if any(get_effective_solar_curtailment_configuration(entry)):
         entities.append(

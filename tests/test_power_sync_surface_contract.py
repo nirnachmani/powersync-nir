@@ -197,7 +197,16 @@ def _expected_optimizer_coordinator_source() -> str:
 # provenance ports. The baseline-to-shared-LP transform above remains
 # mandatory; this digest permits only those bounded coordinator hunks and
 # cannot waive an unrelated optimizer change.
-_AMBER_COORDINATOR_DIFF_SHA256 = "e5fcacc99cb9aa0e3f642ab81f3f45c291fa9ed4252c337cddfccba885515c43"
+_AMBER_COORDINATOR_DIFF_SHA256 = "721fd3d8a5db88106eeeae48e23c960ad0c5e008b73cd838cb3407809c9d30dd"
+
+# Exact allowance for the three reviewed 24fcc7d solar
+# projection/learning/derating hunks. The source is the detached candidate's
+# already-reviewed provenance cohort; no off-grid or vendor-specific hunk is
+# admitted by this digest.
+_NEGATIVE_IMPORT_SOLAR_SOURCE = "5ddd156708d1b5b05f1a67be87d1fb0ea99653c7"
+_NEGATIVE_IMPORT_SOLAR_DIFF_SHA256 = (
+    "43337ffcfef82d7503b40a8375f49ccebd6253e17311a2f661c58655d98be536"
+)
 
 # Exact, path-specific exception for the reviewed Cost Neutral reachable-
 # deadline fix. The normal optimizer baseline contract stays intact: only the
@@ -242,6 +251,24 @@ def _amber_coordinator_diff_is_allowlisted(expected: str, actual: str) -> bool:
         )
     )
     return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _AMBER_COORDINATOR_DIFF_SHA256
+
+
+def _negative_import_solar_diff_is_allowlisted(actual: str) -> bool:
+    """Accept only the reviewed 24fcc7d optimiser subset."""
+    expected = _git_show(_NEGATIVE_IMPORT_SOLAR_SOURCE, COORDINATOR)
+    diff = "\n".join(
+        difflib.unified_diff(
+            expected.splitlines(),
+            actual.splitlines(),
+            fromfile="private_5ddd1567",
+            tofile="negative_import_solar_candidate",
+            lineterm="",
+        )
+    )
+    return (
+        hashlib.sha256(diff.encode("utf-8")).hexdigest()
+        == _NEGATIVE_IMPORT_SOLAR_DIFF_SHA256
+    )
 
 
 def _cost_neutral_reachable_deadline_diff_is_allowlisted(
@@ -383,7 +410,9 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
             else _git_show(BASELINE_COMMIT, relative_path)
         )
         if relative_path == COORDINATOR:
-            assert _amber_coordinator_diff_is_allowlisted(expected, actual)
+            source = _git_show(_NEGATIVE_IMPORT_SOLAR_SOURCE, COORDINATOR)
+            assert _amber_coordinator_diff_is_allowlisted(expected, source)
+            assert _negative_import_solar_diff_is_allowlisted(actual)
         elif relative_path == BATTERY_OPTIMIZER:
             # Preserve proof that e3c17217 itself contains only the earlier,
             # reviewed solar-refill and reachable-deadline changes before
@@ -406,7 +435,7 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
 def test_amber_optimizer_allowlist_rejects_an_unreviewed_coordinator_change():
     """The exception is exact; a nearby optimizer edit must fail closed."""
     expected = _expected_optimizer_coordinator_source()
-    actual = (ROOT / COORDINATOR).read_text(encoding="utf-8").replace("\r\n", "\n")
+    actual = _git_show(_NEGATIVE_IMPORT_SOLAR_SOURCE, COORDINATOR)
 
     assert _amber_coordinator_diff_is_allowlisted(expected, actual)
     assert not _amber_coordinator_diff_is_allowlisted(
@@ -416,6 +445,22 @@ def test_amber_optimizer_allowlist_rejects_an_unreviewed_coordinator_change():
             "return protected\n        # unreviewed optimizer change\n\n    def _provider_priced_reference_prices",
             1,
         ),
+    )
+
+
+def test_negative_import_solar_allowlist_rejects_a_nearby_policy_mutation():
+    """The 24fcc7d allowance is exact and fails closed."""
+    actual = (ROOT / COORDINATOR).read_text(encoding="utf-8").replace(
+        "\r\n", "\n"
+    )
+
+    assert _negative_import_solar_diff_is_allowlisted(actual)
+    assert not _negative_import_solar_diff_is_allowlisted(
+        actual.replace(
+            "enabled=bool(production and production.can_project()),",
+            "enabled=True,",
+            1,
+        )
     )
 
 

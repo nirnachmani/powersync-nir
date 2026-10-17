@@ -7169,6 +7169,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             capped, curtail_threshold * 100,
                         )
 
+            # Adapted from upstream 24fcc7d: project zero PV only while the
+            # explicitly whole-site production stop is currently confirmed.
+            from ..solar_production import planned_solar
+
+            production = (
+                self.hass.data.get("power_sync", {})
+                .get(self._entry.entry_id, {})
+                .get("solar_production_runtime")
+                if self._entry
+                else None
+            )
+            solar_forecast = planned_solar(
+                solar_forecast,
+                import_prices,
+                enabled=bool(production and production.can_project()),
+            )
+
             solver_solar_forecast = list(solar_forecast)
 
             if solar_forecast and load_forecast:
@@ -15355,6 +15372,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 for key, value in runtime.items()
             ):
                 reason = "curtailment"
+            if isinstance(runtime, dict) and runtime.get(
+                "solar_production_stop", {}
+            ).get("restore_required"):
+                reason = "curtailment"
 
         try:
             actual_kw = float(data.get("solar_power"))
@@ -15407,6 +15428,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Solcast forecast.
         """
         if not solar_forecast:
+            return solar_forecast
+        runtime = getattr(getattr(self, "hass", None), "data", {}).get(
+            "power_sync", {}
+        ).get(getattr(self, "entry_id", ""), {})
+        if runtime.get("solar_production_stop", {}).get("restore_required"):
             return solar_forecast
         if soc >= 0.98:
             # Near-full batteries and curtailment can make measured solar lower
