@@ -167,10 +167,13 @@ def migrate(args: argparse.Namespace) -> dict[str, Any]:
         legacy = json.loads(args.legacy_state.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise LedgerError(f"invalid legacy state {args.legacy_state}: {error}") from error
-    if not isinstance(legacy, dict) or not isinstance(legacy.get("last_reviewed_upstream"), str):
+    legacy_checkpoint_value = legacy.get("last_reviewed_upstream") if isinstance(legacy, dict) else None
+    if isinstance(legacy_checkpoint_value, dict):
+        legacy_checkpoint_value = legacy_checkpoint_value.get("sha")
+    if not isinstance(legacy_checkpoint_value, str) or not legacy_checkpoint_value:
         raise LedgerError("legacy state must contain last_reviewed_upstream; inspect it before migration")
     baseline = _resolve_commit(args.repo, args.baseline, "baseline")
-    legacy_checkpoint = _resolve_commit(args.repo, legacy["last_reviewed_upstream"], "legacy checkpoint")
+    legacy_checkpoint = _resolve_commit(args.repo, legacy_checkpoint_value, "legacy checkpoint")
     if baseline != legacy_checkpoint:
         raise LedgerError("--baseline must exactly resolve to legacy last_reviewed_upstream")
     ledger = _new_ledger(baseline, args.migration_boundary, args.migration_reference)

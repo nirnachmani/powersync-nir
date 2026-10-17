@@ -244,3 +244,49 @@ def test_migration_uses_a_distinct_ledger_output_and_preserves_legacy_upstream_s
     assert ledger_state != legacy
     assert json.loads(legacy.read_text(encoding="utf-8")) == legacy_payload
     assert json.loads(ledger_state.read_text(encoding="utf-8"))["checkpoint"] == baseline
+
+
+def test_migration_accepts_server_legacy_upstream_metadata_and_uses_its_sha(tmp_path):
+    repo, baseline, _first, _second = _repo(tmp_path)
+    legacy = tmp_path / "state/upstream.json"
+    ledger_state = tmp_path / "state/maintainer_ledger.json"
+    legacy_payload = {
+        "last_reviewed_upstream": {
+            "sha": baseline,
+            "tag": "v2.12.1418",
+            "tag_sha": "a" * 40,
+        }
+    }
+    legacy.parent.mkdir()
+    legacy.write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+    migrated = _run(
+        repo, "migrate", "--state", str(ledger_state), "--legacy-state", str(legacy),
+        "--baseline", baseline, "--migration-boundary", "v2.12.1418",
+        "--migration-reference", "pre-ledger history only",
+    )
+
+    assert migrated.returncode == 0, migrated.stderr
+    assert json.loads(legacy.read_text(encoding="utf-8")) == legacy_payload
+    assert json.loads(ledger_state.read_text(encoding="utf-8"))["checkpoint"] == baseline
+
+
+def test_migration_rejects_malformed_server_legacy_upstream_metadata(tmp_path):
+    repo, baseline, _first, _second = _repo(tmp_path)
+
+    for malformed_metadata in ({}, {"sha": None}, {"sha": 1}, {"sha": ""}):
+        legacy = tmp_path / "legacy.json"
+        ledger_state = tmp_path / "ledger.json"
+        legacy.write_text(
+            json.dumps({"last_reviewed_upstream": malformed_metadata}), encoding="utf-8"
+        )
+
+        migrated = _run(
+            repo, "migrate", "--state", str(ledger_state), "--legacy-state", str(legacy),
+            "--baseline", baseline, "--migration-boundary", "v2.12.1418",
+            "--migration-reference", "pre-ledger history only",
+        )
+
+        assert migrated.returncode != 0
+        assert "legacy state must contain last_reviewed_upstream" in migrated.stderr
+        assert not ledger_state.exists()
