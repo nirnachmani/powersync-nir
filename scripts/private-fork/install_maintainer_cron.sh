@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install one paused, report-only upstream-review cron job into an explicit profile.
+# Install one paused upstream-maintenance cron job into an explicit profile.
 set -euo pipefail
 
 JOB_NAME="powersync-private-upstream-review"
@@ -10,8 +10,10 @@ usage() {
   cat >&2 <<'EOF'
 Usage: install_maintainer_cron.sh --apply|--dry-run --repo PATH --profile-home PATH --state PATH --reports-dir PATH
 
-Creates only a paused, local-delivery maintainer review job. --apply is required
-for scheduler changes; --dry-run validates and prints the exact create command.
+Creates a paused, local-delivery maintainer updater job. After explicit resume,
+it directly ports compatible updates and reports only decisions that need review.
+--apply is required for scheduler changes; --dry-run validates and prints the
+exact create command.
 EOF
 }
 
@@ -91,9 +93,11 @@ is_private=$(gh repo view "$origin_repo" --json isPrivate --jq .isPrivate 2>/dev
 report_json="$reports_dir/latest.json"
 report_markdown="$reports_dir/latest.md"
 prompt=$(cat <<EOF
-Run the read-only PowerSync upstream maintainer cycle only in $repo. Use the installed $SKILL_NAME skill. Determine an explicit reviewed baseline and target from the supplied state and the named upstream tracking reference, then invoke:
-python $repo/scripts/private-fork/maintainer_cycle.py --repo $repo --upstream-remote upstream --baseline <explicit-baseline> --target <explicit-target> --state $state --report-json $report_json --report-markdown $report_markdown
-Add --fetch only when explicitly authorised for this run. Keep JSON and Markdown reports for review. This is report-only triage: do not merge, rebase, cherry-pick, push, tag, create a candidate, deploy, restart services, control Home Assistant, or deliver to origin. If requires_candidate is true, report it and stop.
+Run the PowerSync private-fork upstream maintenance cycle in $repo. Use the installed $SKILL_NAME skill and update $state plus $report_json / $report_markdown.
+
+Fetch upstream and classify every unreviewed update under the skill's relevance and private-compatibility policy. Reject and record irrelevant, excluded-backend, and optimiser-licensing updates. For a relevant update with no plausible interaction with private two-EV/external-session behavior, port it minimally, retain upstream tests where applicable, commit, and push the private feature branch. For a confirmed compatible private overlap, make the smallest amendment and interaction test, then commit and push. If a private compatibility choice is uncertain or conflicts with another required behavior, make no code change: record concise alternatives and stop that item for operator input.
+
+Run the architecture validator and private compatibility gate once per completed update cycle. Never deploy, restart Home Assistant, alter .storage, operate a charger, rebase wholesale, or import optimiser licensing/access/entitlement code. End every cycle with the concise per-update report required by the skill; deliver it locally and save it at the supplied report paths.
 EOF
 )
 
@@ -104,7 +108,7 @@ create_cmd=(hermes --profile "$PROFILE_NAME" cron create 3d
   --deliver local
   --failure-deliver local
   --paused
-  --paused-reason "Operator review required before enabling this report-only job"
+  --paused-reason "Operator review required before enabling automatic compatible-update maintenance"
   "$prompt")
 resume_cmd=(hermes --profile "$PROFILE_NAME" cron resume "$JOB_NAME")
 
@@ -133,6 +137,6 @@ done <<< "$existing"
 
 "${create_cmd[@]}"
 printf 'Created paused %s with local/suppressed delivery.\n' "$JOB_NAME"
-printf 'Resume only after review: '
+printf 'Resume to enable automatic compatible-update maintenance: '
 printf '%q ' "${resume_cmd[@]}"
 printf '\n'
