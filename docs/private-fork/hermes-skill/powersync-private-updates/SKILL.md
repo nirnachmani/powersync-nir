@@ -142,12 +142,12 @@ entitlement, permission, command-fencing, or hosted optimiser-access code.
   loadpoint, lease, session, and reconciler seams when that preserves the
   intended bug-fix outcome. Ask the user only if those requirements conflict
   or the correct private outcome is genuinely uncertain.
-- Dependency cohort: when a relevant update depends on an earlier unported
-  relevant upstream change, group the prerequisite and dependent change in one
-  ordered candidate. Do not leave the dependent update indefinitely deferred
-  merely because its prerequisite is absent. Port/adapt the prerequisite first,
-  then its dependent completion; commit both when compatibility is clear, or
-  ask the user only if their combined private behavior has a real conflict.
+- Process upstream commits strictly oldest to newest. Every commit must reach a
+  terminal outcome before advancing the processing checkpoint: `ported`,
+  `amended`, `rejected`, or `admin/no-port`. Do not use `deferred` as a normal
+  outcome. If a commit needs user input, stop the cycle at that commit and do
+  not advance the checkpoint; resume it before processing later commits. This
+  naturally brings any prerequisite in before a later dependent fix.
 - Broad testing is reserved for final release handoff or a clear regression
   discovered during an amendment. Never multiply review or broad test runs for
   irrelevant, theoretical, or unavailable-vendor scenarios.
@@ -193,7 +193,7 @@ considered upstream update:
 
 | Update | Outcome | Brief reason / adjustment |
 |---|---|---|
-| `<SHA or feature>` | ported / amended / rejected / deferred / admin/no-port | One sentence. For `irrelevant to configured setup`, name the unavailable vendor or unused feature; for `admin/no-port`, name release/version/documentation bookkeeping. |
+| `<SHA or feature>` | ported / amended / rejected / admin/no-port | One sentence. For `irrelevant to configured setup`, name the unavailable vendor or unused feature; for `admin/no-port`, name release/version/documentation bookkeeping. |
 
 For an uncertain overlap or a choice between private functionality and another
 required outcome, do not decide silently: state the alternatives in one or two

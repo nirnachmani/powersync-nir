@@ -110,16 +110,17 @@ seams when that preserves the intended bug-fix outcome. Escalate only when
 those private requirements conflict or the correct outcome is genuinely
 uncertain.
 
-When a relevant upstream update depends on an earlier unported relevant change,
-treat them as an ordered dependency cohort. Stage and adapt the prerequisite
-first, then the dependent completion; do not repeatedly defer the dependent
-solely because the prerequisite is absent. Escalate only if their combined
-private behavior has a real conflict.
+Process upstream commits strictly oldest to newest. Every commit must reach a
+terminal outcome (`ported`, `amended`, `rejected`, or `admin/no-port`) before
+the processing checkpoint advances. Do not use `deferred` as a normal outcome.
+If a commit needs user input, stop at that commit and leave the checkpoint
+before it; resolve it before considering newer updates. This naturally ensures
+prerequisites are handled before dependent fixes.
 
 ## End-of-cycle report
 
 At the end of every update cycle, report every considered update in a concise
-table: update, `ported`/`amended`/`rejected`/`deferred`/`admin/no-port`, and a one-sentence
+table: update, `ported`/`amended`/`rejected`/`admin/no-port`, and a one-sentence
 reason. An `irrelevant to configured setup` entry must name the unavailable
 vendor or unused feature; an `admin/no-port` entry must name the release,
 version, or documentation bookkeeping. An uncertain compatibility choice must state the
