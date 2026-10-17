@@ -48,6 +48,10 @@ def _load_state(path: Path) -> dict[str, Any]:
         raise MaintainerCycleError(f"invalid state file {path}: {error}") from error
     if not isinstance(state, dict):
         raise MaintainerCycleError(f"invalid state file {path}: expected a JSON object")
+    if "checkpoint" in state and "entries" in state and "migration" in state:
+        raise MaintainerCycleError(
+            f"refusing to overwrite maintainer ledger {path}; use a distinct --report-state"
+        )
     return state
 
 
@@ -84,7 +88,7 @@ def _markdown(report: dict[str, Any]) -> str:
 
 def run_cycle(args: argparse.Namespace) -> dict[str, Any]:
     repo = args.repo.resolve()
-    state_path = args.state.resolve()
+    state_path = args.report_state.resolve()
     report_json_path = args.report_json.resolve()
     report_markdown_path = args.report_markdown.resolve()
     artifact_paths = (state_path, report_json_path, report_markdown_path)
@@ -130,7 +134,7 @@ def main() -> int:
     parser.add_argument("--upstream-remote", required=True, help="read-only remote name")
     parser.add_argument("--baseline", required=True, help="explicit reviewed revision")
     parser.add_argument("--target", required=True, help="explicit target revision")
-    parser.add_argument("--state", type=Path, required=True, help="review-state JSON path")
+    parser.add_argument("--report-state", type=Path, required=True, help="read-only-cycle report-state JSON path; never a maintainer ledger")
     parser.add_argument("--report-json", type=Path, required=True, help="JSON report path")
     parser.add_argument("--report-markdown", type=Path, required=True, help="Markdown report path")
     parser.add_argument("--inventory", type=Path, help="explicit local-change inventory path")

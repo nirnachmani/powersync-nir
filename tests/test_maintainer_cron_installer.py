@@ -71,7 +71,7 @@ def _valid_args(repo: Path, profile: Path, state: Path) -> list[str]:
     return [
         "--repo", str(repo),
         "--profile-home", str(profile),
-        "--state", str(state),
+        "--ledger-state", str(state),
         "--reports-dir", str(profile / "reports"),
     ]
 
@@ -116,6 +116,10 @@ def test_apply_creates_one_paused_local_report_only_job_with_fixed_workdir(tmp_p
     assert str((profile / "reports/latest.json").resolve()) in invocation
     assert str((profile / "reports/latest.md").resolve()) in invocation
     assert "maintainer_ledger.py" in invocation
+    assert "maintainer_ledger.py next" in invocation
+    assert "maintainer_ledger.py record" in invocation
+    assert "maintainer_ledger.py summary" in invocation
+    assert "do not run maintainer_cycle.py against it" in invocation
     assert "never a freeform last_reviewed_upstream checkpoint" in invocation
     assert " cron resume " not in invocation
 
@@ -138,14 +142,27 @@ def test_refuses_default_or_wrong_profile_and_paths_outside_profile_boundary(tmp
     wrong_profile = tmp_path / "profiles" / "default"
     wrong_profile.mkdir()
 
-    completed = _run(tmp_path, "--dry-run", "--repo", str(repo), "--profile-home", str(wrong_profile), "--state", str(state), "--reports-dir", str(profile / "reports"), env=env)
+    completed = _run(tmp_path, "--dry-run", "--repo", str(repo), "--profile-home", str(wrong_profile), "--ledger-state", str(state), "--reports-dir", str(profile / "reports"), env=env)
     assert completed.returncode != 0
     assert "powersync-maintainer" in completed.stderr
 
     outside = tmp_path / "outside.json"
-    completed = _run(tmp_path, "--dry-run", "--repo", str(repo), "--profile-home", str(profile), "--state", str(outside), "--reports-dir", str(profile / "reports"), env=env)
+    completed = _run(tmp_path, "--dry-run", "--repo", str(repo), "--profile-home", str(profile), "--ledger-state", str(outside), "--reports-dir", str(profile / "reports"), env=env)
     assert completed.returncode != 0
     assert "profile-home boundary" in completed.stderr
+
+
+def test_refuses_the_legacy_upstream_state_as_a_ledger_output_path(tmp_path):
+    repo, profile, _state, env = _fixture(tmp_path)
+    legacy_state = profile / "state" / "upstream.json"
+
+    completed = _run(
+        tmp_path, "--dry-run", "--repo", str(repo), "--profile-home", str(profile),
+        "--ledger-state", str(legacy_state), "--reports-dir", str(profile / "reports"), env=env,
+    )
+
+    assert completed.returncode != 0
+    assert "legacy" in completed.stderr.lower()
 
 
 def test_refuses_non_private_origin_and_missing_installed_skill(tmp_path):

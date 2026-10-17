@@ -70,7 +70,7 @@ def _run_cycle(
             baseline,
             "--target",
             target,
-            "--state",
+            "--report-state",
             str(state),
             "--report-json",
             str(report_json),
@@ -155,6 +155,28 @@ def test_missing_upstream_reference_fails_without_writing_artifacts(upstream_rep
     assert not report_markdown.exists()
 
 
+def test_report_cycle_refuses_to_overwrite_a_maintainer_ledger(upstream_repo, tmp_path):
+    repo, baseline, target = upstream_repo
+    state = tmp_path / "maintainer_ledger.json"
+    ledger = {
+        "schema_version": 1,
+        "checkpoint": baseline,
+        "migration": {"boundary": "v2.12.1418", "references": ["legacy backup"]},
+        "entries": [],
+    }
+    state.write_text(json.dumps(ledger), encoding="utf-8")
+    report_json = tmp_path / "report.json"
+    report_markdown = tmp_path / "report.md"
+
+    completed = _run_cycle(repo, baseline, target, state, report_json, report_markdown)
+
+    assert completed.returncode != 0
+    assert "ledger" in completed.stderr.lower()
+    assert json.loads(state.read_text(encoding="utf-8")) == ledger
+    assert not report_json.exists()
+    assert not report_markdown.exists()
+
+
 def test_fetch_is_never_run_without_explicit_flag_and_runs_only_with_it(upstream_repo, tmp_path):
     repo, baseline, target = upstream_repo
     log = tmp_path / "git.log"
@@ -194,3 +216,12 @@ def test_cycle_and_cron_spec_forbid_mutating_git_home_assistant_and_deployment_c
     assert "jitter" in cron_spec
     assert "deployment" in cron_spec
     assert "forbid" in cron_spec
+
+
+def test_cron_spec_keeps_legacy_upstream_state_and_ledger_state_separate():
+    cron_spec = (ROOT / "docs/private-fork/maintainer-cycle-cron-spec.md").read_text(encoding="utf-8")
+
+    assert "maintainer_ledger.json" in cron_spec
+    assert "upstream.json" in cron_spec
+    assert "maintainer_cycle.py" in cron_spec
+    assert "--report-state" in cron_spec

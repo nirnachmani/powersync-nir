@@ -8,7 +8,7 @@ SKILL_NAME="powersync-private-updates"
 
 usage() {
   cat >&2 <<'EOF'
-Usage: install_maintainer_cron.sh --apply|--dry-run --repo PATH --profile-home PATH --state PATH --reports-dir PATH
+Usage: install_maintainer_cron.sh --apply|--dry-run --repo PATH --profile-home PATH --ledger-state PATH --reports-dir PATH
 
 Creates a paused, local-delivery maintainer updater job. After explicit resume,
 it directly ports compatible updates and reports only decisions that need review.
@@ -26,19 +26,19 @@ apply=0
 dry_run=0
 repo=""
 profile_home=""
-state=""
+ledger_state=""
 reports_dir=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --apply) apply=1 ;;
     --dry-run) dry_run=1 ;;
-    --repo|--profile-home|--state|--reports-dir)
+    --repo|--profile-home|--ledger-state|--reports-dir)
       [[ $# -ge 2 ]] || die "$1 requires a path"
       case "$1" in
         --repo) repo=$2 ;;
         --profile-home) profile_home=$2 ;;
-        --state) state=$2 ;;
+        --ledger-state) ledger_state=$2 ;;
         --reports-dir) reports_dir=$2 ;;
       esac
       shift
@@ -50,7 +50,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ $apply -ne $dry_run ]] || die "choose exactly one of --apply or --dry-run; --apply is required for scheduler changes"
-[[ -n $repo && -n $profile_home && -n $state && -n $reports_dir ]] || die "--repo, --profile-home, --state, and --reports-dir are all required"
+[[ -n $repo && -n $profile_home && -n $ledger_state && -n $reports_dir ]] || die "--repo, --profile-home, --ledger-state, and --reports-dir are all required"
 
 # Never inspect or invoke the scheduler before the caller explicitly authorises it.
 if [[ $apply -ne 1 && $dry_run -ne 1 ]]; then
@@ -64,7 +64,7 @@ command -v hermes >/dev/null || die "hermes is required"
 repo=$(realpath -e -- "$repo") || die "repository does not exist"
 profile_home=$(realpath -e -- "$profile_home") || die "profile home does not exist"
 reports_dir=$(realpath -e -- "$reports_dir") || die "reports directory does not exist"
-state=$(realpath -m -- "$state") || die "state path is invalid"
+ledger_state=$(realpath -m -- "$ledger_state") || die "ledger state path is invalid"
 
 [[ -d $repo ]] || die "--repo is not a directory"
 [[ -d $profile_home ]] || die "--profile-home is not a directory"
@@ -76,8 +76,9 @@ repo_root=$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || die "--repo
 repo_root=$(realpath -e -- "$repo_root")
 [[ $repo == "$repo_root" ]] || die "--repo must be the checkout root so the cron workdir is fixed"
 
-case "$state" in "$profile_home"/*) ;; *) die "--state is outside the --profile-home boundary" ;; esac
+case "$ledger_state" in "$profile_home"/*) ;; *) die "--ledger-state is outside the --profile-home boundary" ;; esac
 case "$reports_dir" in "$profile_home"/*) ;; *) die "--reports-dir is outside the --profile-home boundary" ;; esac
+[[ ${ledger_state##*/} != "upstream.json" ]] || die "--ledger-state must be a distinct ledger output, never legacy upstream.json"
 [[ -f "$profile_home/skills/$SKILL_NAME/SKILL.md" ]] || die "installed $SKILL_NAME skill is missing from --profile-home"
 
 origin_url=$(git -C "$repo" remote get-url origin 2>/dev/null) || die "origin remote is missing"
@@ -93,9 +94,9 @@ is_private=$(gh repo view "$origin_repo" --json isPrivate --jq .isPrivate 2>/dev
 report_json="$reports_dir/latest.json"
 report_markdown="$reports_dir/latest.md"
 prompt=$(cat <<EOF
-Run the PowerSync private-fork upstream maintenance cycle in $repo. Use the installed $SKILL_NAME skill, the enforced scripts/private-fork/maintainer_ledger.py CLI, and update $state plus $report_json / $report_markdown. The state is the schema-versioned sequential ledger, never a freeform last_reviewed_upstream checkpoint. On a new server, migrate only with the explicit safe CLI command after checking the legacy state: python scripts/private-fork/maintainer_ledger.py --repo $repo migrate --state $state --legacy-state <old-state> --baseline <exact-sha> --migration-boundary v2.12.1418 --migration-reference <honest-pre-ledger-reference>.
+Run the PowerSync private-fork upstream maintenance cycle in $repo. Use the installed $SKILL_NAME skill and the enforced scripts/private-fork/maintainer_ledger.py CLI. The sole ledger output is $ledger_state; do not run maintainer_cycle.py against it. Write only the supplied report artifacts at $report_json and $report_markdown. The ledger is schema-versioned sequential history, never a freeform last_reviewed_upstream checkpoint. On a new server, preserve the legacy $profile_home/state/upstream.json as read-only input/backup and create $ledger_state only with: python scripts/private-fork/maintainer_ledger.py --repo $repo migrate --state $ledger_state --legacy-state $profile_home/state/upstream.json --baseline <exact-sha> --migration-boundary v2.12.1418 --migration-reference <honest-pre-ledger-reference>.
 
-Fetch upstream and process every unreviewed update strictly oldest to newest under the skill's relevance and private-compatibility policy. Use maintainer_ledger.py next to obtain the one exact next commit and maintainer_ledger.py record only after its terminal decision; record its upstream version, ported, amended, rejected, or admin/no-port outcome, factual reason, and private commit SHA(s) for ported/amended work. The CLI atomically advances its checkpoint with that entry and rejects deferred, unknown, and out-of-order commits. Reject and record irrelevant, excluded-backend, and optimiser-licensing updates. For a relevant update with no plausible interaction with private two-EV/external-session behavior, port it minimally, retain upstream tests where applicable, commit, and push the private feature branch. For an important upstream EV/external-session fix that overlaps private logical-EV behavior, preserve its bug-fix outcome by making the smallest amendment through the private selector, canonical physical loadpoint, lease, session, and reconciler seams; add only the necessary interaction test, then commit and push. If those private requirements conflict or the correct outcome is genuinely uncertain, make no code change and stop at that commit for operator input; do not process newer commits until it is resolved.
+Fetch upstream and process every unreviewed update strictly oldest to newest under the skill's relevance and private-compatibility policy. Use maintainer_ledger.py next --state $ledger_state to obtain the one exact next commit and maintainer_ledger.py record --state $ledger_state only after its terminal decision; record its upstream version, ported, amended, rejected, or admin/no-port outcome, factual reason, and private commit SHA(s) for ported/amended work. Every recorded private SHA must resolve in this private checkout. The CLI atomically advances its checkpoint with that entry and rejects deferred, unknown, out-of-order, and nonexistent private commits. Finish with maintainer_ledger.py summary --state $ledger_state for the cron JSON payload. Reject and record irrelevant, excluded-backend, and optimiser-licensing updates. For a relevant update with no plausible interaction with private two-EV/external-session behavior, port it minimally, retain upstream tests where applicable, commit, and push the private feature branch. For an important upstream EV/external-session fix that overlaps private logical-EV behavior, preserve its bug-fix outcome by making the smallest amendment through the private selector, canonical physical loadpoint, lease, session, and reconciler seams; add only the necessary interaction test, then commit and push. If those private requirements conflict or the correct outcome is genuinely uncertain, make no code change and stop at that commit for operator input; do not process newer commits until it is resolved.
 
 Run the architecture validator and private compatibility gate once per completed update cycle. Never deploy, restart Home Assistant, alter .storage, operate a charger, rebase wholesale, or import optimiser licensing/access/entitlement code. End every cycle with the concise per-update report required by the skill; send it by email through the configured Resend MCP using the same defaults as the server's ha-update skill, then deliver it locally and save it at the supplied report paths. If email fails, retain the local report and state the failure without exposing credentials.
 EOF

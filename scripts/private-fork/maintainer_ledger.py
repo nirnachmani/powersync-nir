@@ -168,6 +168,8 @@ def record(args: argparse.Namespace) -> dict[str, Any]:
         raise LedgerError(f"{args.outcome} must not claim private commits")
     if any(not FULL_SHA.fullmatch(commit) for commit in args.private_commit):
         raise LedgerError("every --private-commit must be a full 40-character SHA")
+    for private_commit in args.private_commit:
+        _resolve_commit(args.repo, private_commit, "private commit")
 
     _target, commits = _pending(args.repo, ledger, args.target)
     if not commits:

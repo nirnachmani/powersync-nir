@@ -95,12 +95,12 @@ def test_record_only_accepts_next_terminal_outcome_and_advances_atomically(tmp_p
 
     accepted = _run(repo, "record", "--state", str(state), "--target", second,
                     "--sha", first, "--outcome", "ported", "--reason", "compatible fix",
-                    "--private-commit", "a" * 40, "--upstream-version", "v2.12.1419")
+                    "--private-commit", baseline, "--upstream-version", "v2.12.1419")
     assert accepted.returncode == 0, accepted.stderr
     ledger = json.loads(state.read_text(encoding="utf-8"))
     assert ledger["checkpoint"] == first
     assert ledger["entries"][0]["upstream"] == {"version": "v2.12.1419", "sha": first, "subject": "first upstream change"}
-    assert ledger["entries"][0]["private_commits"] == ["a" * 40]
+    assert ledger["entries"][0]["private_commits"] == [baseline]
     assert ledger["entries"][0]["outcome"] == "ported"
     assert ledger["entries"][0]["timestamp"].endswith("Z")
 
@@ -122,6 +122,22 @@ def test_record_rejects_deferred_unknown_sha_and_missing_required_details(tmp_pa
         assert json.loads(state.read_text(encoding="utf-8"))["checkpoint"] == baseline
 
 
+def test_record_rejects_a_private_commit_sha_missing_from_the_private_repo(tmp_path):
+    repo, baseline, first, second = _repo(tmp_path)
+    state = tmp_path / "state.json"
+    _initialize(repo, state, baseline)
+
+    completed = _run(
+        repo, "record", "--state", str(state), "--target", second,
+        "--sha", first, "--outcome", "ported", "--reason", "compatible fix",
+        "--private-commit", "a" * 40, "--upstream-version", "v2.12.1419",
+    )
+
+    assert completed.returncode != 0
+    assert "private commit" in completed.stderr.lower()
+    assert json.loads(state.read_text(encoding="utf-8"))["checkpoint"] == baseline
+
+
 def test_summary_is_cron_usable_and_migration_requires_matching_legacy_checkpoint(tmp_path):
     repo, baseline, first, second = _repo(tmp_path)
     state = tmp_path / "state.json"
@@ -141,3 +157,23 @@ def test_summary_is_cron_usable_and_migration_requires_matching_legacy_checkpoin
     assert payload["next"] == {"sha": first, "subject": "first upstream change"}
     assert payload["pending_count"] == 2
     assert payload["outcomes"] == {"ported": 0, "amended": 0, "rejected": 0, "admin/no-port": 0}
+
+
+def test_migration_uses_a_distinct_ledger_output_and_preserves_legacy_upstream_state(tmp_path):
+    repo, baseline, _first, _second = _repo(tmp_path)
+    legacy = tmp_path / "state/upstream.json"
+    ledger_state = tmp_path / "state/maintainer_ledger.json"
+    legacy_payload = {"last_reviewed_upstream": baseline}
+    legacy.parent.mkdir()
+    legacy.write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+    migrated = _run(
+        repo, "migrate", "--state", str(ledger_state), "--legacy-state", str(legacy),
+        "--baseline", baseline, "--migration-boundary", "v2.12.1418",
+        "--migration-reference", "pre-ledger history only",
+    )
+
+    assert migrated.returncode == 0, migrated.stderr
+    assert ledger_state != legacy
+    assert json.loads(legacy.read_text(encoding="utf-8")) == legacy_payload
+    assert json.loads(ledger_state.read_text(encoding="utf-8"))["checkpoint"] == baseline

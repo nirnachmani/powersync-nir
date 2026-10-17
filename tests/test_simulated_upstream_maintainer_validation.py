@@ -55,7 +55,7 @@ def _run_cycle(repo: Path, baseline: str, target: str, artifacts: Path) -> subpr
         [
             sys.executable, str(CYCLE), "--repo", str(repo), "--upstream-remote", "upstream",
             "--baseline", baseline, "--target", target,
-            "--state", str(artifacts / "state.json"),
+            "--report-state", str(artifacts / "state.json"),
             "--report-json", str(artifacts / "report.json"),
             "--report-markdown", str(artifacts / "report.md"),
         ],

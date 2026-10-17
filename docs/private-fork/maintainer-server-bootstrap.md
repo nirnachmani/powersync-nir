@@ -117,17 +117,31 @@ cd /path/to/private-fork
 scripts/private-fork/install_maintainer_cron.sh --dry-run \
   --repo "$PWD" \
   --profile-home "$PROFILE_HOME" \
-  --state "$PROFILE_HOME/state/review-state.json" \
+  --ledger-state "$PROFILE_HOME/state/maintainer_ledger.json" \
   --reports-dir "$PROFILE_HOME/reports"
 
 scripts/private-fork/install_maintainer_cron.sh --apply \
   --repo "$PWD" \
   --profile-home "$PROFILE_HOME" \
-  --state "$PROFILE_HOME/state/review-state.json" \
+  --ledger-state "$PROFILE_HOME/state/maintainer_ledger.json" \
   --reports-dir "$PROFILE_HOME/reports"
 ```
 
-Create the `state/` and `reports/` directories first. The installer verifies
+Create the `state/` and `reports/` directories first. If this server has the
+old `$PROFILE_HOME/state/upstream.json`, inspect and back it up, then migrate it
+once to the distinct ledger output:
+
+```bash
+python scripts/private-fork/maintainer_ledger.py --repo "$PWD" migrate \
+  --state "$PROFILE_HOME/state/maintainer_ledger.json" \
+  --legacy-state "$PROFILE_HOME/state/upstream.json" \
+  --baseline <exact-legacy-checkpoint-sha> \
+  --migration-boundary v2.12.1418 \
+  --migration-reference <honest-pre-ledger-reference>
+```
+
+`upstream.json` remains read-only backup/reference and is never a ledger output.
+The installer verifies
 that `origin` is a private GitHub repository with `gh`, that the installed
 `powersync-private-updates` skill exists, and that no active job with the same
 name exists. It creates `powersync-private-upstream-review` **paused**, every

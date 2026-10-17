@@ -5,6 +5,18 @@ This is a reusable remote-server specification for the isolated
 paused job only when a remote operator explicitly passes `--apply`; it does not
 contact a server or enable the job by itself.
 
+## State-path contract
+
+The durable sequential ledger is always a distinct path, for example
+`/var/lib/powersync-maintainer/state/maintainer_ledger.json`. The old
+`/var/lib/powersync-maintainer/state/upstream.json` is legacy input/backup only:
+never pass it as `maintainer_ledger.py --state` and never overwrite it. The cron
+installer accepts this only as `--ledger-state` and refuses `upstream.json`.
+
+`maintainer_cycle.py` is retained solely for optional read-only triage. If used
+manually, it requires its own `--report-state` path; it must never receive the
+ledger path and is not the scheduled integration workflow.
+
 ## Schedule contract
 
 Run **every 3 days**. The portable installer encodes this as the Hermes `3d`
@@ -24,7 +36,7 @@ python /path/to/private-fork/scripts/private-fork/maintainer_cycle.py \
   --upstream-remote upstream \
   --baseline <explicit-ledger-checkpoint-sha-or-tag> \
   --target <explicit-upstream-sha-or-tag> \
-  --state /var/lib/powersync-maintainer/review-state.json \
+  --report-state /var/lib/powersync-maintainer/reports/cycle-state.json \
   --report-json /var/lib/powersync-maintainer/reports/latest.json \
   --report-markdown /var/lib/powersync-maintainer/reports/latest.md
 ```
@@ -32,23 +44,34 @@ python /path/to/private-fork/scripts/private-fork/maintainer_cycle.py \
 The operator may supply `--inventory /path/to/private-fork/docs/private-fork/local-change-inventory.md`
 when the inventory is stored outside the checkout default.
 
-Before the read-only comparison, initialize the durable sequential ledger with
-`scripts/private-fork/maintainer_ledger.py init` from an explicit baseline and
-honest migration boundary/reference. For the existing server state, run its
-safe `migrate --legacy-state` form once, with a baseline exactly matching its
-legacy checkpoint; it never changes the legacy file or invents pre-ledger
-v1418 outcomes. Each actual integration cycle must use `maintainer_ledger.py
-next` and `record` in strictly oldest to newest order; `summary` is the cron
-JSON payload. The ledger is authoritative rather than a freeform last_reviewed_upstream checkpoint.
+Before any scheduled integration, migrate the existing server state once into a
+new ledger path. Inspect and back up `upstream.json`, then run:
+
+```bash
+python scripts/private-fork/maintainer_ledger.py --repo /path/to/private-fork migrate \
+  --state /var/lib/powersync-maintainer/state/maintainer_ledger.json \
+  --legacy-state /var/lib/powersync-maintainer/state/upstream.json \
+  --baseline <exact-legacy-checkpoint-sha> \
+  --migration-boundary v2.12.1418 \
+  --migration-reference <honest-pre-ledger-reference>
+```
+
+The migration refuses mismatched baselines and existing output, and never
+changes the legacy file or invents pre-ledger v1418 outcomes. Each actual
+integration cycle must use `maintainer_ledger.py next`, `record`, and `summary`
+against `maintainer_ledger.json` in strictly oldest to newest order. The ledger
+is authoritative rather than a freeform last_reviewed_upstream checkpoint.
 
 ## Reusable Hermes prompt
 
 ```text
-You are running the read-only PowerSync upstream maintainer cycle in the
+You are running the PowerSync upstream maintenance cycle in the
 powersync-maintainer profile. Use only the explicit private-fork repository,
-upstream remote, baseline, target, ledger state JSON, JSON report, and Markdown
-report paths supplied by the scheduler. Run maintainer_cycle.py with those exact
-arguments. Add --fetch only if the scheduler explicitly supplies it.
+upstream remote, target, durable `maintainer_ledger.json`, JSON report, and
+Markdown report paths supplied by the scheduler. Do not run maintainer_cycle.py
+in this integration workflow. Use `maintainer_ledger.py next`, then `record`,
+and finish with `summary`, all with the supplied ledger path. Add --fetch only
+if the scheduler explicitly supplies it.
 
 Treat the resulting report as triage only. Do not merge, rebase, cherry-pick,
 push, tag, create a candidate, deploy, restart services, or control Home
@@ -68,7 +91,7 @@ cycle makes no candidate change regardless of classification.
 ## Paused installer contract
 
 `scripts/private-fork/install_maintainer_cron.sh` requires all of `--apply`,
-`--repo`, `--profile-home`, `--state`, and `--reports-dir`; `--dry-run` is the
+`--repo`, `--profile-home`, `--ledger-state`, and `--reports-dir`; `--dry-run` is the
 non-mutating alternative to `--apply`. It refuses the default or wrong profile,
 paths outside the supplied checkout/profile boundaries, a missing installed
 skill, an origin that `gh` cannot verify as private, and an existing active job

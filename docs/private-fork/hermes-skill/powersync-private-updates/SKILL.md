@@ -38,10 +38,11 @@ Before work, establish:
 3. The last reviewed upstream SHA/tag and target upstream range.
 4. The current local-change inventory.
 5. A working Python environment for the fork.
-6. A schema-versioned `maintainer_ledger.py` state file. Create it only from an
-   explicit baseline with a migration boundary/reference. For old v1418 state,
-   use the CLI's safe `migrate --legacy-state` command with a matching baseline;
-   do not create fictional historical commit outcomes.
+6. A schema-versioned `maintainer_ledger.py` state file at a distinct
+   `maintainer_ledger.json` path. For old v1418 `upstream.json`, retain that
+   legacy file as read-only input/backup and use the CLI's safe `migrate
+   --legacy-state` command with a matching baseline; do not create fictional
+   historical commit outcomes or let `maintainer_cycle.py` overwrite the ledger.
 
 ## Required gates
 
