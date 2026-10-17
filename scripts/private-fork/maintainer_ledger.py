@@ -45,6 +45,32 @@ def _resolve_commit(repo: Path, revision: str, label: str) -> str:
     return resolved
 
 
+def _resolve_named_private_ref(repo: Path, private_ref: str) -> str:
+    """Resolve only the intended private branch through a local or remote ref."""
+    branch_name = "feature/shared-logical-evs"
+    local_ref = f"refs/heads/{branch_name}"
+    refs = _git(repo, "for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes").splitlines()
+    permitted_refs = {
+        ref
+        for ref in refs
+        if ref == local_ref or ref.endswith(f"/{branch_name}") and ref.startswith("refs/remotes/")
+    }
+    aliases = {
+        alias
+        for ref in permitted_refs
+        for alias in (
+            ref,
+            ref.removeprefix("refs/heads/"),
+            ref.removeprefix("refs/remotes/"),
+        )
+    }
+    if private_ref not in aliases:
+        raise LedgerError(
+            f"private ref must be a permitted named private ref (a local or remote ref) for {branch_name!r}, not {private_ref!r}"
+        )
+    return _resolve_commit(repo, private_ref, "private ref")
+
+
 def _atomic_write(path: Path, contents: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
@@ -169,7 +195,7 @@ def record(args: argparse.Namespace) -> dict[str, Any]:
     if any(not FULL_SHA.fullmatch(commit) for commit in args.private_commit):
         raise LedgerError("every --private-commit must be a full 40-character SHA")
     if args.private_commit:
-        private_ref = _resolve_commit(args.repo, args.private_ref, "private ref")
+        private_ref = _resolve_named_private_ref(args.repo, args.private_ref)
         for private_commit in args.private_commit:
             _resolve_commit(args.repo, private_commit, "private commit")
             try:

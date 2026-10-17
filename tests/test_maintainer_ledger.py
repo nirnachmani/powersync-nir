@@ -170,6 +170,26 @@ def test_record_requires_private_commits_from_the_intended_private_ref(tmp_path)
     assert json.loads(state.read_text(encoding="utf-8"))["entries"][0]["private_commits"] == [private_commit]
 
 
+def test_record_rejects_private_ref_object_expressions_even_when_they_reach_the_private_commit(tmp_path):
+    repo, baseline, first, second = _repo(tmp_path)
+    state = tmp_path / "state.json"
+    _initialize(repo, state, baseline)
+
+    _git(repo, "switch", "-q", "feature/shared-logical-evs")
+    private_commit = _commit(repo, 3, "private port")
+
+    for private_ref in (private_commit, "HEAD"):
+        completed = _run(
+            repo, "record", "--state", str(state), "--target", second,
+            "--sha", first, "--outcome", "ported", "--reason", "compatible fix",
+            "--private-commit", private_commit, "--private-ref", private_ref,
+            "--upstream-version", "v2.12.1419",
+        )
+        assert completed.returncode != 0
+        assert "named private ref" in completed.stderr.lower()
+        assert json.loads(state.read_text(encoding="utf-8"))["checkpoint"] == baseline
+
+
 def test_record_without_private_commits_does_not_require_a_private_ref(tmp_path):
     repo, baseline, first, second = _repo(tmp_path)
     state = tmp_path / "state.json"
