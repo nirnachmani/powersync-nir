@@ -7,7 +7,7 @@ current repository only; it is not a deployment or upstream-update procedure.
 
 - The reviewed upstream baseline is `v2.12.1363` /
   `85f99ea62a174cd9153d5ff2ce71023dda2c9a5c`; the reviewed target is
-  `v2.12.1417` / `0863c7d2e85ca46d8ff1272cc246685c28321cca`.
+  `v2.12.1418` / `e3a2ec1`.
 - `upstream-1363-1408-port-manifest.md` is the exhaustive, Git-derived
   classification for that range. It is a review record, not permission to
   cherry-pick or merge upstream production code.
@@ -147,8 +147,16 @@ canonical identity and ownership checks; they are not API payload bypasses.
   self-consumption action that runtime will execute. The exact optimizer source
   delta remains fail-closed in the continuity allowlist.
 - Upstream `38e606e0` is deferred because its persisted zero-cost provenance
-  caller and tests depend on unported upstream `3f90add6`; applying only its
-  mechanically matching hunks would add inert behavior.
+  caller and tests depend on upstream `3f90add6`. That prerequisite and its
+  dependent completion are now ported together as a reviewed provenance cohort.
+- From upstream `24fcc7d5`, negative retail import prices may stop production
+  only through the private scope: configured Amber intervals (or an explicitly
+  configured bounded retail-price entity), Sigenergy's PV-only limit, and
+  explicitly selected PV-only switch/number entities. No native AC controls for
+  excluded vendors, licensing, export-price substitution, or battery-control
+  writes were imported. Legacy inverter writes re-check production ownership
+  after the shared control lock, and manual inverter services first hand off any
+  overlapping production stop.
 
 ## Android and diagnostics contracts
 

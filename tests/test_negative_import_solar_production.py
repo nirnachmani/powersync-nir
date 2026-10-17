@@ -469,6 +469,52 @@ def test_runtime_restore_reconciles_export_and_shutdown_blocks_queued_legacy_cal
     run(scenario())
 
 
+def test_temporary_handoff_restores_runtime_after_success_failure_and_cancellation(runtime_rig):
+    runtime, _, states, _, _, _ = runtime_rig
+
+    async def scenario():
+        await runtime.tick()
+        assert states["switch.pv_enable"].state == "off"
+
+        assert await runtime.temporary_handoff()
+        assert states["switch.pv_enable"].state == "on"
+        assert runtime.paused is False
+        assert runtime.manager.stopping is False
+
+        await runtime.tick()
+        assert states["switch.pv_enable"].state == "off"
+        target = runtime.target({"entity_id": "switch.pv_enable"})
+        original_target_factory = runtime.manager.target_factory
+
+        async def failed_write(state):
+            return False
+
+        target.write = failed_write
+        runtime.manager.target_factory = lambda identity: target
+        assert not await runtime.temporary_handoff()
+        assert runtime.paused is False
+        assert runtime.manager.owns_control
+        runtime.manager.target_factory = original_target_factory
+
+        release_started = asyncio.Event()
+
+        async def cancelled_release():
+            release_started.set()
+            await asyncio.Future()
+
+        original_release = runtime.manager.release
+        runtime.manager.release = cancelled_release
+        task = asyncio.create_task(runtime.temporary_handoff())
+        await release_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert runtime.paused is False
+        runtime.manager.release = original_release
+
+    run(scenario())
+
+
 def extracted(path, name, namespace):
     import ast
     import textwrap
@@ -489,6 +535,173 @@ def test_actual_fast_loop_cannot_overwrite_owned_production_stop():
     callback=extracted(PACKAGE/"__init__.py","fast_load_following_update",namespace)
     run(callback(SimpleNamespace(second=0)))
     assert ticks==[True]
+
+
+def test_legacy_inverter_paths_recheck_production_ownership_after_control_lock():
+    import ast
+
+    source = (PACKAGE / "__init__.py").read_text()
+    tree = ast.parse(source)
+    functions = {
+        node.name: ast.get_source_segment(source, node) or ""
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in ("apply_inverter_curtailment", "fast_load_following_update")
+    }
+
+    apply_source = functions["apply_inverter_curtailment"]
+    lock_index = apply_source.index("await inverter_control_lock.acquire()")
+    post_lock_check = apply_source.index(
+        'production = entry_data.get("solar_production_runtime")', lock_index
+    )
+    assert post_lock_check < apply_source.index(
+        'controller = entry_data.get("inverter_controller")', post_lock_check
+    )
+
+    fast_source = functions["fast_load_following_update"]
+    lock_index = fast_source.index("async with inverter_control_lock:")
+    post_lock_check = fast_source.index(
+        'production = entry_data.get("solar_production_runtime")', lock_index
+    )
+    assert post_lock_check < fast_source.index(
+        "return await controller.curtail", post_lock_check
+    )
+
+
+def test_queued_legacy_curtailment_stops_when_production_takes_lock_ownership():
+    lock = asyncio.Lock()
+    runtime = SimpleNamespace(blocks_export_control=False)
+    data = {"solar_production_runtime": runtime, "inverter_control_lock": lock}
+    entry = SimpleNamespace(
+        data={},
+        options={
+            "ac_enabled": True,
+            "brand": "sigenergy",
+            "host": "inverter.local",
+        },
+        entry_id="entry",
+    )
+    namespace = {
+        "_aemo_dispatch_entry_data": lambda: data,
+        "ac_inverter_is_same_hybrid": lambda: False,
+        "entry": entry,
+        "CONF_AC_INVERTER_CURTAILMENT_ENABLED": "ac_enabled",
+        "CONF_INVERTER_BRAND": "brand",
+        "CONF_INVERTER_HOST": "host",
+        "CONF_INVERTER_PORT": "port",
+        "DEFAULT_INVERTER_PORT": 502,
+        "CONF_INVERTER_SLAVE_ID": "slave",
+        "DEFAULT_INVERTER_SLAVE_ID": 1,
+        "CONF_INVERTER_MODEL": "model",
+        "CONF_INVERTER_TOKEN": "token",
+        "CONF_FRONIUS_LOAD_FOLLOWING": "fronius_load_following",
+        "CONF_INVERTER_RATED_POWER_W": "rated_power",
+        "CONF_ENPHASE_USERNAME": "enphase_username",
+        "CONF_ENPHASE_PASSWORD": "enphase_password",
+        "CONF_ENPHASE_SERIAL": "enphase_serial",
+        "CONF_ENPHASE_NORMAL_PROFILE": "enphase_normal_profile",
+        "CONF_ENPHASE_ZERO_EXPORT_PROFILE": "enphase_zero_export_profile",
+        "CONF_ENPHASE_IS_INSTALLER": "enphase_is_installer",
+        "CONF_POWERWALL_OFFGRID_AS_CURTAILMENT": "powerwall_fallback",
+        "_LOGGER": SimpleNamespace(warning=lambda *args: None, debug=lambda *args: None),
+    }
+    apply = extracted(PACKAGE / "__init__.py", "apply_inverter_curtailment", namespace)
+
+    async def scenario():
+        await lock.acquire()
+        task = asyncio.create_task(apply(True, import_price=-5))
+        await asyncio.sleep(0)
+        runtime.blocks_export_control = True
+        lock.release()
+        assert await task is False
+
+    run(scenario())
+
+
+def test_queued_fast_loop_stops_when_production_takes_lock_ownership():
+    lock = asyncio.Lock()
+    calls = []
+
+    async def tick():
+        return None
+
+    async def curtail():
+        calls.append(True)
+        return True
+
+    runtime = SimpleNamespace(tick=tick, blocks_export_control=False)
+    controller = SimpleNamespace(curtail=curtail)
+    data = {
+        "solar_production_runtime": runtime,
+        "inverter_control_lock": lock,
+        "inverter_controller": controller,
+        "inverter_control_mode": "shutdown",
+    }
+    entry = SimpleNamespace(
+        data={},
+        options={
+            "ac_enabled": True,
+            "brand": "enphase",
+            "host": "inverter.local",
+        },
+    )
+    namespace = {
+        "_aemo_dispatch_entry_data": lambda: data,
+        "ac_inverter_is_same_hybrid": lambda: False,
+        "entry": entry,
+        "CONF_AC_INVERTER_CURTAILMENT_ENABLED": "ac_enabled",
+        "CONF_INVERTER_BRAND": "brand",
+        "CONF_INVERTER_HOST": "host",
+        "_monitoring_mode_allows_curtailment": lambda enabled: enabled,
+        "INVERTER_CONTROL_MODES": {"normal", "load_following", "shutdown", "curtailed"},
+        "INVERTER_CONTROL_MODE_NORMAL": "normal",
+        "INVERTER_CONTROL_MODE_LOAD_FOLLOWING": "load_following",
+        "INVERTER_CONTROL_MODE_SHUTDOWN": "shutdown",
+        "INVERTER_CONTROL_MODE_CURTAILED": "curtailed",
+        "asyncio": asyncio,
+        "datetime": datetime,
+        "timedelta": timedelta,
+        "_LOGGER": SimpleNamespace(debug=lambda *args: None, error=lambda *args, **kwargs: None),
+    }
+    callback = extracted(PACKAGE / "__init__.py", "fast_load_following_update", namespace)
+
+    async def scenario():
+        await lock.acquire()
+        task = asyncio.create_task(callback(SimpleNamespace(second=0)))
+        await asyncio.sleep(0)
+        runtime.blocks_export_control = True
+        lock.release()
+        await task
+        assert calls == []
+
+    run(scenario())
+
+
+def test_manual_inverter_services_handoff_production_before_control():
+    import ast
+
+    source = (PACKAGE / "__init__.py").read_text()
+    tree = ast.parse(source)
+    functions = {
+        node.name: ast.get_source_segment(source, node) or ""
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name in ("handle_curtail_inverter", "handle_restore_inverter")
+    }
+
+    for name in ("handle_curtail_inverter", "handle_restore_inverter"):
+        handler = functions[name]
+        handoff = handler.index("await production.manual_handoff()")
+        assert handoff < handler.index("await inverter_control_lock.acquire()")
+        assert "production.shutdown()" not in handler
+
+
+def test_intermediate_transitions_use_temporary_not_permanent_shutdown():
+    config_source = (PACKAGE / "config_flow.py").read_text()
+    monitoring_source = (PACKAGE / "monitoring.py").read_text()
+    for source in (config_source, monitoring_source):
+        assert "production.temporary_handoff()" in source
+        assert "production.shutdown()" not in source
 
 
 def test_confirmed_stop_replans_and_observed_ineffective_stop_withdraws_projection(runtime_rig):

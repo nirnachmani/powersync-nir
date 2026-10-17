@@ -20,7 +20,7 @@ async def async_prepare_monitoring_handoff(hass: Any, entry: Any) -> None:
     """
     entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
     production = entry_data.get("solar_production_runtime")
-    if production and not await production.shutdown():
+    if production and not await production.temporary_handoff():
         raise RuntimeError(
             "PV production restore is pending during monitoring handoff"
         )

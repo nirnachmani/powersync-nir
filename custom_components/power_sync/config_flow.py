@@ -15049,7 +15049,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 user_input.get(key) != self._get_option(key)
                 for key in production_keys
             ):
-                if not await production.shutdown():
+                if not await production.temporary_handoff():
                     return self.async_abort(
                         reason="solar_production_restore_pending"
                     )

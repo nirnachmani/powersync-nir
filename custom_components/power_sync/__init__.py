@@ -25279,6 +25279,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if inverter_control_lock is not None:
             await inverter_control_lock.acquire()
         try:
+            # The production-stop manager uses this same lock. Re-check after
+            # queued legacy work acquires it so a newly owned PV stop cannot be
+            # overwritten by a stale export-price callback.
+            production = entry_data.get("solar_production_runtime")
+            if production and production.blocks_export_control:
+                return False
             controller = entry_data.get("inverter_controller")
             if controller is None:
                 controller = get_inverter_controller(
@@ -40757,6 +40763,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         _LOGGER.info(f"🔴 Manual inverter curtailment requested (mode: {mode})")
 
+        production = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get(
+            "solar_production_runtime"
+        )
+        if production and not await production.manual_handoff():
+            raise HomeAssistantError(
+                "PV production restore is still pending; manual inverter control was deferred"
+            )
+
         inverter_enabled = entry.options.get(
             CONF_AC_INVERTER_CURTAILMENT_ENABLED,
             entry.data.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False)
@@ -40931,6 +40945,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def handle_restore_inverter(call: ServiceCall) -> None:
         """Manually restore the AC-coupled inverter to normal operation."""
         _LOGGER.info("🟢 Manual inverter restore requested")
+
+        production = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get(
+            "solar_production_runtime"
+        )
+        if production and not await production.manual_handoff():
+            raise HomeAssistantError(
+                "PV production restore is still pending; manual inverter control was deferred"
+            )
 
         inverter_enabled = entry.options.get(
             CONF_AC_INVERTER_CURTAILMENT_ENABLED,
@@ -42623,6 +42645,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     inverter_control_lock = asyncio.Lock()
                     entry_data["inverter_control_lock"] = inverter_control_lock
                 async with inverter_control_lock:
+                    production = entry_data.get("solar_production_runtime")
+                    if production and production.blocks_export_control:
+                        return None
                     current_control_mode = entry_data.get("inverter_control_mode")
                     if current_control_mode not in INVERTER_CONTROL_MODES:
                         current_control_mode = (

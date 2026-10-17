@@ -191,6 +191,19 @@ class SolarProductionRuntime:
         self.publish()
         return ok
 
+    async def temporary_handoff(self):
+        """Restore owned PV controls without permanently retiring this runtime."""
+        was_paused = self.paused
+        self.paused = True
+        try:
+            return await self.manager.release()
+        finally:
+            # Options and monitoring transitions can fail or be cancelled while
+            # the entry remains loaded. Only config-entry unload may leave the
+            # runtime permanently paused/stopping.
+            self.paused = was_paused
+            self.publish()
+
     async def shutdown(self):
         self.paused = True
         try:
