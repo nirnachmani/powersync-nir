@@ -85,8 +85,8 @@ case "$origin_url" in
   https://github.com/*) origin_repo=${origin_url#https://github.com/} ;;
   *) die "origin must be a verifiable private GitHub repository, not: $origin_url" ;;
 esac
-visibility=$(gh repo view "$origin_repo" --json visibility --jq .visibility 2>/dev/null) || die "cannot verify origin visibility with gh"
-[[ $visibility == "PRIVATE" ]] || die "origin is not private (visibility: ${visibility:-unknown})"
+is_private=$(gh repo view "$origin_repo" --json isPrivate --jq .isPrivate 2>/dev/null) || die "cannot verify origin visibility with gh"
+[[ $is_private == "true" ]] || die "origin is not private (isPrivate: ${is_private:-unknown})"
 
 report_json="$reports_dir/latest.json"
 report_markdown="$reports_dir/latest.md"
