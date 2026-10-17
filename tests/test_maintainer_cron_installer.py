@@ -45,13 +45,13 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, str]]:
     )
     _write_executable(
         bin_dir / "gh",
-        "#!/bin/sh\nprintf '%s\\n' \"${GH_VISIBILITY:-PRIVATE}\"\n",
+        "#!/bin/sh\nprintf '%s\\n' \"${GH_VISIBILITY:-true}\"\n",
     )
     env = {
         **os.environ,
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "HERMES_LOG": str(log),
-        "GH_VISIBILITY": "PRIVATE",
+        "GH_VISIBILITY": "true",
     }
     return repo, profile, state, env
 
@@ -111,10 +111,10 @@ def test_apply_creates_one_paused_local_report_only_job_with_fixed_workdir(tmp_p
     assert f"--workdir {repo.resolve()}" in invocation
     assert "--deliver local --failure-deliver local" in invocation
     assert "--paused" in invocation
-    assert "maintainer_cycle.py" in invocation
-    assert "--state " + str(state.resolve()) in invocation
-    assert "--report-json " + str((profile / "reports/latest.json").resolve()) in invocation
-    assert "--report-markdown " + str((profile / "reports/latest.md").resolve()) in invocation
+    assert "private-fork upstream maintenance cycle" in invocation
+    assert str(state.resolve()) in invocation
+    assert str((profile / "reports/latest.json").resolve()) in invocation
+    assert str((profile / "reports/latest.md").resolve()) in invocation
     assert " cron resume " not in invocation
 
 
@@ -148,13 +148,13 @@ def test_refuses_default_or_wrong_profile_and_paths_outside_profile_boundary(tmp
 
 def test_refuses_non_private_origin_and_missing_installed_skill(tmp_path):
     repo, profile, state, env = _fixture(tmp_path)
-    env["GH_VISIBILITY"] = "PUBLIC"
+    env["GH_VISIBILITY"] = "false"
 
     completed = _run(tmp_path, "--dry-run", *_valid_args(repo, profile, state), env=env)
     assert completed.returncode != 0
     assert "private" in completed.stderr.lower()
 
-    env["GH_VISIBILITY"] = "PRIVATE"
+    env["GH_VISIBILITY"] = "true"
     (profile / "skills/powersync-private-updates/SKILL.md").unlink()
     completed = _run(tmp_path, "--dry-run", *_valid_args(repo, profile, state), env=env)
     assert completed.returncode != 0
