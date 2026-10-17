@@ -103,6 +103,13 @@ validation or a clear regression discovered during an amendment. Do not create
 speculative tests for unavailable vendors, theoretical scenarios, or ordinary
 upstream behavior.
 
+Do not reject an important upstream EV/external-session fix merely because it
+uses a different upstream identity model. Adapt it through the private logical
+profile selector, canonical physical loadpoint, lease, session, and reconciler
+seams when that preserves the intended bug-fix outcome. Escalate only when
+those private requirements conflict or the correct outcome is genuinely
+uncertain.
+
 ## End-of-cycle report
 
 At the end of every update cycle, report every considered update in a concise

@@ -136,7 +136,12 @@ entitlement, permission, command-fencing, or hosted optimiser-access code.
   cycle gate; do not turn it into an upstream quality review.
 - Amended private-overlap hunk: add only the smallest interaction regression
   required to prove the amendment. Use a semantic review only where the
-  amendment changes private behavior.
+  amendment changes private behavior. Do not reject an important upstream EV
+  or external-session fix merely because upstream's identity model differs:
+  adapt it through the private logical-profile selector, canonical physical
+  loadpoint, lease, session, and reconciler seams when that preserves the
+  intended bug-fix outcome. Ask the user only if those requirements conflict
+  or the correct private outcome is genuinely uncertain.
 - Broad testing is reserved for final release handoff or a clear regression
   discovered during an amendment. Never multiply review or broad test runs for
   irrelevant, theoretical, or unavailable-vendor scenarios.
