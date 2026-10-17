@@ -152,9 +152,13 @@ entitlement, permission, command-fencing, or hosted optimiser-access code.
   `amended`, `rejected`, or `admin/no-port`. Use
   `scripts/private-fork/maintainer_ledger.py next` to obtain the sole permitted
   commit, then `record --upstream-version <version>` it with reason and
-  applicable private commit SHA(s).
+  applicable private commit SHA(s). Every private SHA must be reachable from
+  the intended private ref; `record` defaults to
+  `--private-ref feature/shared-logical-evs`, and an explicit `--private-ref`
+  is required when a different intended branch is used.
   Its atomic write advances the checkpoint with the durable entry; it rejects
-  `deferred`, missing mandatory details, unknown SHAs, and out-of-order work.
+  `deferred`, missing mandatory details, unknown or wrong-branch private SHAs,
+  and out-of-order work.
   If a commit needs user input, do not record it: stop the cycle at that commit
   and do not advance the checkpoint; resume it before processing later commits.
   Use `summary` as the end-of-cycle cron JSON payload. This naturally brings

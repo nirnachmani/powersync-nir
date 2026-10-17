@@ -11,7 +11,9 @@ The durable sequential ledger is always a distinct path, for example
 `/var/lib/powersync-maintainer/state/maintainer_ledger.json`. The old
 `/var/lib/powersync-maintainer/state/upstream.json` is legacy input/backup only:
 never pass it as `maintainer_ledger.py --state` and never overwrite it. The cron
-installer accepts this only as `--ledger-state` and refuses `upstream.json`.
+installer accepts this only as `--ledger-state`, refuses `upstream.json`, and
+refuses any ledger path inside the reports directory so it cannot collide with
+`latest.json` or `latest.md`.
 
 `maintainer_cycle.py` is retained solely for optional read-only triage. If used
 manually, it requires its own `--report-state` path; it must never receive the
@@ -72,6 +74,11 @@ Markdown report paths supplied by the scheduler. Do not run maintainer_cycle.py
 in this integration workflow. Use `maintainer_ledger.py next`, then `record`,
 and finish with `summary`, all with the supplied ledger path. Add --fetch only
 if the scheduler explicitly supplies it.
+
+For `ported` or `amended` outcomes, every `--private-commit` must be reachable
+from the intended private branch/ref. `record` defaults to
+`--private-ref feature/shared-logical-evs`; supply `--private-ref <ref>` only
+when the scheduler explicitly identifies a different intended private branch.
 
 Treat the resulting report as triage only. Do not merge, rebase, cherry-pick,
 push, tag, create a candidate, deploy, restart services, or control Home

@@ -165,6 +165,25 @@ def test_refuses_the_legacy_upstream_state_as_a_ledger_output_path(tmp_path):
     assert "legacy" in completed.stderr.lower()
 
 
+def test_refuses_ledger_state_inside_reports_directory_after_path_resolution(tmp_path):
+    repo, profile, _state, env = _fixture(tmp_path)
+    reports = profile / "reports"
+
+    for state_path in (
+        reports / "latest.json",
+        reports / "latest.md",
+        reports / "archive/ledger.json",
+        reports / "staging/../latest.json",
+    ):
+        completed = _run(
+            tmp_path, "--dry-run", "--repo", str(repo), "--profile-home", str(profile),
+            "--ledger-state", str(state_path), "--reports-dir", str(reports), env=env,
+        )
+
+        assert completed.returncode != 0
+        assert "reports" in completed.stderr.lower()
+
+
 def test_refuses_non_private_origin_and_missing_installed_skill(tmp_path):
     repo, profile, state, env = _fixture(tmp_path)
     env["GH_VISIBILITY"] = "false"

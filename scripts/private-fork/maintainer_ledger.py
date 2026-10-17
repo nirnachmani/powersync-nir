@@ -168,8 +168,16 @@ def record(args: argparse.Namespace) -> dict[str, Any]:
         raise LedgerError(f"{args.outcome} must not claim private commits")
     if any(not FULL_SHA.fullmatch(commit) for commit in args.private_commit):
         raise LedgerError("every --private-commit must be a full 40-character SHA")
-    for private_commit in args.private_commit:
-        _resolve_commit(args.repo, private_commit, "private commit")
+    if args.private_commit:
+        private_ref = _resolve_commit(args.repo, args.private_ref, "private ref")
+        for private_commit in args.private_commit:
+            _resolve_commit(args.repo, private_commit, "private commit")
+            try:
+                _git(args.repo, "merge-base", "--is-ancestor", private_commit, private_ref)
+            except LedgerError as error:
+                raise LedgerError(
+                    f"private commit {private_commit} is not reachable from private ref {args.private_ref!r}"
+                ) from error
 
     _target, commits = _pending(args.repo, ledger, args.target)
     if not commits:
@@ -246,6 +254,7 @@ def main() -> int:
     record_command.add_argument("--upstream-version", required=True, help="upstream release/version containing this commit")
     record_command.add_argument("--reason", help="factual terminal-outcome reason")
     record_command.add_argument("--private-commit", action="append", default=[], help="private full SHA for ported/amended outcomes")
+    record_command.add_argument("--private-ref", default="feature/shared-logical-evs", help="private branch/ref that must reach every --private-commit")
 
     summary_command = commands.add_parser("summary", help="emit cron-consumable JSON ledger status")
     state_argument(summary_command)

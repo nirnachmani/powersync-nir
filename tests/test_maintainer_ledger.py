@@ -35,6 +35,7 @@ def _repo(tmp_path: Path) -> tuple[Path, str, str, str]:
     baseline = _commit(repo, 0, "baseline")
     first = _commit(repo, 1, "first upstream change")
     second = _commit(repo, 2, "second upstream change")
+    _git(repo, "branch", "feature/shared-logical-evs", baseline)
     return repo, baseline, first, second
 
 
@@ -136,6 +137,52 @@ def test_record_rejects_a_private_commit_sha_missing_from_the_private_repo(tmp_p
     assert completed.returncode != 0
     assert "private commit" in completed.stderr.lower()
     assert json.loads(state.read_text(encoding="utf-8"))["checkpoint"] == baseline
+
+
+def test_record_requires_private_commits_from_the_intended_private_ref(tmp_path):
+    repo, baseline, first, second = _repo(tmp_path)
+    state = tmp_path / "state.json"
+    _initialize(repo, state, baseline)
+
+    _git(repo, "switch", "-q", "feature/shared-logical-evs")
+    private_commit = _commit(repo, 3, "private port")
+    _git(repo, "switch", "-q", "-c", "unrelated", baseline)
+    unrelated_commit = _commit(repo, 4, "unrelated local change")
+
+    for invalid_commit in (first, unrelated_commit):
+        completed = _run(
+            repo, "record", "--state", str(state), "--target", second,
+            "--sha", first, "--outcome", "ported", "--reason", "compatible fix",
+            "--private-commit", invalid_commit, "--upstream-version", "v2.12.1419",
+        )
+        assert completed.returncode != 0
+        assert "private ref" in completed.stderr.lower()
+        assert json.loads(state.read_text(encoding="utf-8"))["checkpoint"] == baseline
+
+    accepted = _run(
+        repo, "record", "--state", str(state), "--target", second,
+        "--sha", first, "--outcome", "ported", "--reason", "compatible fix",
+        "--private-commit", private_commit, "--private-ref", "feature/shared-logical-evs",
+        "--upstream-version", "v2.12.1419",
+    )
+
+    assert accepted.returncode == 0, accepted.stderr
+    assert json.loads(state.read_text(encoding="utf-8"))["entries"][0]["private_commits"] == [private_commit]
+
+
+def test_record_without_private_commits_does_not_require_a_private_ref(tmp_path):
+    repo, baseline, first, second = _repo(tmp_path)
+    state = tmp_path / "state.json"
+    _initialize(repo, state, baseline)
+    _git(repo, "branch", "-D", "feature/shared-logical-evs")
+
+    completed = _run(
+        repo, "record", "--state", str(state), "--target", second,
+        "--sha", first, "--outcome", "rejected", "--reason", "excluded backend",
+        "--upstream-version", "v2.12.1419",
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_summary_is_cron_usable_and_migration_requires_matching_legacy_checkpoint(tmp_path):

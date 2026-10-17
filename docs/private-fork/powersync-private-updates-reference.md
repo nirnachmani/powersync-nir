@@ -123,9 +123,11 @@ the processing checkpoint advances. Obtain the exact next SHA with
 `maintainer_ledger.py next`, then record only that SHA using
 `maintainer_ledger.py record --upstream-version <version>`; the atomic ledger
 write stores upstream version, full SHA and subject, outcome, reason, applicable
-private commit SHA(s) that resolve in the private checkout, and timestamp with
+private commit SHA(s) that resolve in the intended private branch/ref, and timestamp with
 the new checkpoint. It rejects `deferred`, unknown or out-of-order SHAs,
-nonexistent private commits, and missing required reasons/private commits. If a commit needs user input, do not
+nonexistent or wrong-branch private commits, and missing required reasons/private commits. `record`
+defaults to `--private-ref feature/shared-logical-evs`; use an explicit
+`--private-ref <ref>` only for the intended private branch. If a commit needs user input, do not
 record it: stop at that commit and leave the checkpoint before it; resolve it
 before considering newer updates. Use `maintainer_ledger.py summary` for the
 cron's durable JSON end-of-cycle payload. This naturally ensures prerequisites

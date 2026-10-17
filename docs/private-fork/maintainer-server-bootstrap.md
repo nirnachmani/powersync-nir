@@ -108,8 +108,9 @@ authorisation and the approved server procedure are both present.
 The repository supplies a portable installer, but it does nothing unless the
 operator passes `--apply`. Run it only on the dedicated remote server after the
 skill installation and private-origin checks above. All artifact paths are
-explicit and must remain inside the named profile home; the checkout root is
-the job's fixed work directory.
+explicit and must remain inside the named profile home; the ledger state must
+remain outside the reports directory (including `latest.json` and `latest.md`),
+and the checkout root is the job's fixed work directory.
 
 ```bash
 PROFILE_HOME="$HOME/.hermes/profiles/powersync-maintainer"
