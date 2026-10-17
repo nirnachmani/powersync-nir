@@ -219,6 +219,19 @@ sender and recipient defaults from the server's `ha-update` skill reference;
 do not expose credentials or duplicate them into this skill. If email delivery
 fails, retain the local report and state the delivery failure in the cron output.
 
+## HACS publication
+
+`main` is the private HACS deployment branch. After a cycle that ports or
+amends one or more upstream changes and passes its required gates, publish the
+tested feature branch to HACS: update `custom_components/power_sync/manifest.json`
+and `RELEASE_NOTES.md` with a unique private version/tag of the form
+`v<latest-fully-processed-upstream-tag>-nir.<serial>`, commit that release
+metadata on `feature/shared-logical-evs`, fast-forward `main` to the verified
+feature head, push both branches, and create the matching private GitHub
+release. Do not publish when the cycle only rejects/admin-skips updates, when
+there is an unresolved commit, or when gates fail. Never deploy Home Assistant;
+HACS installation remains the user's separate HA action.
+
 ## Deployment handoff
 
 A maintenance integration is not deployment proof. Deployment needs separate

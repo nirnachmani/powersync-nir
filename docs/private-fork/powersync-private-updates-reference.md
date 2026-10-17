@@ -147,6 +147,17 @@ sender/recipient defaults as the server's `ha-update` workflow. Keep the local
 Markdown/JSON report as the durable record. If the email call fails, record the
 failure in the cron output without exposing credentials.
 
+## HACS publication
+
+The private repository's `main` branch is the HACS deployment branch. When a
+cycle has ported or amended updates and all required gates pass, update the
+component manifest and release notes with a unique private version/tag
+`v<latest-fully-processed-upstream-tag>-nir.<serial>`, commit it on
+`feature/shared-logical-evs`, fast-forward `main` to that verified head, push
+both branches, and create the matching private GitHub release. Do not publish
+for reject/admin-only cycles, unresolved commits, or failed gates. Publishing
+never deploys Home Assistant; HACS installation is a separate user action.
+
 ## Forbidden actions
 
 - No deployment, Home Assistant reload/restart, remote service control, or
