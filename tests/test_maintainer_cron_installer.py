@@ -115,6 +115,8 @@ def test_apply_creates_one_paused_local_report_only_job_with_fixed_workdir(tmp_p
     assert str(state.resolve()) in invocation
     assert str((profile / "reports/latest.json").resolve()) in invocation
     assert str((profile / "reports/latest.md").resolve()) in invocation
+    assert "maintainer_ledger.py" in invocation
+    assert "never a freeform last_reviewed_upstream checkpoint" in invocation
     assert " cron resume " not in invocation
 
 

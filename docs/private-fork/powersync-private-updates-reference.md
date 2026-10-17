@@ -14,6 +14,13 @@ deploy, install an update agent, or change a public upstream repository.
 - A Python environment able to run the repository's pytest suite.
 - The known broader-suite baseline, if one exists; do not infer failures from
   the focused private suite.
+- A schema-versioned ledger at the explicit state path. Initialize it with
+  `python scripts/private-fork/maintainer_ledger.py --repo <repo> init --state
+  <state> --baseline <full-sha> --migration-boundary v2.12.1418
+  --migration-reference <honest-pre-ledger-reference>`. For the server's legacy
+  state, use only `migrate --legacy-state <old-state>` with an exactly matching
+  baseline; it refuses to overwrite either state and records no invented
+  per-commit v1418 history.
 
 ## Deterministic gates
 
@@ -112,10 +119,17 @@ uncertain.
 
 Process upstream commits strictly oldest to newest. Every commit must reach a
 terminal outcome (`ported`, `amended`, `rejected`, or `admin/no-port`) before
-the processing checkpoint advances. Do not use `deferred` as a normal outcome.
-If a commit needs user input, stop at that commit and leave the checkpoint
-before it; resolve it before considering newer updates. This naturally ensures
-prerequisites are handled before dependent fixes.
+the processing checkpoint advances. Obtain the exact next SHA with
+`maintainer_ledger.py next`, then record only that SHA using
+`maintainer_ledger.py record --upstream-version <version>`; the atomic ledger
+write stores upstream version, full SHA and subject, outcome, reason, applicable
+private commit SHA(s), and timestamp with
+the new checkpoint. It rejects `deferred`, unknown or out-of-order SHAs, and
+missing required reasons/private commits. If a commit needs user input, do not
+record it: stop at that commit and leave the checkpoint before it; resolve it
+before considering newer updates. Use `maintainer_ledger.py summary` for the
+cron's durable JSON end-of-cycle payload. This naturally ensures prerequisites
+are handled before dependent fixes.
 
 ## End-of-cycle report
 

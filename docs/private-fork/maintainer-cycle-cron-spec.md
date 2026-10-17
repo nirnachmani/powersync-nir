@@ -22,7 +22,7 @@ intended for that invocation; without that flag the cycle must not fetch.
 python /path/to/private-fork/scripts/private-fork/maintainer_cycle.py \
   --repo /path/to/private-fork \
   --upstream-remote upstream \
-  --baseline <last-reviewed-upstream-sha-or-tag> \
+  --baseline <explicit-ledger-checkpoint-sha-or-tag> \
   --target <explicit-upstream-sha-or-tag> \
   --state /var/lib/powersync-maintainer/review-state.json \
   --report-json /var/lib/powersync-maintainer/reports/latest.json \
@@ -32,13 +32,22 @@ python /path/to/private-fork/scripts/private-fork/maintainer_cycle.py \
 The operator may supply `--inventory /path/to/private-fork/docs/private-fork/local-change-inventory.md`
 when the inventory is stored outside the checkout default.
 
+Before the read-only comparison, initialize the durable sequential ledger with
+`scripts/private-fork/maintainer_ledger.py init` from an explicit baseline and
+honest migration boundary/reference. For the existing server state, run its
+safe `migrate --legacy-state` form once, with a baseline exactly matching its
+legacy checkpoint; it never changes the legacy file or invents pre-ledger
+v1418 outcomes. Each actual integration cycle must use `maintainer_ledger.py
+next` and `record` in strictly oldest to newest order; `summary` is the cron
+JSON payload. The ledger is authoritative rather than a freeform last_reviewed_upstream checkpoint.
+
 ## Reusable Hermes prompt
 
 ```text
 You are running the read-only PowerSync upstream maintainer cycle in the
 powersync-maintainer profile. Use only the explicit private-fork repository,
-upstream remote, baseline, target, state JSON, JSON report, and Markdown report
-paths supplied by the scheduler. Run maintainer_cycle.py with those exact
+upstream remote, baseline, target, ledger state JSON, JSON report, and Markdown
+report paths supplied by the scheduler. Run maintainer_cycle.py with those exact
 arguments. Add --fetch only if the scheduler explicitly supplies it.
 
 Treat the resulting report as triage only. Do not merge, rebase, cherry-pick,
@@ -50,10 +59,11 @@ exists and is explicitly authorised.
 
 ## Required output handling
 
-Keep the JSON and Markdown artifacts for review. The state JSON records only the
-reviewed resolved range and normalized classification. A malformed state file, a
-missing remote, or missing endpoint must fail the run without replacing reports
-or state. The cycle makes no candidate change regardless of classification.
+Keep the JSON and Markdown artifacts for review. The ledger JSON records the
+atomic terminal-decision history and checkpoint; the read-only cycle report is
+not a replacement checkpoint. A malformed state file, a missing remote, or
+missing endpoint must fail the run without replacing reports or state. The
+cycle makes no candidate change regardless of classification.
 
 ## Paused installer contract
 
@@ -63,5 +73,5 @@ non-mutating alternative to `--apply`. It refuses the default or wrong profile,
 paths outside the supplied checkout/profile boundaries, a missing installed
 skill, an origin that `gh` cannot verify as private, and an existing active job
 with the fixed name `powersync-private-upstream-review`. It never resumes the
-job. Its report-only prompt invokes `maintainer_cycle.py` with the explicit
-repository, state, and report locations and forbids delivery to origin.
+job. Its prompt requires `maintainer_ledger.py` with the explicit repository,
+state, and report locations and forbids delivery to origin.

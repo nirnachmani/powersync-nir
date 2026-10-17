@@ -155,3 +155,17 @@ def test_default_private_gate_runs_identity_policy_contract():
     runner = _read("scripts/private-fork/run_private_tests.sh")
 
     assert "tests/test_private_identity_policy.py" in runner
+    assert "tests/test_maintainer_ledger.py" in runner
+
+
+def test_private_maintainer_material_requires_the_sequential_ledger():
+    for relative_path in (
+        "docs/private-fork/hermes-skill/powersync-private-updates/SKILL.md",
+        "docs/private-fork/powersync-private-updates-reference.md",
+        "scripts/private-fork/install_maintainer_cron.sh",
+        "docs/private-fork/maintainer-cycle-cron-spec.md",
+    ):
+        material = _read(relative_path)
+        assert "maintainer_ledger.py" in material
+        assert "strictly oldest to newest" in material
+        assert "freeform last_reviewed_upstream checkpoint" in material or "last_reviewed_upstream" not in material

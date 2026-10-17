@@ -35,6 +35,7 @@ focused_tests=(
     tests/test_private_fork_upstream_delta.py
     tests/test_maintainer_skill_bootstrap.py
     tests/test_maintainer_cron_installer.py
+    tests/test_maintainer_ledger.py
     tests/test_maintainer_cycle.py
     tests/test_simulated_upstream_maintainer_validation.py
     tests/test_candidate_worktree.py

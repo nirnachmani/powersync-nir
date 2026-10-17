@@ -38,6 +38,10 @@ Before work, establish:
 3. The last reviewed upstream SHA/tag and target upstream range.
 4. The current local-change inventory.
 5. A working Python environment for the fork.
+6. A schema-versioned `maintainer_ledger.py` state file. Create it only from an
+   explicit baseline with a migration boundary/reference. For old v1418 state,
+   use the CLI's safe `migrate --legacy-state` command with a matching baseline;
+   do not create fictional historical commit outcomes.
 
 ## Required gates
 
@@ -144,10 +148,16 @@ entitlement, permission, command-fencing, or hosted optimiser-access code.
   or the correct private outcome is genuinely uncertain.
 - Process upstream commits strictly oldest to newest. Every commit must reach a
   terminal outcome before advancing the processing checkpoint: `ported`,
-  `amended`, `rejected`, or `admin/no-port`. Do not use `deferred` as a normal
-  outcome. If a commit needs user input, stop the cycle at that commit and do
-  not advance the checkpoint; resume it before processing later commits. This
-  naturally brings any prerequisite in before a later dependent fix.
+  `amended`, `rejected`, or `admin/no-port`. Use
+  `scripts/private-fork/maintainer_ledger.py next` to obtain the sole permitted
+  commit, then `record --upstream-version <version>` it with reason and
+  applicable private commit SHA(s).
+  Its atomic write advances the checkpoint with the durable entry; it rejects
+  `deferred`, missing mandatory details, unknown SHAs, and out-of-order work.
+  If a commit needs user input, do not record it: stop the cycle at that commit
+  and do not advance the checkpoint; resume it before processing later commits.
+  Use `summary` as the end-of-cycle cron JSON payload. This naturally brings
+  any prerequisite in before a later dependent fix.
 - Broad testing is reserved for final release handoff or a clear regression
   discovered during an amendment. Never multiply review or broad test runs for
   irrelevant, theoretical, or unavailable-vendor scenarios.
