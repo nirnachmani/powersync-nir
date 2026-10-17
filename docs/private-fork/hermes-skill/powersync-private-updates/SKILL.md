@@ -199,6 +199,11 @@ For an uncertain overlap or a choice between private functionality and another
 required outcome, do not decide silently: state the alternatives in one or two
 sentences and ask the user for a preference.
 
+Send this final report by email through the configured Resend MCP. Reuse the
+sender and recipient defaults from the server's `ha-update` skill reference;
+do not expose credentials or duplicate them into this skill. If email delivery
+fails, retain the local report and state the delivery failure in the cron output.
+
 ## Deployment handoff
 
 A maintenance integration is not deployment proof. Deployment needs separate

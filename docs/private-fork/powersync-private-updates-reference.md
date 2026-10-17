@@ -126,6 +126,11 @@ vendor or unused feature; an `admin/no-port` entry must name the release,
 version, or documentation bookkeeping. An uncertain compatibility choice must state the
 alternatives and request the user's preference.
 
+Send the completed report through the configured Resend MCP, using the same
+sender/recipient defaults as the server's `ha-update` workflow. Keep the local
+Markdown/JSON report as the durable record. If the email call fails, record the
+failure in the cron output without exposing credentials.
+
 ## Forbidden actions
 
 - No deployment, Home Assistant reload/restart, remote service control, or
