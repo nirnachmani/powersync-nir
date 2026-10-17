@@ -34,8 +34,15 @@ class SolarProductionRuntime:
             stop_permitted=self.can_stop,
         )
         self.paused = False
+        self._terminal = False
+        self._lifecycle_lock = asyncio.Lock()
         self.after_restore = None
         self._tick_running = False
+
+    @property
+    def terminal(self):
+        """Return whether irreversible config-entry shutdown has started."""
+        return self._terminal
 
     def option(self, key, default=None):
         return self.entry.options.get(key, self.entry.data.get(key, default))
@@ -185,32 +192,41 @@ class SolarProductionRuntime:
                 replan()
 
     async def manual_handoff(self):
-        if self.manager.loaded and not self.option(ENABLED, False) and not self.manager.owns_control:
-            return True
-        ok = await self.manager.release(suspend=True)
-        self.publish()
-        return ok
+        async with self._lifecycle_lock:
+            if self._terminal:
+                return False
+            if self.manager.loaded and not self.option(ENABLED, False) and not self.manager.owns_control:
+                return True
+            ok = await self.manager.release(suspend=True)
+            self.publish()
+            return ok and not self._terminal
 
     async def temporary_handoff(self):
         """Restore owned PV controls without permanently retiring this runtime."""
-        was_paused = self.paused
-        self.paused = True
-        try:
-            return await self.manager.release()
-        finally:
-            # Options and monitoring transitions can fail or be cancelled while
-            # the entry remains loaded. Only config-entry unload may leave the
-            # runtime permanently paused/stopping.
-            self.paused = was_paused
-            self.publish()
+        if self._terminal:
+            return False
+        async with self._lifecycle_lock:
+            if self._terminal:
+                return False
+            was_paused = self.paused
+            self.paused = True
+            try:
+                return await self.manager.release()
+            finally:
+                # Serialized handoffs restore their prior state, but a shutdown
+                # request is irreversible even if it arrived during the release.
+                self.paused = was_paused or self._terminal
+                self.publish()
 
     async def shutdown(self):
+        self._terminal = True
         self.paused = True
-        try:
-            await self.manager.shutdown()
-        finally:
-            self.publish()
-            for controller in self.controllers.values():
-                if controller:
-                    await controller.disconnect()
+        async with self._lifecycle_lock:
+            try:
+                await self.manager.shutdown()
+            finally:
+                self.publish()
+                for controller in self.controllers.values():
+                    if controller:
+                        await controller.disconnect()
         return not self.manager.owns_control

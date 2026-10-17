@@ -40903,6 +40903,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 _LOGGER.info(f"🔴 Curtailing {inverter_brand} inverter at {inverter_host}")
 
+            # Shutdown becomes terminal before it waits for this shared lock.
+            # Re-check immediately before the manual hardware write so a queued
+            # service cannot outlive config-entry unload.
+            if production and production.terminal:
+                raise HomeAssistantError(
+                    "PV production runtime is shutting down; manual inverter control was deferred"
+                )
+
             # Call curtail with appropriate parameters
             if home_load_w is not None and hasattr(controller, 'curtail'):
                 import inspect
@@ -40930,6 +40938,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             else:
                 _LOGGER.error("❌ Failed to curtail inverter")
 
+        except HomeAssistantError:
+            raise
         except Exception as e:
             _LOGGER.error(f"Error curtailing inverter: {e}")
         finally:
@@ -41069,6 +41079,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             _LOGGER.info(f"🟢 Restoring {inverter_brand} inverter at {inverter_host}")
 
+            # Fence a service that completed its handoff but queued behind an
+            # irreversible config-entry shutdown on the shared control lock.
+            if production and production.terminal:
+                raise HomeAssistantError(
+                    "PV production runtime is shutting down; manual inverter control was deferred"
+                )
+
             success = await controller.restore()
 
             if success:
@@ -41077,6 +41094,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             else:
                 _LOGGER.error("❌ Failed to restore inverter")
 
+        except HomeAssistantError:
+            raise
         except Exception as e:
             _LOGGER.error(f"Error restoring inverter: {e}")
         finally:

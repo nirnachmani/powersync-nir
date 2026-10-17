@@ -515,6 +515,73 @@ def test_temporary_handoff_restores_runtime_after_success_failure_and_cancellati
     run(scenario())
 
 
+def test_overlapping_temporary_handoffs_remain_paused_until_both_finish(runtime_rig):
+    runtime, _, _, _, _, _ = runtime_rig
+
+    async def scenario():
+        releases = [asyncio.Event(), asyncio.Event()]
+        started = [asyncio.Event(), asyncio.Event()]
+        calls = 0
+
+        async def controlled_release():
+            nonlocal calls
+            index = calls
+            calls += 1
+            started[index].set()
+            await releases[index].wait()
+            return True
+
+        runtime.manager.release = controlled_release
+        first = asyncio.create_task(runtime.temporary_handoff())
+        await started[0].wait()
+        second = asyncio.create_task(runtime.temporary_handoff())
+        await asyncio.sleep(0)
+        assert calls == 1
+        assert runtime.paused
+
+        releases[0].set()
+        await started[1].wait()
+        assert runtime.paused
+        releases[1].set()
+
+        assert await first
+        assert await second
+        assert runtime.paused is False
+
+    run(scenario())
+
+
+def test_temporary_handoff_cannot_revive_runtime_after_shutdown_starts(runtime_rig):
+    runtime, _, _, _, _, _ = runtime_rig
+
+    async def scenario():
+        release_started = asyncio.Event()
+        finish_release = asyncio.Event()
+
+        async def controlled_release():
+            release_started.set()
+            await finish_release.wait()
+            return True
+
+        runtime.manager.release = controlled_release
+        handoff = asyncio.create_task(runtime.temporary_handoff())
+        await release_started.wait()
+        shutdown = asyncio.create_task(runtime.shutdown())
+        await asyncio.sleep(0)
+        assert runtime.terminal
+        assert runtime.paused
+
+        finish_release.set()
+        assert await handoff
+        assert await shutdown
+        assert runtime.terminal
+        assert runtime.paused
+        assert not await runtime.temporary_handoff()
+        assert not await runtime.manual_handoff()
+
+    run(scenario())
+
+
 def extracted(path, name, namespace):
     import ast
     import textwrap
@@ -694,6 +761,103 @@ def test_manual_inverter_services_handoff_production_before_control():
         handoff = handler.index("await production.manual_handoff()")
         assert handoff < handler.index("await inverter_control_lock.acquire()")
         assert "production.shutdown()" not in handler
+
+
+@pytest.mark.parametrize("handler_name", ["handle_curtail_inverter", "handle_restore_inverter"])
+def test_manual_inverter_service_queued_before_shutdown_cannot_write(
+    runtime_rig, handler_name
+):
+    runtime, _, _, _, _, entry_data = runtime_rig
+    runtime.manager.loaded = True
+    runtime.entry.options.update(
+        {
+            pv.ENABLED: False,
+            "ac_enabled": True,
+            "brand": "test_inverter",
+            "host": "inverter.local",
+        }
+    )
+    lock = entry_data["inverter_control_lock"]
+    entry_data["solar_production_runtime"] = runtime
+    writes = []
+
+    async def curtail(*args, **kwargs):
+        writes.append("curtail")
+        return True
+
+    async def restore():
+        writes.append("restore")
+        return True
+
+    async def disconnect():
+        return None
+
+    controller = SimpleNamespace(
+        curtail=curtail, restore=restore, disconnect=disconnect
+    )
+    logger = SimpleNamespace(
+        info=lambda *args, **kwargs: None,
+        warning=lambda *args, **kwargs: None,
+        error=lambda *args, **kwargs: None,
+        debug=lambda *args, **kwargs: None,
+    )
+
+    class HandoffRejected(Exception):
+        pass
+
+    namespace = {
+        "asyncio": asyncio,
+        "hass": runtime.hass,
+        "entry": runtime.entry,
+        "DOMAIN": "power_sync",
+        "ServiceCall": object,
+        "HomeAssistantError": HandoffRejected,
+        "_LOGGER": logger,
+        "ac_inverter_is_same_hybrid": lambda: False,
+        "get_inverter_controller": lambda **kwargs: controller,
+        "get_live_status": lambda: None,
+        "_set_inverter_control_state": lambda *args, **kwargs: None,
+        "CONF_AC_INVERTER_CURTAILMENT_ENABLED": "ac_enabled",
+        "CONF_INVERTER_BRAND": "brand",
+        "CONF_INVERTER_HOST": "host",
+        "CONF_INVERTER_PORT": "port",
+        "DEFAULT_INVERTER_PORT": 502,
+        "CONF_INVERTER_SLAVE_ID": "slave_id",
+        "DEFAULT_INVERTER_SLAVE_ID": 1,
+        "CONF_INVERTER_MODEL": "model",
+        "CONF_INVERTER_TOKEN": "token",
+        "CONF_FRONIUS_LOAD_FOLLOWING": "fronius_load_following",
+        "CONF_INVERTER_RATED_POWER_W": "rated_power_w",
+        "CONF_ENPHASE_USERNAME": "enphase_username",
+        "CONF_ENPHASE_PASSWORD": "enphase_password",
+        "CONF_ENPHASE_SERIAL": "enphase_serial",
+        "CONF_ENPHASE_NORMAL_PROFILE": "enphase_normal_profile",
+        "CONF_ENPHASE_ZERO_EXPORT_PROFILE": "enphase_zero_export_profile",
+        "CONF_ENPHASE_IS_INSTALLER": "enphase_is_installer",
+        "CONF_SIGENERGY_EXPORT_LIMIT_KW": "sigenergy_export_limit_kw",
+        "CONF_INVERTER_ENTITY_PREFIX": "inverter_entity_prefix",
+        "INVERTER_CONTROL_MODE_LOAD_FOLLOWING": "load_following",
+        "INVERTER_CONTROL_MODE_SHUTDOWN": "shutdown",
+        "INVERTER_CONTROL_MODE_NORMAL": "normal",
+    }
+    runtime.hass.data = {"power_sync": {runtime.entry.entry_id: entry_data}}
+    handler = extracted(PACKAGE / "__init__.py", handler_name, namespace)
+
+    async def scenario():
+        await lock.acquire()
+        service = asyncio.create_task(handler(SimpleNamespace(data={})))
+        await asyncio.sleep(0)
+        shutdown = asyncio.create_task(runtime.shutdown())
+        await asyncio.sleep(0)
+        assert runtime.terminal
+        lock.release()
+
+        with pytest.raises(HandoffRejected):
+            await service
+        assert await shutdown
+        assert writes == []
+
+    run(scenario())
 
 
 def test_intermediate_transitions_use_temporary_not_permanent_shutdown():

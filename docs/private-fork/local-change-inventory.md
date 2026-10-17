@@ -6,8 +6,8 @@ current repository only; it is not a deployment or upstream-update procedure.
 ## Reviewed upstream baseline
 
 - The reviewed upstream baseline is `v2.12.1363` /
-  `85f99ea62a174cd9153d5ff2ce71023dda2c9a5c`; the reviewed target is
-  `v2.12.1418` / `e3a2ec1`.
+  `85f99ea62a174cd9153d5ff2ce71023dda2c9a5c`. The `v2.12.1418` tag is
+  `d8936f7d`; the reviewed target is post-tag cleanup `e3a2ec1`.
 - `upstream-1363-1408-port-manifest.md` is the exhaustive, Git-derived
   classification for that range. It is a review record, not permission to
   cherry-pick or merge upstream production code.
@@ -146,9 +146,8 @@ canonical identity and ownership checks; they are not API payload bypasses.
   projection seam: charge-by-time feasibility now includes the effective
   self-consumption action that runtime will execute. The exact optimizer source
   delta remains fail-closed in the continuity allowlist.
-- Upstream `38e606e0` is deferred because its persisted zero-cost provenance
-  caller and tests depend on upstream `3f90add6`. That prerequisite and its
-  dependent completion are now ported together as a reviewed provenance cohort.
+- Upstream `3f90add6` and its dependent `38e606e0` are ported together as a
+  reviewed persisted zero-cost provenance cohort.
 - From upstream `24fcc7d5`, negative retail import prices may stop production
   only through the private scope: configured Amber intervals (or an explicitly
   configured bounded retail-price entity), Sigenergy's PV-only limit, and
