@@ -199,13 +199,13 @@ def _expected_optimizer_coordinator_source() -> str:
 # cannot waive an unrelated optimizer change.
 _AMBER_COORDINATOR_DIFF_SHA256 = "721fd3d8a5db88106eeeae48e23c960ad0c5e008b73cd838cb3407809c9d30dd"
 
-# Exact allowance for the three reviewed 24fcc7d solar
-# projection/learning/derating hunks. The source is the detached candidate's
-# already-reviewed provenance cohort; no off-grid or vendor-specific hunk is
-# admitted by this digest.
+# Exact allowance for reviewed 24fcc7d solar projection/learning/derating
+# hunks and upstream d54e87e6's missing DOMAIN import. The source is the
+# detached candidate's already-reviewed provenance cohort; no off-grid or
+# vendor-specific hunk is admitted by this digest.
 _NEGATIVE_IMPORT_SOLAR_SOURCE = "5ddd156708d1b5b05f1a67be87d1fb0ea99653c7"
 _NEGATIVE_IMPORT_SOLAR_DIFF_SHA256 = (
-    "43337ffcfef82d7503b40a8375f49ccebd6253e17311a2f661c58655d98be536"
+    "aa4d2e0c9d72ff871559e69fc01dd516b30070030e1c83d48bbd1939645e4338"
 )
 
 # Exact, path-specific exception for the reviewed Cost Neutral reachable-
@@ -449,12 +449,15 @@ def test_amber_optimizer_allowlist_rejects_an_unreviewed_coordinator_change():
 
 
 def test_negative_import_solar_allowlist_rejects_a_nearby_policy_mutation():
-    """The 24fcc7d allowance is exact and fails closed."""
+    """The 24fcc7d/d54e87e6 allowance is exact and fails closed."""
     actual = (ROOT / COORDINATOR).read_text(encoding="utf-8").replace(
         "\r\n", "\n"
     )
 
     assert _negative_import_solar_diff_is_allowlisted(actual)
+    assert not _negative_import_solar_diff_is_allowlisted(
+        actual.replace("from ..const import (\n    DOMAIN,", "from ..const import (", 1)
+    )
     assert not _negative_import_solar_diff_is_allowlisted(
         actual.replace(
             "enabled=bool(production and production.can_project()),",
