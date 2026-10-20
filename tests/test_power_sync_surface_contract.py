@@ -200,13 +200,13 @@ def _expected_optimizer_coordinator_source() -> str:
 _AMBER_COORDINATOR_DIFF_SHA256 = "721fd3d8a5db88106eeeae48e23c960ad0c5e008b73cd838cb3407809c9d30dd"
 
 # Exact allowance for reviewed 24fcc7d solar projection/learning/derating
-# hunks, d54e87e6's missing DOMAIN import, and 52465064's final solar-credit
-# handoff. The source is the
+# hunks, d54e87e6's missing DOMAIN import, 52465064's final solar-credit
+# handoff, and 3b207aa7's Sigenergy low-target refresh. The source is the
 # detached candidate's already-reviewed provenance cohort; no off-grid or
 # vendor-specific hunk is admitted by this digest.
 _NEGATIVE_IMPORT_SOLAR_SOURCE = "5ddd156708d1b5b05f1a67be87d1fb0ea99653c7"
 _NEGATIVE_IMPORT_SOLAR_DIFF_SHA256 = (
-    "0f44653218bc024df505f6e083e4836d03daa7cdcf1b8dcc229fa9fd6243bac7"
+    "a1ba6846ec8ca4b3c4231f7b60988b42f46ae16e8be09351458342b1fb0f85c7"
 )
 
 # Exact, path-specific exception for the reviewed Cost Neutral reachable-
