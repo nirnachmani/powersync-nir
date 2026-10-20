@@ -632,7 +632,7 @@ def extract_current_price_interval(
     price_data: list[dict[str, Any]],
     now: datetime | None = None,
 ) -> dict[str, Any] | None:
-    """Return currently covering Amber CurrentInterval values by channel."""
+    """Return a covering Amber CurrentInterval (5, 15 or 30 minutes) by channel."""
     if not price_data:
         return None
 
@@ -651,7 +651,7 @@ def extract_current_price_interval(
             )
         except (TypeError, ValueError):
             continue
-        if duration_minutes != 5:
+        if duration_minutes not in (5, 15, 30):
             continue
         compare_now = reference_now
         if interval_end.tzinfo is None and compare_now.tzinfo is not None:
