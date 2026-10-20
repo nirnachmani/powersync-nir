@@ -19294,6 +19294,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             earnings_caps_by_day=caps_by_day,
             forecast_import_costs_by_day=forecast_import_costs,
             fixed_cost_allowances_by_day=fixed_allowances_by_day,
+            forecast_natural_export_earnings_by_day=forecast_natural_export_earnings,
             current_day=current_day,
             timezone=timezone_name,
             settlement_import_prices=list(import_prices[:n]),

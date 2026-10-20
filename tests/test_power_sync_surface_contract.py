@@ -200,12 +200,13 @@ def _expected_optimizer_coordinator_source() -> str:
 _AMBER_COORDINATOR_DIFF_SHA256 = "721fd3d8a5db88106eeeae48e23c960ad0c5e008b73cd838cb3407809c9d30dd"
 
 # Exact allowance for reviewed 24fcc7d solar projection/learning/derating
-# hunks and upstream d54e87e6's missing DOMAIN import. The source is the
+# hunks, d54e87e6's missing DOMAIN import, and 52465064's final solar-credit
+# handoff. The source is the
 # detached candidate's already-reviewed provenance cohort; no off-grid or
 # vendor-specific hunk is admitted by this digest.
 _NEGATIVE_IMPORT_SOLAR_SOURCE = "5ddd156708d1b5b05f1a67be87d1fb0ea99653c7"
 _NEGATIVE_IMPORT_SOLAR_DIFF_SHA256 = (
-    "aa4d2e0c9d72ff871559e69fc01dd516b30070030e1c83d48bbd1939645e4338"
+    "0f44653218bc024df505f6e083e4836d03daa7cdcf1b8dcc229fa9fd6243bac7"
 )
 
 # Exact, path-specific exception for the reviewed Cost Neutral reachable-
@@ -231,13 +232,33 @@ _NATIVE_SOLAR_CLIPPED_EXPORT_DIFF_SHA256 = (
     "303f33c1f73f95d5eb960c785e2852443c362a77b84aa7dfa68271ff6fe8750f"
 )
 
-# Exact allowance for upstream 2ff8c9d2 on top of the fully reviewed private
-# optimizer source. Disable Idle must project the self-consumption action that
-# runtime will actually execute; no broader optimizer delta is admitted.
+# Exact allowance for upstream 2ff8c9d2 and 52465064 on top of the fully
+# reviewed private optimizer source. Disable Idle projects the runtime action;
+# final solar credits constrain discretionary exports. No broader delta is admitted.
 _DISABLE_IDLE_DEADLINE_SOURCE = "25f388110c1159fbaf08d614e77af6ef4dc32f03"
 _DISABLE_IDLE_DEADLINE_DIFF_SHA256 = (
-    "439af72abf5bebc40606628da6517cac7773365a41fbe3da7c1dded53ba21b20"
+    "575a2dec4bc5a82eb5f766af1419ccc200ea76eaddfc09459bd5ed1ac847d3cd"
 )
+
+# Exact upstream 52465064 plan-schema delta. Legacy no-solar callers remain
+# supported; this digest does not waive changes elsewhere in cost_neutral.py.
+COST_NEUTRAL = OPTIMIZATION / "cost_neutral.py"
+_FINAL_SOLAR_CREDIT_SOURCE = "608042abefd68d5de6edbc2fb5f4aafb107c1e58"
+_FINAL_SOLAR_CREDIT_DIFF_SHA256 = (
+    "a00a1d81861473f06fa6f9cc6414c6af858b1b9e9bdb5f54b03d3ed315ebc9f0"
+)
+
+
+def _final_solar_credit_diff_is_allowlisted(actual: str) -> bool:
+    expected = _git_show(_FINAL_SOLAR_CREDIT_SOURCE, COST_NEUTRAL)
+    diff = "\n".join(
+        difflib.unified_diff(
+            expected.splitlines(), actual.splitlines(),
+            fromfile="private_608042ab", tofile="final_solar_credit_candidate",
+            lineterm="",
+        )
+    )
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _FINAL_SOLAR_CREDIT_DIFF_SHA256
 
 
 def _amber_coordinator_diff_is_allowlisted(expected: str, actual: str) -> bool:
@@ -428,6 +449,8 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
                 _git_show(_DISABLE_IDLE_DEADLINE_SOURCE, BATTERY_OPTIMIZER)
             )
             assert _disable_idle_deadline_diff_is_allowlisted(actual)
+        elif relative_path == COST_NEUTRAL:
+            assert _final_solar_credit_diff_is_allowlisted(actual)
         else:
             assert actual == expected
 
@@ -536,6 +559,14 @@ def test_disable_idle_deadline_allowlist_rejects_a_nearby_policy_mutation():
     assert _disable_idle_deadline_diff_is_allowlisted(actual)
     assert not _disable_idle_deadline_diff_is_allowlisted(
         actual.replace("not disable_idle", "disable_idle", 1)
+    )
+
+
+def test_final_solar_credit_allowlist_rejects_a_nearby_policy_mutation():
+    actual = (ROOT / COST_NEUTRAL).read_text(encoding="utf-8")
+    assert _final_solar_credit_diff_is_allowlisted(actual)
+    assert not _final_solar_credit_diff_is_allowlisted(
+        actual.replace("nonnegative=False", "nonnegative=True", 1)
     )
 
 
