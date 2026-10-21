@@ -65,7 +65,8 @@ fixes or features even when their upstream diff also touches licensing. Do not
 import the licensing portion. Provider authentication remains allowed. ChatGPT
 plan-explanation sign-in is already an authorised and reviewed AI feature;
 subsequent fixes and enhancements to existing explanation providers are normal
-relevance candidates, without a second blanket approval. Review genuinely
+relevance candidates even if that provider is not currently selected, without
+a second blanket approval. Review genuinely
 new scopes, token-storage boundaries, or API contracts on their merits; keep
 them separate from optimiser entitlement, permission, command-fencing, and
 hosted optimiser-access code. Preserve source attribution and this private
@@ -93,8 +94,10 @@ useful capability; or supply shared infrastructure for likely relevant future
 work? Reject a battery-vendor change unless it targets Sigenergy. Reject a
 provider change unless it targets Amber. Keep generic optimiser/site changes
 only when they can affect Sigenergy, Amber, solar/site flows, or private shared
-EV behavior; record `irrelevant to configured setup` plus the unavailable
-vendor/unused feature for the rest.
+EV behavior. Follow-up fixes and enhancements to existing AI explanation
+providers remain relevant even when the provider is not currently selected.
+Record `irrelevant to configured setup` plus the unavailable vendor/unused
+feature for the rest.
 
 The updater classifies and preserves private-fork compatibility; it is not an
 upstream quality-assurance role. Rely on upstream developer tests for a

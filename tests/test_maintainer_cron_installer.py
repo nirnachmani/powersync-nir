@@ -205,6 +205,7 @@ def test_cron_prompt_requires_approved_ai_hunk_review_and_email_table(tmp_path):
     assert completed.returncode == 0, completed.stderr
     invocation = Path(env["HERMES_LOG"]).read_text(encoding="utf-8")
     assert "already-approved ChatGPT plan explanations" in invocation
+    assert "even if the affected provider is not currently selected" in invocation
     assert "licensing-adjacent commits hunk by hunk" in invocation
     assert "email body must include the complete per-update Markdown table" in invocation
     assert "private GitHub release is not HACS-installable" in invocation

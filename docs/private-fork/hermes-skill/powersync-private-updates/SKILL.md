@@ -91,7 +91,8 @@ ChatGPT plan-explanation sign-in has **already been authorised and reviewed**
 as distinct from optimiser licensing. Treat follow-up ChatGPT registration,
 credential-storage, startup and explanation-API fixes, as well as relevant
 enhancements to existing AI explanation providers, as normal upstream candidates;
-never reject them for lacking a second blanket AI approval. Evaluate genuinely
+include existing providers even if they are not currently selected, and never
+reject them for lacking a second blanket AI approval. Evaluate genuinely
 new OAuth scopes, storage boundaries, or API contracts on their actual merits
 and stop only for an unresolved security choice. Keep optimiser entitlement,
 permission, command-fencing and hosted-access code out.
@@ -106,9 +107,10 @@ permission, command-fencing and hosted-access code out.
    repository tools; identify changed paths, symbols, tests, and release notes.
 4. Apply this relevance and interaction screen before the no-paywall classification:
    - Is it relevant to Amber, Sigenergy, solar/site flows, private shared EVs,
-     or an explicitly approved optional feature? If not, record `irrelevant to
-     configured setup` with the specific unavailable vendor/feature reason and
-     reject it without a candidate.
+     an existing AI explanation provider, or another explicitly approved optional
+     feature? Existing AI providers are in scope even if presently unselected.
+     Otherwise record the specific unavailable vendor or feature as
+     `irrelevant to configured setup` and reject without a candidate.
    - Does it plausibly interact with private two-EV or external-session code?
      If not, port it minimally without a private quality audit or new tests.
    - If it does interact, decide whether private behavior remains compatible.
