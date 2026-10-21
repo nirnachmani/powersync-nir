@@ -197,3 +197,14 @@ def test_refuses_non_private_origin_and_missing_installed_skill(tmp_path):
     completed = _run(tmp_path, "--dry-run", *_valid_args(repo, profile, state), env=env)
     assert completed.returncode != 0
     assert "powersync-private-updates" in completed.stderr
+
+
+def test_cron_prompt_requires_approved_ai_hunk_review_and_email_table(tmp_path):
+    repo, profile, state, env = _fixture(tmp_path)
+    completed = _run(tmp_path, "--apply", *_valid_args(repo, profile, state), env=env)
+    assert completed.returncode == 0, completed.stderr
+    invocation = Path(env["HERMES_LOG"]).read_text(encoding="utf-8")
+    assert "already-approved ChatGPT plan explanations" in invocation
+    assert "licensing-adjacent commits hunk by hunk" in invocation
+    assert "email body must include the complete per-update Markdown table" in invocation
+    assert "private GitHub release is not HACS-installable" in invocation

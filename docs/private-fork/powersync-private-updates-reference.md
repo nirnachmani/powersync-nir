@@ -59,12 +59,17 @@ In particular, do not introduce `optimizer_access`, `subscription_required`,
 or `LicensedBatteryController`. A hunk coupled to licensing is **incompatible
 until disentangled**, rather than a reason to copy its guard or recovery code.
 
-These rejections are intentionally path/symbol-specific: unrelated provider
-authentication tokens and provider pairing flows remain allowed. ChatGPT
-plan-explanation sign-in is also distinct from optimiser licensing: it may be
-considered only as a separately approved AI feature after a dedicated security
-and API-contract review, and must never import optimiser entitlement,
-permission, command-fencing, or hosted optimiser-access code. Preserve source attribution and this private fork's noncommercial scope for every adapted hunk.
+These rejections are intentionally symbol/behavior-specific, not a reason to
+discard an entire mixed commit: separate and adapt useful non-entitlement bug
+fixes or features even when their upstream diff also touches licensing. Do not
+import the licensing portion. Provider authentication remains allowed. ChatGPT
+plan-explanation sign-in is already an authorised and reviewed AI feature;
+subsequent fixes and enhancements to existing explanation providers are normal
+relevance candidates, without a second blanket approval. Review genuinely
+new scopes, token-storage boundaries, or API contracts on their merits; keep
+them separate from optimiser entitlement, permission, command-fencing, and
+hosted optimiser-access code. Preserve source attribution and this private
+fork's noncommercial scope for every adapted hunk.
 Before proposing any candidate, run the current source-only gates:
 
 ```bash
@@ -135,28 +140,33 @@ are handled before dependent fixes.
 
 ## End-of-cycle report
 
-At the end of every update cycle, report every considered update in a concise
-table: update, `ported`/`amended`/`rejected`/`admin/no-port`, and a one-sentence
-reason. An `irrelevant to configured setup` entry must name the unavailable
-vendor or unused feature; an `admin/no-port` entry must name the release,
-version, or documentation bookkeeping. An uncertain compatibility choice must state the
-alternatives and request the user's preference.
+At the end of every update cycle, include in **both the detailed report and
+the actual Resend email body** a concise Markdown table with one row per
+processed upstream commit: version/tag and SHA, `ported`/`amended`/`rejected`/
+`admin/no-port`, and a one-sentence reason (how amended, or why rejected).
+Do not replace the detailed maintenance narrative with the table. An
+`irrelevant to configured setup` entry must name the unavailable vendor or
+unused feature; an `admin/no-port` entry must name release/version/docs
+bookkeeping. An uncertain choice requires the user's preference.
 
 Send the completed report through the configured Resend MCP, using the same
 sender/recipient defaults as the server's `ha-update` workflow. Keep the local
 Markdown/JSON report as the durable record. If the email call fails, record the
 failure in the cron output without exposing credentials.
 
-## HACS publication
+## Private publication
 
-The private repository's `main` branch is the HACS deployment branch. When a
+HACS cannot use private repositories (https://www.hacs.xyz/docs/faq/private_repositories/).
+The private repository's `main` branch is the private publication branch, not
+an HACS-installable source. When a
 cycle has ported or amended updates and all required gates pass, update the
 component manifest and release notes with a unique private version/tag
 `v<latest-fully-processed-upstream-tag>-nir.<serial>`, commit it on
 `feature/shared-logical-evs`, fast-forward `main` to that verified head, push
 both branches, and create the matching private GitHub release. Do not publish
 for reject/admin-only cycles, unresolved commits, or failed gates. Publishing
-never deploys Home Assistant; HACS installation is a separate user action.
+never deploys Home Assistant. A private HA delivery method requires separate
+authorisation; never claim that a private release is installable via HACS.
 
 ## Forbidden actions
 

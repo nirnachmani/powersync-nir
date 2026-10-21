@@ -44856,12 +44856,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.http.register_view(OptimizationSettingsView(hass))
     hass.http.register_view(OptimizationAISummaryView(hass))
     hass.http.register_view(OptimizationChatGPTView(hass))
-    from .optimization.chatgpt_auth import ChatGPTAuthError, get_chatgpt_auth
-    try:
-        await get_chatgpt_auth(hass, entry.entry_id).async_load()
-    except ChatGPTAuthError as err:
-        # Optional explanation credentials must not prevent energy control setup.
-        _LOGGER.warning("ChatGPT connection unavailable during setup: %s", err.code)
+    from .optimization.ai_summary import configured_ai_provider
+    if configured_ai_provider(entry) == "chatgpt":
+        from .optimization.chatgpt_auth import ChatGPTAuthError, get_chatgpt_auth
+        try:
+            await get_chatgpt_auth(hass, entry.entry_id).async_load()
+        except ChatGPTAuthError as err:
+            # Optional explanation credentials must not prevent energy control setup.
+            _LOGGER.warning("ChatGPT connection unavailable during setup: %s", err.code)
     _LOGGER.info("Optimization HTTP endpoints registered at /api/power_sync/optimization")
 
     # Reload integration when options change (e.g. optimizer toggled in config flow)
@@ -44958,6 +44960,7 @@ def _optimization_ai_service(
                 api_key=configured_api_key(entry),
                 endpoint=configured_local_endpoint(entry),
                 local_model=configured_local_model(entry),
+                local_timeout=settings["ai_summary_local_timeout"],
                 openrouter_model=configured_openrouter_model(entry),
                 openai_model=configured_openai_model(entry),
             )
@@ -45067,6 +45070,8 @@ class OptimizationView(HomeAssistantView):
                 openrouter_model=configured_openrouter_model(config_entry),
                 openai_model=configured_openai_model(config_entry),
             )
+        if "ai_summary" in api_data:
+            api_data["ai_summary"]["client_timeout_seconds"] = ai_settings["ai_summary_client_timeout_seconds"]
         _LOGGER.debug(f"Optimization GET response: enabled={api_data.get('enabled')}, "
                       f"predicted_cost=${api_data.get('predicted_cost', 0):.2f}, "
                       f"savings=${api_data.get('predicted_savings', 0):.2f}, "
@@ -45726,6 +45731,7 @@ class OptimizationSettingsView(HomeAssistantView):
                 "clear_ai_summary_api_key",
                 "ai_summary_local_endpoint",
                 "ai_summary_local_model",
+                "ai_summary_local_timeout",
                 "ai_summary_openrouter_model",
                 "ai_summary_openai_model",                "ai_summary_auto_refresh",
             }
@@ -45778,6 +45784,15 @@ class OptimizationSettingsView(HomeAssistantView):
                     )
                     if service is not None:
                         service.invalidate()
+                if ai_summary_settings(config_entry)["ai_summary_provider"] == "chatgpt":
+                    from .optimization.chatgpt_auth import ChatGPTAuthError
+                    try:
+                        await _optimization_chatgpt_auth(self._hass, config_entry.entry_id).async_load()
+                    except ChatGPTAuthError as err:
+                        return web.json_response(
+                            {"success": False, "code": err.code, "message": err.message},
+                            status=err.http_status,
+                        )
                 settings = {
                     key: value
                     for key, value in settings.items()
@@ -46470,7 +46485,7 @@ class OptimizationChatGPTView(HomeAssistantView):
         )
 
     async def post(self, request: web.Request) -> web.Response:
-        from .optimization.ai_summary import AISummaryError, configured_openai_model
+        from .optimization.ai_summary import AISummaryError, ai_summary_settings, configured_openai_model
         from .optimization.chatgpt_auth import ChatGPTAuthError
 
         manager = None
@@ -46492,7 +46507,7 @@ class OptimizationChatGPTView(HomeAssistantView):
                 "settings": {
                     "ai_summary_provider", "ai_summary_openai_model",
                     "ai_summary_api_key", "clear_ai_summary_api_key",
-                    "ai_summary_local_endpoint", "ai_summary_local_model",
+                    "ai_summary_local_endpoint", "ai_summary_local_model", "ai_summary_local_timeout",
                     "ai_summary_openrouter_model", "ai_summary_auto_refresh",
                 },
             }
@@ -46531,6 +46546,8 @@ class OptimizationChatGPTView(HomeAssistantView):
                 if not allowed["settings"].intersection(payload):
                     raise ChatGPTAuthError("invalid_request", "Choose AI settings to save.")
                 self._settings(entry, {key: value for key, value in payload.items() if key != "action"})
+                if ai_summary_settings(entry)["ai_summary_provider"] == "chatgpt":
+                    await manager.async_load()
             return self._response(entry, manager)
         except (ChatGPTAuthError, AISummaryError) as err:
             _LOGGER.warning("AI connection action failed: %s", err.code)
@@ -46632,6 +46649,7 @@ class OptimizationAISummaryView(HomeAssistantView):
                 refresh=refresh,
                 endpoint=configured_local_endpoint(config_entry),
                 local_model=configured_local_model(config_entry),
+                local_timeout=public_settings["ai_summary_local_timeout"],
                 openrouter_model=configured_openrouter_model(config_entry),
                 openai_model=configured_openai_model(config_entry),
             )

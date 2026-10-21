@@ -73,6 +73,11 @@ small isolated ports or create speculative tests for unconfigured vendors.
   concrete paywall symbols, not ordinary provider authentication mechanics.
 - A hunk coupled to licensing is **incompatible until disentangled**. Do not
   resolve it by importing a guard, a recovery path, or an access-status UI.
+- Classify licensing-adjacent commits **hunk by hunk**, not by filename or
+  subject alone. If a relevant bug fix or enhancement has an independently
+  useful non-entitlement path, port or minimally amend that behavior without
+  the licence gate. Reject only entitlement-only work or behavior genuinely
+  inseparable from it; adapt private EV overlaps through existing guards.
 - Port an eligible optimiser fix only as manually reviewed, minimal hunks into
   the existing no-paywall optimiser; never use a wholesale 1404+ integration
   as a substitute for hunk review.
@@ -82,10 +87,14 @@ small isolated ports or create speculative tests for unconfigured vendors.
   `python scripts/private-fork/validate_local_architecture.py` and
   `scripts/private-fork/run_private_tests.sh`.
 
-ChatGPT plan-explanation sign-in is explicitly distinct from optimiser
-licensing. It is permitted only as a separately approved AI feature after a
-dedicated security and API-contract review; it must not import optimiser
-entitlement, permission, command-fencing, or hosted optimiser-access code.
+ChatGPT plan-explanation sign-in has **already been authorised and reviewed**
+as distinct from optimiser licensing. Treat follow-up ChatGPT registration,
+credential-storage, startup and explanation-API fixes, as well as relevant
+enhancements to existing AI explanation providers, as normal upstream candidates;
+never reject them for lacking a second blanket AI approval. Evaluate genuinely
+new OAuth scopes, storage boundaries, or API contracts on their actual merits
+and stop only for an unresolved security choice. Keep optimiser entitlement,
+permission, command-fencing and hosted-access code out.
 
 ## Workflow
 
@@ -125,8 +134,9 @@ entitlement, permission, command-fencing, or hosted optimiser-access code.
    locally only in the registered candidate, runs every required gate, and
    commits only there after they pass. It must never publish, deploy, or control
    infrastructure.
-7. For every overlap classification, stop with a report requiring
-   compatible-resolution work; do not attempt an automatic merge.
+7. For every overlap classification, make the smallest compatible amendment
+   with one targeted interaction regression; stop only for a real unresolved
+   private-behaviour/security choice, never merely because a file overlaps.
 8. For redundant changes, record the upstream SHA and equivalence rationale;
    retain the private implementation.
 9. For incompatible changes or failed gates, retain the candidate untouched and
@@ -203,12 +213,14 @@ Blockers / follow-up: <none or factual items>
 
 ## End-of-cycle update report
 
-At the end of each upstream-update cycle, provide a brief table covering every
-considered upstream update:
+At the end of each upstream-update cycle, include this brief Markdown table
+for **every processed commit** in both the detailed report and the **email body**
+(not just a linked file or attachment). Keep the detailed maintenance narrative
+and gates alongside it:
 
-| Update | Outcome | Brief reason / adjustment |
+| Upstream version / commit | Outcome | Brief reason / adjustment |
 |---|---|---|
-| `<SHA or feature>` | ported / amended / rejected / admin/no-port | One sentence. For `irrelevant to configured setup`, name the unavailable vendor or unused feature; for `admin/no-port`, name release/version/documentation bookkeeping. |
+| `<tag or version> / <SHA>` | ported / amended / rejected / admin/no-port | One sentence; name the adaptation for amended work and the concrete reason for rejection. For `irrelevant to configured setup`, name the unavailable vendor or unused feature; for `admin/no-port`, name release/version/documentation bookkeeping. |
 
 For an uncertain overlap or a choice between private functionality and another
 required outcome, do not decide silently: state the alternatives in one or two
@@ -219,18 +231,21 @@ sender and recipient defaults from the server's `ha-update` skill reference;
 do not expose credentials or duplicate them into this skill. If email delivery
 fails, retain the local report and state the delivery failure in the cron output.
 
-## HACS publication
+## Private release publication
 
-`main` is the private HACS deployment branch. After a cycle that ports or
-amends one or more upstream changes and passes its required gates, publish the
-tested feature branch to HACS: update `custom_components/power_sync/manifest.json`
+`main` is the private release branch, **not a standard-HACS install source**:
+HACS excludes private repositories (https://www.hacs.xyz/docs/faq/private_repositories/).
+Keep the fork private; never claim that a tag or GitHub release makes it
+HACS-installable or deployed. After a cycle that ports or amends one or
+more upstream changes and passes its required gates, publish the
+tested feature branch privately: update `custom_components/power_sync/manifest.json`
 and `RELEASE_NOTES.md` with a unique private version/tag of the form
 `v<latest-fully-processed-upstream-tag>-nir.<serial>`, commit that release
 metadata on `feature/shared-logical-evs`, fast-forward `main` to the verified
 feature head, push both branches, and create the matching private GitHub
 release. Do not publish when the cycle only rejects/admin-skips updates, when
 there is an unresolved commit, or when gates fail. Never deploy Home Assistant;
-HACS installation remains the user's separate HA action.
+private HA delivery needs a separately authorised method.
 
 ## Deployment handoff
 

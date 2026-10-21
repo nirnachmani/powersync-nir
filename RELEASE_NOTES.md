@@ -1,13 +1,7 @@
-<!-- release: v2.12.1447-nir.1 -->
+<!-- release: v2.12.1447-nir.2 -->
 
 ## PowerSync Nir private fork
 
-- Preserve two logical EV profiles sharing one selected Generic Charger or Sigenergy EVAC physical loadpoint, guarded external-session reconciliation, and existing Android API routes.
-- Import `DOMAIN` for solar planning (adapted from upstream `d54e87e6`).
-- Include the configured daily supply charge in Amber metered usage totals, including live edits and zero (upstream `125085d7`).
-- Credit final solar exports in Cost Neutral's discretionary battery-export budget (reviewed no-paywall hunks from upstream `52465064`).
-- Accept covering 5-, 15-, and 30-minute Amber current-price intervals (Amber portion of upstream `b2781034`; Tesla tariff code excluded).
-- Respect small Sigenergy battery export targets during hardware refresh (upstream `3b207aa7`).
-- Exclude upstream optimiser licensing and unrelated vendor backends; this private fork remains noncommercial.
-
-Source maintenance only. HACS installation and Home Assistant deployment are separate user actions.
+- Port three previously rejected AI explanation updates: defer unused ChatGPT host registration, avoid opening unselected ChatGPT credential storage at startup while restoring it on selection, and add a configurable 30–600-second local AI timeout with one request budget across retries.
+- Preserve the existing shared logical-EV safeguards, Android API compatibility, and no-paywall optimiser boundary; no HA deployment was performed.
+- Keep the fork private. This release is available from the private GitHub repository but is **not installable through standard HACS**, which does not support private repositories.
