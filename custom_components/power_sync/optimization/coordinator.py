@@ -12243,10 +12243,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             "restoring ordinary self-consumption"
                         )
                         effective_action = "self_consumption"
+                        restore_result = True
                         if hasattr(battery, "set_self_consumption_mode"):
-                            await battery.set_self_consumption_mode()
+                            restore_result = await battery.set_self_consumption_mode()
                         elif hasattr(battery, "restore_normal"):
-                            await battery.restore_normal()
+                            restore_result = await battery.restore_normal()
+                        if restore_result is False:
+                            _LOGGER.warning(
+                                "Profit Max: self-consumption fallback failed — "
+                                "keeping previous action marker so the next cycle retries"
+                            )
+                            return
                     else:
                         _LOGGER.info(
                             "Profit Max: holding battery charge at zero for "
