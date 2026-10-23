@@ -9995,6 +9995,40 @@ def _get_optimizer_battery_params(
     return {}
 
 
+def _generic_charger_charge_state(
+    hass: "HomeAssistant", params: Mapping[str, Any],
+) -> bool | None:
+    """Read fresh charging/stopped evidence without treating missing data as stopped."""
+    from .ocpp_status import normalize_ocpp_status
+
+    stopped = False
+    for key in ("charger_status_entity", "charger_power_entity"):
+        entity_id = params.get(key)
+        entity = hass.states.get(entity_id) if entity_id else None
+        if entity is None or not is_current_ev_power_observation(
+            getattr(entity, "last_reported", None)
+            or getattr(entity, "last_updated", None)
+            or getattr(entity, "last_changed", None)
+        ):
+            continue
+        if key == "charger_status_entity":
+            status = normalize_ocpp_status(entity.state)
+            if status == "charging":
+                return True
+            if status in {
+                "connected", "complete", "completed", "finishing", "stopped",
+                "suspendedev", "suspendedevse", "available", "disconnected", "idle",
+            }:
+                stopped = True
+        else:
+            power_w = _state_power_w(entity)
+            if power_w is not None and math.isfinite(power_w) and power_w >= 0:
+                if power_w > 50:
+                    return True
+                stopped = True
+    return False if stopped else None
+
+
 class PriceLevelChargingExecutor:
     """
     Executes price-level charging based on current price thresholds.
@@ -10689,11 +10723,37 @@ class PriceLevelChargingExecutor:
             self.config_entry.entry_id,
             {},
         )
+        from .shared_loadpoint import binding_for_entry, resolve_active_shared_profile
+
+        binding = binding_for_entry(self.config_entry)
+        previous = entry_data.get("scheduled_ev_preserve_state") or {}
+        profile_id = None
+        if binding is not None:
+            # Do not reattribute a live hold on selector handoff or replace
+            # another mode's hold with a physical charger readback.
+            if previous.get("active"):
+                self._preserve_home_battery_active = (
+                    previous.get("source") == "price_level_charging"
+                )
+                return
+            profile_id = resolve_active_shared_profile(self.hass, self.config_entry)
+            from .ev_ownership import get_ev_ownerships
+
+            lease = get_ev_ownerships(self.hass, self.config_entry).get("generic_ev")
+            if not (
+                profile_id
+                and isinstance(lease, dict)
+                and lease.get("active_profile_id") == profile_id
+                and lease.get("owner") == "powersync"
+                and str(lease.get("owner_mode") or "").startswith("price_level")
+            ):
+                profile_id = None
         entry_data["scheduled_ev_preserve_state"] = {
             "active": True,
             "mode": "no_discharge_charge_allowed",
             "source": "price_level_charging",
             "reason": reason,
+            **({"active_profile_id": profile_id} if binding else {}),
         }
         self._preserve_home_battery_active = True
 
@@ -11224,7 +11284,46 @@ class PriceLevelChargingExecutor:
                     vehicle_state.last_decision = "charging" if vehicle_state.is_charging else "waiting"
                     vehicle_state.last_decision_reason = reason
 
-                await self.apply_preserve_home_battery(vehicle_state.is_charging, reason)
+                preserve_charging = vehicle_state.is_charging
+                if (preserve_charging and not getattr(vehicle_state, "start_pending", False)
+                        and not getattr(vehicle_state, "stop_pending", False)):
+                    from .shared_loadpoint import binding_for_entry, resolve_active_shared_profile
+
+                    binding = binding_for_entry(self.config_entry)
+                    profile_id = (
+                        resolve_active_shared_profile(self.hass, self.config_entry)
+                        if binding else None
+                    )
+                    params = _build_dynamic_stop_params(
+                        self.hass, self._domain, self.config_entry, opts,
+                        vehicle_vin=profile_id if binding else pseudo_vin,
+                    ) if not binding or profile_id else {}
+                    if params.get("charger_type") == "generic":
+                        can_release = True
+                        if binding:
+                            from .ev_ownership import get_ev_ownerships
+
+                            lease = get_ev_ownerships(self.hass, self.config_entry).get("generic_ev")
+                            hold = self.hass.data.get(self._domain, {}).get(
+                                self.config_entry.entry_id, {}
+                            ).get("scheduled_ev_preserve_state") or {}
+                            can_release = bool(
+                                params.get("vehicle_id") == "generic_ev"
+                                and params.get("logical_vehicle_id") == profile_id
+                                and isinstance(lease, dict)
+                                and lease.get("active_profile_id") == profile_id
+                                and lease.get("owner") == "powersync"
+                                and str(lease.get("owner_mode") or "").startswith("price_level")
+                                and hold.get("source") == "price_level_charging"
+                                and hold.get("active_profile_id") == profile_id
+                            )
+                        # Retain logical ownership and restart semantics. Unknown
+                        # telemetry or an unverified shared lease retains the hold.
+                        if can_release:
+                            preserve_charging = (
+                                _generic_charger_charge_state(self.hass, params) is not False
+                            )
+                await self.apply_preserve_home_battery(preserve_charging, reason)
                 return results
 
             _LOGGER.debug("No Tesla vehicles discovered for multi-vehicle evaluation")
