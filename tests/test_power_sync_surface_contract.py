@@ -201,12 +201,12 @@ _AMBER_COORDINATOR_DIFF_SHA256 = "721fd3d8a5db88106eeeae48e23c960ad0c5e008b73cd8
 
 # Exact allowance for reviewed 24fcc7d solar projection/learning/derating
 # hunks, d54e87e6's missing DOMAIN import, 52465064's final solar-credit
-# handoff, and 3b207aa7's Sigenergy low-target refresh. The source is the
-# detached candidate's already-reviewed provenance cohort; no off-grid or
-# vendor-specific hunk is admitted by this digest.
+# handoff, 3b207aa7's Sigenergy low-target refresh, and 2572e5db's
+# Amber current-interval precedence. The source is the reviewed provenance
+# cohort; no off-grid or unrelated vendor hunk is admitted by this digest.
 _NEGATIVE_IMPORT_SOLAR_SOURCE = "5ddd156708d1b5b05f1a67be87d1fb0ea99653c7"
 _NEGATIVE_IMPORT_SOLAR_DIFF_SHA256 = (
-    "a1ba6846ec8ca4b3c4231f7b60988b42f46ae16e8be09351458342b1fb0f85c7"
+    "9b3e18e0509eae15f8b2b6459e5a2b8612c9223b706314318cf3c60c2b08be7e"
 )
 
 # Exact, path-specific exception for the reviewed Cost Neutral reachable-
