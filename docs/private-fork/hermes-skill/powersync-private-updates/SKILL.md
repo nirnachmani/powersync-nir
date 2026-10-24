@@ -1,23 +1,24 @@
 ---
 name: powersync-private-updates
-description: "Use when maintaining the PowerSync Nir private fork against upstream."
+description: "Use when maintaining the PowerSync Nir fork against upstream."
 version: 1.0.0
 ---
 
-# PowerSync Nir private-fork upstream maintenance
+# PowerSync Nir fork upstream maintenance
 
 ## When to use
 
 Use this skill in the dedicated `powersync-maintainer` Hermes profile on the
 maintainer server to review, integrate, and validate upstream PowerSync changes
-for the private `powersync-nir` fork.
+for the `nirnachmani/powersync-nir` fork.
 
 ## Scope and safety boundary
 
-- Work only in the configured private-fork checkout and a disposable candidate
+- Work only in the configured fork checkout and a disposable candidate
   worktree; never edit a deployed checkout directly.
-- Confirm the target Git remote/repository is private before any push. Never
-  publish to the public `upstream` remote.
+- Confirm both fetch and push URLs of `origin` target exactly
+  `nirnachmani/powersync-nir` before any push, independent of visibility. Never
+  publish to the `upstream` remote, change repository visibility, or force-push.
 - Preserve the architecture in `docs/private-fork/local-change-inventory.md`.
 - Do not widen scope to Tesla, EVDC, OCPP, Zaptec, or other excluded backends.
 - Apply relevance triage before tests or a candidate: reject battery-vendor changes unless they target Sigenergy, and reject provider changes unless they target Amber. Keep a vendor-neutral optimiser/site/infrastructure change only when it can affect Sigenergy, Amber, solar/site power flows, or private shared-EV operation.
@@ -33,7 +34,7 @@ for the private `powersync-nir` fork.
 
 Before work, establish:
 
-1. The private-fork checkout, branch, and private deploy remote.
+1. The fork checkout, branch, and approved `origin` fetch/push URLs.
 2. A clean worktree or explicitly recorded local changes.
 3. The last reviewed upstream SHA/tag and target upstream range.
 4. The current local-change inventory.
@@ -82,7 +83,7 @@ small isolated ports or create speculative tests for unconfigured vendors.
   the existing no-paywall optimiser; never use a wholesale 1404+ integration
   as a substitute for hunk review.
 - Preserve upstream source attribution and licence notices for every adapted
-  hunk, and retain this private fork's noncommercial scope.
+  hunk, and retain this fork's noncommercial scope.
 - Before a candidate can be proposed, run the current source-only gates:
   `python scripts/private-fork/validate_local_architecture.py` and
   `scripts/private-fork/run_private_tests.sh`.
@@ -126,7 +127,7 @@ permission, command-fencing and hosted-access code out.
      safely.
 5. Use `scripts/private-fork/candidate_worktree.py prepare` with explicit
    private repo, candidate root, source ref, upstream target ref, and manifest.
-   It requires a clean private source and a policy-approved private GitHub
+   It requires a clean fork source and a policy-approved GitHub
    `origin`, creates only a detached disposable worktree, and records that no
    integration occurred. Use its separate `cleanup` command only with the exact
    registered path beneath the candidate root.
@@ -162,8 +163,9 @@ permission, command-fencing and hosted-access code out.
 - Process upstream commits strictly oldest to newest. Every commit must reach a
   terminal outcome before advancing the processing checkpoint: `ported`,
   `amended`, `rejected`, or `admin/no-port`. Use
-  `scripts/private-fork/maintainer_ledger.py next` to obtain the sole permitted
-  commit, then `record --upstream-version <version>` it with reason and
+  `scripts/private-fork/maintainer_ledger.py next --target refs/remotes/upstream/main`
+  to obtain the sole permitted commit, then
+  `record --target refs/remotes/upstream/main --upstream-version <version>` it with reason and
   applicable private commit SHA(s). Every private SHA must be reachable from
   the intended private ref; `record` defaults to
   `--private-ref feature/shared-logical-evs`, and an explicit `--private-ref`
@@ -173,6 +175,8 @@ permission, command-fencing and hosted-access code out.
   and out-of-order work.
   If a commit needs user input, do not record it: stop the cycle at that commit
   and do not advance the checkpoint; resume it before processing later commits.
+  Spell the upstream remote ref in full: `upstream/main` is ambiguous when an
+  `origin/upstream/main` ref also exists and can silently select stale history.
   Use `summary` as the end-of-cycle cron JSON payload. This naturally brings
   any prerequisite in before a later dependent fix.
 - Broad testing is reserved for final release handoff or a clear regression
@@ -233,21 +237,22 @@ sender and recipient defaults from the server's `ha-update` skill reference;
 do not expose credentials or duplicate them into this skill. If email delivery
 fails, retain the local report and state the delivery failure in the cron output.
 
-## Private release publication
+## Fork release publication
 
-`main` is the private release branch, **not a standard-HACS install source**:
-HACS excludes private repositories (https://www.hacs.xyz/docs/faq/private_repositories/).
-Keep the fork private; never claim that a tag or GitHub release makes it
-HACS-installable or deployed. After a cycle that ports or amends one or
-more upstream changes and passes its required gates, publish the
-tested feature branch privately: update `custom_components/power_sync/manifest.json`
-and `RELEASE_NOTES.md` with a unique private version/tag of the form
+`main` is the fork release branch. Do not use repository visibility as a
+maintenance eligibility, relevance, or publication condition; only the approved
+origin identity and required gates matter. A public repository can be added to
+HACS as a custom repository, but a release alone is not proof that Home
+Assistant installed it. After a cycle that ports or amends one or more upstream
+changes and passes its required gates, publish the tested feature branch to
+the approved origin: update `custom_components/power_sync/manifest.json`
+and `RELEASE_NOTES.md` with a unique fork version/tag of the form
 `v<latest-fully-processed-upstream-tag>-nir.<serial>`, commit that release
 metadata on `feature/shared-logical-evs`, fast-forward `main` to the verified
-feature head, push both branches, and create the matching private GitHub
+feature head, push both branches, and create the matching GitHub
 release. Do not publish when the cycle only rejects/admin-skips updates, when
 there is an unresolved commit, or when gates fail. Never deploy Home Assistant;
-private HA delivery needs a separately authorised method.
+HA delivery needs a separately authorised method.
 
 ## Deployment handoff
 

@@ -25,7 +25,7 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, str]]:
     (repo / "README.md").write_text("fixture\n", encoding="utf-8")
     subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repo, check=True)
-    subprocess.run(["git", "remote", "add", "origin", "git@github.com:example/powersync-private.git"], cwd=repo, check=True)
+    subprocess.run(["git", "remote", "add", "origin", "git@github.com:nirnachmani/powersync-nir.git"], cwd=repo, check=True)
 
     profile = tmp_path / "profiles" / "powersync-maintainer"
     skill = profile / "skills" / "powersync-private-updates"
@@ -93,7 +93,7 @@ def test_dry_run_validates_and_prints_exact_resume_command_without_scheduler_cha
 
     assert completed.returncode == 0, completed.stderr
     assert "hermes --profile powersync-maintainer cron resume powersync-private-upstream-review" in completed.stdout
-    assert "hermes --profile powersync-maintainer cron create 3d" in completed.stdout
+    assert r"hermes --profile powersync-maintainer cron create 0\ 1\ \*/3\ \*\ \*" in completed.stdout
     assert not Path(env["HERMES_LOG"]).exists()
 
 
@@ -105,7 +105,7 @@ def test_apply_creates_one_paused_local_report_only_job_with_fixed_workdir(tmp_p
     assert completed.returncode == 0, completed.stderr
     invocation = Path(env["HERMES_LOG"]).read_text(encoding="utf-8")
     assert invocation.count("cron create") == 1
-    assert "--profile powersync-maintainer cron create 3d" in invocation
+    assert "--profile powersync-maintainer cron create 0 1 */3 * *" in invocation
     assert "--name powersync-private-upstream-review" in invocation
     assert "--skill powersync-private-updates" in invocation
     assert f"--workdir {repo.resolve()}" in invocation
@@ -184,15 +184,30 @@ def test_refuses_ledger_state_inside_reports_directory_after_path_resolution(tmp
         assert "reports" in completed.stderr.lower()
 
 
-def test_refuses_non_private_origin_and_missing_installed_skill(tmp_path):
+def test_accepts_approved_origin_regardless_of_visibility(tmp_path):
     repo, profile, state, env = _fixture(tmp_path)
     env["GH_VISIBILITY"] = "false"
 
     completed = _run(tmp_path, "--dry-run", *_valid_args(repo, profile, state), env=env)
-    assert completed.returncode != 0
-    assert "private" in completed.stderr.lower()
+    assert completed.returncode == 0, completed.stderr
 
-    env["GH_VISIBILITY"] = "true"
+
+def test_refuses_unapproved_push_url(tmp_path):
+    repo, profile, state, env = _fixture(tmp_path)
+    subprocess.run(["git", "remote", "set-url", "--push", "origin", "git@github.com:other/repo.git"], cwd=repo, check=True)
+    completed = _run(tmp_path, "--dry-run", *_valid_args(repo, profile, state), env=env)
+    assert completed.returncode != 0
+    assert "push URL is not the approved" in completed.stderr
+
+
+def test_refuses_unapproved_origin_and_missing_installed_skill(tmp_path):
+    repo, profile, state, env = _fixture(tmp_path)
+    subprocess.run(["git", "remote", "set-url", "origin", "git@github.com:other/repo.git"], cwd=repo, check=True)
+    completed = _run(tmp_path, "--dry-run", *_valid_args(repo, profile, state), env=env)
+    assert completed.returncode != 0
+    assert "approved" in completed.stderr.lower()
+
+    subprocess.run(["git", "remote", "set-url", "origin", "git@github.com:nirnachmani/powersync-nir.git"], cwd=repo, check=True)
     (profile / "skills/powersync-private-updates/SKILL.md").unlink()
     completed = _run(tmp_path, "--dry-run", *_valid_args(repo, profile, state), env=env)
     assert completed.returncode != 0
@@ -208,4 +223,7 @@ def test_cron_prompt_requires_approved_ai_hunk_review_and_email_table(tmp_path):
     assert "even if the affected provider is not currently selected" in invocation
     assert "licensing-adjacent commits hunk by hunk" in invocation
     assert "email body must include the complete per-update Markdown table" in invocation
-    assert "private GitHub release is not HACS-installable" in invocation
+    assert "next --state" in invocation and "--target refs/remotes/upstream/main" in invocation
+    assert "approved GitHub release" in invocation
+    assert "Publication is not Home Assistant deployment" in invocation
+    assert "private GitHub release is not HACS-installable" not in invocation

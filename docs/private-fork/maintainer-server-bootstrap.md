@@ -9,15 +9,14 @@ PowerSync.
 
 Before installing the tracked skill, an operator must provide:
 
-- An Ubuntu server with Hermes already installed and a private-fork checkout.
+- An Ubuntu server with Hermes already installed and the fork checkout.
 - A named Hermes profile, `powersync-maintainer`, at
   `~/.hermes/profiles/powersync-maintainer/`; do not use the default profile.
 - A working Python environment for the private fork and the required local test
   dependencies.
-- A private GitHub credential with repository-scoped read/write access only to
-  the private fork. Do not grant organisation administration, public-repository
-  write access, or a token with broader scopes than the deploy repository
-  requires.
+- A GitHub credential with repository-scoped read/write access only to
+  `nirnachmani/powersync-nir`. Do not grant organisation administration or
+  broader scopes than this repository requires.
 - A documented, separately authorised deployment/rollback procedure. It is not
   installed or invoked by this bootstrap.
 
@@ -28,38 +27,39 @@ hermes profile create powersync-maintainer
 hermes profile show powersync-maintainer
 ```
 
-Set that profile's terminal working directory to the private-fork checkout using
+Set that profile's terminal working directory to the fork checkout using
 the server's reviewed Hermes configuration. Keep the profile isolated: do not
 clone default-profile credentials, Home Assistant tools, cron jobs, or existing
 sessions into it.
 
-## Verify private remote before authorising any write
+## Verify approved remote before authorising any write
 
-From the private-fork checkout, inspect every configured remote and identify the
-intended private deploy remote. Do not infer that `origin` is private.
+From the fork checkout, inspect every configured remote and identify the
+intended approved deploy remote. Do not rely on repository visibility.
 
 ```bash
 git remote -v
 git remote get-url origin
-gh repo view --json nameWithOwner,visibility,url
+git remote get-url --push origin
+gh repo view nirnachmani/powersync-nir --json nameWithOwner,url
 ```
 
-Continue only when `visibility` is `PRIVATE`, the returned owner/name is the
-approved private fork, and the push URL is the approved private GitHub URL. If
-any result is missing, public, unexpected, or inaccessible, stop and repair the
-server configuration outside an autonomous maintenance run. Never push to the
-public `upstream` remote, force-push, delete branches, or change repository
+Continue only when the returned owner/name is exactly `nirnachmani/powersync-nir`
+and both origin URLs identify that approved GitHub repository. If any result
+is missing, unexpected, or inaccessible, stop and repair the server
+configuration outside an autonomous maintenance run. Never push to the
+`upstream` remote, force-push, delete branches, or change repository
 visibility.
 
 ## Least-privilege profile policy
 
 Enable only the capabilities necessary for source maintenance:
 
-- terminal and file tools, constrained to the private-fork checkout and
+- terminal and file tools, constrained to the fork checkout and
   disposable candidate worktrees;
-- web/GitHub read tools for explicit upstream review and private-repository
+- web/GitHub read tools for explicit upstream review and approved-origin
   verification;
-- GitHub credentials restricted to the private repository.
+- GitHub credentials restricted to the approved repository.
 
 Do not enable general Home Assistant control tools, deployment credentials,
 cron-management tools, public-repository credentials, or secrets-discovery
@@ -107,7 +107,7 @@ authorisation and the approved server procedure are both present.
 
 The repository supplies a portable installer, but it does nothing unless the
 operator passes `--apply`. Run it only on the dedicated remote server after the
-skill installation and private-origin checks above. All artifact paths are
+skill installation and approved-origin checks above. All artifact paths are
 explicit and must remain inside the named profile home; the ledger state must
 remain outside the reports directory (including `latest.json` and `latest.md`),
 and the checkout root is the job's fixed work directory.
@@ -143,10 +143,11 @@ python scripts/private-fork/maintainer_ledger.py --repo "$PWD" migrate \
 
 `upstream.json` remains read-only backup/reference and is never a ledger output.
 The installer verifies
-that `origin` is a private GitHub repository with `gh`, that the installed
+that `origin` fetch and push URLs identify the approved GitHub repository, that the installed
 `powersync-private-updates` skill exists, and that no active job with the same
-name exists. It creates `powersync-private-upstream-review` **paused**, every
-`3d`, with local/suppressed delivery only. It prints, but never runs, this
+name exists. It creates `powersync-private-upstream-review` **paused**, at
+01:00 every third calendar date (`0 1 */3 * *`, host local time; month boundaries
+reset the date pattern), with local/suppressed delivery only. It prints, but never runs, this
 resume command:
 
 ```bash

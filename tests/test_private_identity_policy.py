@@ -1,4 +1,4 @@
-"""Repository-policy contracts for the private fork and restored HA domain."""
+"""Repository-policy contracts for the fork and restored HA domain."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ def _has_nearby_terms(document: str, *term_groups: tuple[str, ...]) -> bool:
 
 
 def _assert_readme_identity(document: str) -> None:
-    assert _has_nearby_terms(document, ("private",), ("repository", "repo", "fork"))
+    assert _has_nearby_terms(document, ("nirnachmani/powersync-nir",), ("repository", "repo", "fork"))
     assert _has_nearby_terms(
         document,
         ("installed", "installation", "integration"),
@@ -75,7 +75,7 @@ def _assert_no_paywall_maintenance_policy(document: str) -> None:
     assert "run_private_tests.sh" in document
 
 
-def test_private_repository_metadata_uses_restored_component_path_and_private_slug():
+def test_fork_repository_metadata_uses_restored_component_path_and_slug():
     workflow = _read(".github/workflows/release.yml")
     hacs = json.loads(_read("hacs.json"))
     readme = _read("README.md")
@@ -93,6 +93,7 @@ def test_private_repository_metadata_uses_restored_component_path_and_private_sl
         assert PRIVATE_REPOSITORY in source
 
     _assert_readme_identity(readme)
+    assert _has_nearby_terms(readme, ("HACS",), ("custom",), ("repository",))
 
     assert (
         "https://my.home-assistant.io/redirect/hacs_repository/"

@@ -1,7 +1,7 @@
 # Reference template: `powersync-private-updates`
 
 Use this as a repository-side reference for a portable maintenance skill on the
-private `nirnachmani/powersync-nir` repository, on a
+`nirnachmani/powersync-nir` repository, on a
 separate server. It defines local source-maintenance gates only; it does not
 deploy, install an update agent, or change a public upstream repository.
 
@@ -69,7 +69,7 @@ relevance candidates even if that provider is not currently selected, without
 a second blanket approval. Review genuinely
 new scopes, token-storage boundaries, or API contracts on their merits; keep
 them separate from optimiser entitlement, permission, command-fencing, and
-hosted optimiser-access code. Preserve source attribution and this private
+hosted optimiser-access code. Preserve source attribution and this
 fork's noncommercial scope for every adapted hunk.
 Before proposing any candidate, run the current source-only gates:
 
@@ -128,8 +128,9 @@ uncertain.
 Process upstream commits strictly oldest to newest. Every commit must reach a
 terminal outcome (`ported`, `amended`, `rejected`, or `admin/no-port`) before
 the processing checkpoint advances. Obtain the exact next SHA with
-`maintainer_ledger.py next`, then record only that SHA using
-`maintainer_ledger.py record --upstream-version <version>`; the atomic ledger
+`maintainer_ledger.py next --target refs/remotes/upstream/main`, then record only
+that SHA using `maintainer_ledger.py record --target refs/remotes/upstream/main
+--upstream-version <version>`; the atomic ledger
 write stores upstream version, full SHA and subject, outcome, reason, applicable
 private commit SHA(s) that resolve in the intended private branch/ref, and timestamp with
 the new checkpoint. It rejects `deferred`, unknown or out-of-order SHAs,
@@ -140,6 +141,8 @@ record it: stop at that commit and leave the checkpoint before it; resolve it
 before considering newer updates. Use `maintainer_ledger.py summary` for the
 cron's durable JSON end-of-cycle payload. This naturally ensures prerequisites
 are handled before dependent fixes.
+Avoid the ambiguous shorthand `upstream/main`: a similarly named
+`origin/upstream/main` ref can resolve to stale history.
 
 ## End-of-cycle report
 
@@ -157,19 +160,19 @@ sender/recipient defaults as the server's `ha-update` workflow. Keep the local
 Markdown/JSON report as the durable record. If the email call fails, record the
 failure in the cron output without exposing credentials.
 
-## Private publication
+## Fork publication
 
-HACS cannot use private repositories (https://www.hacs.xyz/docs/faq/private_repositories/).
-The private repository's `main` branch is the private publication branch, not
-an HACS-installable source. When a
+The approved repository's `main` branch is the publication branch. Verify
+`origin` fetch and push URLs target `nirnachmani/powersync-nir`, without
+checking or depending on visibility. When a
 cycle has ported or amended updates and all required gates pass, update the
-component manifest and release notes with a unique private version/tag
+component manifest and release notes with a unique fork version/tag
 `v<latest-fully-processed-upstream-tag>-nir.<serial>`, commit it on
 `feature/shared-logical-evs`, fast-forward `main` to that verified head, push
-both branches, and create the matching private GitHub release. Do not publish
+both branches, and create the matching GitHub release. Do not publish
 for reject/admin-only cycles, unresolved commits, or failed gates. Publishing
-never deploys Home Assistant. A private HA delivery method requires separate
-authorisation; never claim that a private release is installable via HACS.
+never deploys Home Assistant. HA delivery requires separate authorisation;
+never claim that a release was installed by HACS without verifying installation.
 
 ## Forbidden actions
 

@@ -52,7 +52,7 @@ def test_capture_script_redacts_sensitive_values_without_changing_json_shape(tmp
     raw = tmp_path / "raw.json"
     output = tmp_path / "sanitised.json"
     raw.write_text(json.dumps({
-        "access_token": "secret", "url": "http://192.168.1.99:8123/api",
+        "access_token": "secret", "url": "http://192.0.2.10:8123/api",
         "nested": {"vin": "ABC123", "enabled": True, "count": 2},
     }))
 

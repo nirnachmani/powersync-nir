@@ -1,7 +1,7 @@
 <div align="center">
   <img src="https://raw.githubusercontent.com/bolagnaise/PowerSync/main/logo-circle.png" alt="PowerSync Logo" width="180"/>
 
-  # PowerSync private fork
+  # PowerSync Nir fork
 
   Intelligent battery energy management for Home Assistant. Automatically optimize your battery system with dynamic electricity pricing to minimize costs and maximize savings.
 
@@ -14,7 +14,7 @@
 
 </div>
 
-> **Private fork repository:** [`nirnachmani/powersync-nir`](https://github.com/nirnachmani/powersync-nir). The repository identity is private; the installed Home Assistant integration remains **PowerSync** with domain `power_sync` for compatibility.
+> **Fork repository:** [`nirnachmani/powersync-nir`](https://github.com/nirnachmani/powersync-nir). Add it to HACS as a **custom repository** (not the default catalogue). The installed Home Assistant integration remains **PowerSync** with domain `power_sync` for compatibility. The fork retains its PolyForm Noncommercial licence and upstream attribution.
 
 > **Disclaimer:** This is an unofficial integration and is not affiliated with or endorsed by Tesla, Sigenergy, Sungrow, FoxESS, GoodWe, AlphaESS, ESY Sunhome, Solax, SAJ, Fronius, SolarEdge, Neovolt, Bytewatt, Anker, Amber Electric, Localvolts, Flow Power, AGL, GloBird, CovaU, SA Power Networks, Octopus Energy, EPEX/ENTSO-E, or AEMO. Use at your own risk.
 
