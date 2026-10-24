@@ -276,6 +276,82 @@ def test_vehicle_settings_view_parks_old_ev_record_but_keeps_stored_data(monkeyp
     assert stored[0]["active_charging_mode"] == "solar"
 
 
+def test_logical_profile_capacity_does_not_inherit_shared_charger_fallback(monkeypatch):
+    power_sync = _power_sync_module()
+    entry = _shared_entry()
+    entry.options["generic_charger_battery_capacity_kwh"] = 37.1
+    store = SimpleNamespace(_data={"vehicle_charging_configs": [
+        {"vehicle_id": "generic_ev", "charger_type": "generic",
+         "charger_fallback_battery_capacity_kwh": 37.1},
+        {"vehicle_id": "shared_ev_profile_a", "charger_type": "generic",
+         "battery_capacity_kwh": 37.1},
+        {"vehicle_id": "shared_ev_profile_b", "charger_type": "generic",
+         "battery_capacity_kwh": None,
+         "charger_fallback_battery_capacity_kwh": 37.1},
+    ]})
+    hass = _Hass([_State("select.connected_ev", "tesla")],
+                 entry_data={"automation_store": store}, config_entries=[entry])
+    monkeypatch.setattr(power_sync.web, "json_response", lambda body, **_kwargs: body)
+    configs = asyncio.run(power_sync.VehicleChargingConfigView(hass).get(None))["configs"]
+    by_id = {item["vehicle_id"]: item for item in configs}
+    assert by_id["shared_ev_profile_a"]["effective_battery_capacity_kwh"] == 37.1
+    assert by_id["shared_ev_profile_a"]["battery_capacity_source"] == "manual"
+    assert by_id["shared_ev_profile_b"]["effective_battery_capacity_kwh"] != 37.1
+    assert by_id["shared_ev_profile_b"]["battery_capacity_source"] == "default_estimate"
+    assert by_id["shared_ev_profile_b"]["charger_fallback_battery_capacity_kwh"] is None
+    assert store._data["vehicle_charging_configs"][0]["charger_fallback_battery_capacity_kwh"] == 37.1
+    shared = importlib.import_module("power_sync.automations.shared_loadpoint")
+    status = shared.project_shared_loadpoint_status(
+        hass, entry, {"loadpoints": [{"loadpoint_id": "generic_ev"}]},
+        vehicle_configs=store._data["vehicle_charging_configs"],
+    )["loadpoints"][0]
+    assert status["vehicle_id"] == "shared_ev_profile_b"
+    assert status["effective_battery_capacity_kwh"] != 37.1
+    assert status["battery_capacity_source"] == "default_estimate"
+
+
+def test_logical_capacity_post_round_trip_and_selected_status_are_per_profile(monkeypatch):
+    power_sync = _power_sync_module()
+    shared = importlib.import_module("power_sync.automations.shared_loadpoint")
+    entry = _shared_entry()
+    entry.options["generic_charger_battery_capacity_kwh"] = 37.1
+    class Store:
+        _data = {"vehicle_charging_configs": [
+            {"vehicle_id": "generic_ev", "charger_type": "generic",
+             "charger_fallback_battery_capacity_kwh": 37.1},
+            {"vehicle_id": "shared_ev_profile_a", "charger_type": "generic"},
+            {"vehicle_id": "shared_ev_profile_b", "charger_type": "generic",
+             "charger_fallback_battery_capacity_kwh": 37.1},
+        ]}
+        async def async_save(self):
+            pass
+    store = Store()
+    hass = _Hass([_State("select.connected_ev", "tesla")],
+                 entry_data={"automation_store": store}, config_entries=[entry])
+    monkeypatch.setattr(power_sync.web, "json_response", lambda body, **_kwargs: body)
+    view = power_sync.VehicleChargingConfigView(hass)
+    class Request:
+        async def json(self):
+            return {"vehicle_id": "shared_ev_profile_b", "battery_capacity_kwh": 71}
+
+    assert asyncio.run(view.post(Request()))["success"] is True
+    configs = {c["vehicle_id"]: c for c in store._data["vehicle_charging_configs"]}
+    assert configs["shared_ev_profile_b"]["battery_capacity_kwh"] == 71
+    assert configs["shared_ev_profile_b"].get("charger_fallback_battery_capacity_kwh") is None
+    assert configs["generic_ev"]["charger_fallback_battery_capacity_kwh"] == 37.1
+    response = {c["vehicle_id"]: c for c in asyncio.run(view.get(None))["configs"]}
+    assert response["shared_ev_profile_b"]["effective_battery_capacity_kwh"] == 71
+    assert response["shared_ev_profile_b"]["battery_capacity_source"] == "manual"
+    assert response["shared_ev_profile_a"]["battery_capacity_source"] == "default_estimate"
+    status = shared.project_shared_loadpoint_status(
+        hass, entry, {"loadpoints": [{"loadpoint_id": "generic_ev", "vehicle_id": "generic_ev"}]},
+        vehicle_configs=store._data["vehicle_charging_configs"],
+    )["loadpoints"][0]
+    assert status["vehicle_id"] == "shared_ev_profile_b"
+    assert status["effective_battery_capacity_kwh"] == 71
+    assert status["battery_capacity_source"] == "manual"
+
+
 def test_auto_schedule_keeps_stored_legacy_record_but_refuses_edits(monkeypatch):
     power_sync = _power_sync_module()
     planner = importlib.import_module("power_sync.automations.ev_charging_planner")

@@ -269,13 +269,11 @@ def project_shared_loadpoint_status(
             )
             capacity = resolve_ev_battery_capacity(
                 manual_capacity_kwh=profile_config.get("battery_capacity_kwh"),
-                charger_fallback_capacity_kwh=profile_config.get(
-                    "charger_fallback_battery_capacity_kwh"
-                ),
+                charger_fallback_capacity_kwh=None,
                 provider_capacity_kwh=profile_config.get("provider_battery_capacity_kwh"),
                 model=profile_config.get("vehicle_model"),
                 trim=profile_config.get("vehicle_trim"),
-                anonymous_loadpoint=True,
+                anonymous_loadpoint=False,
             )
             row.update(capacity.to_dict())
         else:

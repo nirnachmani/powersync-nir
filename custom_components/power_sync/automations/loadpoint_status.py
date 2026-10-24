@@ -1255,7 +1255,7 @@ def _observed_loadpoint(
         "connected": connected,
         "actual_charging": actually_charging,
         "status": status,
-        "owner": (ownership or {}).get("owner") or "external",
+        "owner": (ownership or {}).get("owner") or ("external" if actually_charging else None),
         "owner_mode": (ownership or {}).get("owner_mode") or observation.get("owner_mode"),
         "source": (
             _loadpoint_source(
@@ -1308,13 +1308,19 @@ def build_generic_charger_observation(
 
     status_says_connected = normalized_status in GENERIC_CONNECTED_STATES
     status_says_charging = normalized_status in GENERIC_CHARGING_STATES
+    # The amps entity is a configured output limit, not measured current. A
+    # retained limit is not an active command while the switch is off.
+    observed_amps = (
+        current_amps if switch_on or status_says_charging or power_kw > ACTIVE_POWER_THRESHOLD_KW
+        else 0
+    )
 
     is_connected = switch_on or status_says_connected or power_kw > ACTIVE_POWER_THRESHOLD_KW
     is_charging = status_says_charging or power_kw > ACTIVE_POWER_THRESHOLD_KW
     blocking_reason = None
     if normalized_status in {"paused", "suspendedevse", "suspendedev", "finishing", "faulted"}:
         blocking_reason = str(status_state)
-    elif current_amps > 0 and power_kw <= ACTIVE_POWER_THRESHOLD_KW and not status_says_charging:
+    elif observed_amps > 0 and power_kw <= ACTIVE_POWER_THRESHOLD_KW and not status_says_charging:
         blocking_reason = f"Commanded {current_amps}A but no measured charge power"
 
     return {
@@ -1322,7 +1328,7 @@ def build_generic_charger_observation(
         "vehicle_id": vehicle_id,
         "vehicle_name": vehicle_name,
         "charger_type": "generic",
-        "current_amps": current_amps,
+        "current_amps": observed_amps,
         "target_amps": current_amps,
         "ev_power_kw": power_kw,
         "ev_soc": _optional_int(soc_value),

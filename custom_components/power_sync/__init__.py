@@ -17207,21 +17207,30 @@ class VehicleChargingConfigView(HomeAssistantView):
         from .automations.ev_vehicle_capacity import (
             resolve_ev_battery_capacity_contract,
         )
+        from .automations.shared_loadpoint import (
+            PROFILE_A_ID, PROFILE_B_ID, binding_for_entry,
+        )
 
         vehicle_id = str(config.get("vehicle_id") or "")
         charger_type = str(config.get("charger_type") or "").lower()
+        entries = self._hass.config_entries.async_entries(DOMAIN)
+        logical_profile = bool(
+            entries and binding_for_entry(entries[0])
+            and vehicle_id in (PROFILE_A_ID, PROFILE_B_ID)
+        )
         anonymous = (
             charger_type in ("generic", "ocpp")
             or vehicle_id.lower().startswith(("generic_", "ocpp_"))
         ) and not (
             vehicle_id.lower().startswith(("ble_", "byd_"))
             or (len(vehicle_id) == 17 and vehicle_id.isalnum())
+            or logical_profile
         )
         return resolve_ev_battery_capacity_contract(
             config,
             anonymous_loadpoint=anonymous,
             shared_charger_fallback_capacity_kwh=(
-                self._generic_capacity_fallback()
+                None if logical_profile else self._generic_capacity_fallback()
             ),
         )
 
@@ -17452,6 +17461,13 @@ class VehicleChargingConfigView(HomeAssistantView):
                         ),
                     }, status=400)
             stable_id = str(vehicle_id).lower()
+            from .automations.shared_loadpoint import (
+                PROFILE_A_ID, PROFILE_B_ID, binding_for_entry,
+            )
+            logical_profile = bool(
+                entries and binding_for_entry(entries[0])
+                and vehicle_id in (PROFILE_A_ID, PROFILE_B_ID)
+            )
             # A BYD discovered through hass-byd-vehicle is telemetry-only in
             # this configuration path. Capacity metadata must never turn it
             # into a Tesla control profile merely because no charger type was
@@ -17465,7 +17481,12 @@ class VehicleChargingConfigView(HomeAssistantView):
             ) and not (
                 stable_id.startswith(("ble_", "byd_"))
                 or (len(stable_id) == 17 and stable_id.isalnum())
+                or logical_profile
             )
+            if logical_profile:
+                # A logical EV owns its own capacity. Older writes may have
+                # incorrectly persisted a charger fallback on its record.
+                data.pop("charger_fallback_battery_capacity_kwh", None)
             capacity_changed = "battery_capacity_kwh" in data
             if "battery_capacity_kwh" in data:
                 try:
@@ -17489,6 +17510,8 @@ class VehicleChargingConfigView(HomeAssistantView):
                     data["battery_capacity_kwh"] = capacity
 
             # Find and update or add config
+            if logical_profile:
+                existing_config.pop("charger_fallback_battery_capacity_kwh", None)
             config_found = False
 
             for i, config in enumerate(vehicle_configs):

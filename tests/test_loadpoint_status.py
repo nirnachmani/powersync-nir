@@ -467,6 +467,30 @@ def test_external_observed_charger_is_kept_without_dynamic_state():
     ]
 
 
+def test_idle_generic_charger_setpoint_is_not_a_command_or_external_owner():
+    observation = build_generic_charger_observation(
+        switch_state="off", amps_value=32, status_state="stopped", power_value=0,
+    )
+    rows = build_loadpoint_status({}, [observation])
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["status"] == "connected_idle"
+    assert row["owner"] is None
+    assert row["current_amps"] == 0
+    assert row["target_amps"] == 32
+    assert row["blocking_reason"] is None
+    assert row["actual_charging"] is False
+
+
+def test_armed_generic_charger_without_power_still_reports_commanded():
+    observation = build_generic_charger_observation(
+        switch_state="on", amps_value=32, status_state="preparing", power_value=0,
+    )
+    row = build_loadpoint_status({}, [observation])[0]
+    assert row["status"] == "commanded_no_power"
+    assert row["owner"] is None  # Switch-on alone does not prove who issued it.
+
+
 def test_dynamic_state_prefers_business_owner_mode_over_control_mode():
     loadpoints = build_loadpoint_status(
         {
@@ -1405,7 +1429,7 @@ def test_generic_charger_observation_keeps_configured_idle_loadpoint():
     assert len(loadpoints) == 1
     assert loadpoints[0]["loadpoint_id"] == "generic_ev"
     assert loadpoints[0]["status"] == "idle"
-    assert loadpoints[0]["owner"] == "external"
+    assert loadpoints[0]["owner"] is None
 
 
 def test_unavailable_ble_power_is_not_rendered_as_an_observed_idle_zero():
