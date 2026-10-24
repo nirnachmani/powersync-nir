@@ -12421,7 +12421,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 charge_power_w,
                             )
                         _LOGGER.info(
-                            "Optimizer: Charging at %.0fW for %dmin "
+                            "Optimizer: Charge command accepted (requested %.0fW) for %dmin "
                             "(auto-restore before demand)",
                             charge_power_w, charge_duration,
                         )
@@ -12442,7 +12442,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 charge_duration,
                                 charge_power_w,
                             )
-                        _LOGGER.info("Optimizer: Charging at %.0fW", charge_power_w)
+                        _LOGGER.info("Optimizer: Charge command accepted (requested %.0fW)", charge_power_w)
             elif effective_action == "solar_export":
                 if solar_export_hold is None:
                     _LOGGER.error(
