@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import importlib.util
 from pathlib import Path
 import sys
@@ -20,6 +21,36 @@ PRODUCTION_PATHS = (
     COMPONENT_ROOT / "optimization" / "ev_coordinator.py",
     COMPONENT_ROOT / "inverters" / "foxess_entity.py",
 )
+
+
+def test_inactive_globird_pricing_removal_requires_selected_amber():
+    """An Amber switch releases only the former pricing child, not active controls."""
+    tree = ast.parse((COMPONENT_ROOT / "__init__.py").read_text())
+    function = next(
+        node for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "async_remove_config_entry_device"
+    )
+    namespace = {
+        "HomeAssistant": object,
+        "ConfigEntry": object,
+        "DOMAIN": "power_sync",
+        "CONF_ELECTRICITY_PROVIDER": "electricity_provider",
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "__init__.py", "exec"), namespace)
+    callback = namespace["async_remove_config_entry_device"]
+    pricing = SimpleNamespace(identifiers={("power_sync", "entry-1_globird_pricing")})
+    for data, options, expected in (
+        ({"electricity_provider": "globird"}, {"electricity_provider": "amber"}, True),
+        ({"electricity_provider": "amber"}, {"electricity_provider": "globird"}, False),
+        ({"electricity_provider": "amber"}, {}, True),
+        ({"electricity_provider": "globird"}, {}, False),
+    ):
+        entry = SimpleNamespace(entry_id="entry-1", data=data, options=options)
+        assert asyncio.run(callback(object(), entry, pricing)) is expected
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={"electricity_provider": "amber"})
+    assert asyncio.run(callback(object(), entry, SimpleNamespace(identifiers={("power_sync", "entry-2_globird_pricing")}))) is False
+    assert asyncio.run(callback(object(), entry, SimpleNamespace(identifiers={("power_sync", "entry-1_pw_0")}))) is True
 
 
 def _compat_module():

@@ -21255,11 +21255,22 @@ async def async_remove_config_entry_device(
     config_entry: ConfigEntry,
     device_entry,
 ) -> bool:
-    """Allow removal of legacy standalone Powerwall pack devices."""
+    """Allow legacy pack removal and inactive GloBird removal after Amber selection."""
+    identifiers = getattr(device_entry, "identifiers", set()) or set()
     legacy_prefix = f"{config_entry.entry_id}_pw_"
-    return any(
+    if any(
         domain == DOMAIN and str(identifier).startswith(legacy_prefix)
-        for domain, identifier in (getattr(device_entry, "identifiers", set()) or set())
+        for domain, identifier in identifiers
+    ):
+        return True
+    # Options override entry data; never remove the currently active provider.
+    electricity_provider = config_entry.options.get(
+        CONF_ELECTRICITY_PROVIDER,
+        config_entry.data.get(CONF_ELECTRICITY_PROVIDER),
+    )
+    return (
+        electricity_provider == "amber"
+        and (DOMAIN, f"{config_entry.entry_id}_globird_pricing") in identifiers
     )
 
 
