@@ -223,9 +223,9 @@ _MANAGED_EV_HEADROOM_DIFF_SHA256 = (
 
 # Exact generic total-grid leveling adaptation of upstream b50a2cba. The
 # preceding 2c875c9b source is checked separately; no Tesla actuator follows.
-_TOTAL_GRID_IMPORT_SOURCE = "07bdfcad76e2d758f65949d7d6281eb4a2ff52fa"
+_TOTAL_GRID_IMPORT_SOURCE = "11a227e4921164e207d19ee3244d0890bf77cd8c"
 _TOTAL_GRID_IMPORT_DIFF_SHA256 = (
-    "0d507adf8da331a1a3bc155c6618ea8eefd90b0b3f1107dc899d529ac9777e94"
+    "87c8fc5302afdd2367be81252f35e896846a46c86cd0900981dd377b1475ec26"
 )
 
 # Exact, path-specific exception for the reviewed Cost Neutral reachable-
@@ -325,7 +325,7 @@ def _total_grid_import_diff_is_allowlisted(actual: str) -> bool:
     expected = _git_show(_TOTAL_GRID_IMPORT_SOURCE, COORDINATOR)
     diff = "\n".join(difflib.unified_diff(
         expected.splitlines(), actual.splitlines(),
-        fromfile="private_07bdfcad", tofile="total_grid_import_candidate",
+        fromfile="private_11a227e4", tofile="total_grid_import_candidate",
         lineterm="",
     ))
     return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _TOTAL_GRID_IMPORT_DIFF_SHA256
