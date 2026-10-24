@@ -260,3 +260,28 @@ def test_boost_does_not_re_raise_current_past_the_phase_clamp():
     # charger straight back to 32 A and undo the shared budget decision.
     assert "'action_type': 'set_ev_charging_amps'" not in source
     assert "applied_boost_amps" in source
+
+
+def test_loadpoint_status_reports_configured_charger_backends_not_connection_state():
+    method = _get_method()
+    payload = next(
+        node.value for node in ast.walk(method)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "payload" for target in node.targets)
+    )
+    assert isinstance(payload, ast.Dict)
+    fields = {key.value: value for key, value in zip(payload.keys, payload.values)
+              if isinstance(key, ast.Constant)}
+    assert {"success", "site", "loadpoints", "modes"} <= fields.keys()
+    flags = fields["enabled_charger_backends"]
+    compiled = compile(ast.Expression(body=flags), str(INIT_PATH), "eval")
+    names = {
+        "CONF_GENERIC_CHARGER_ENABLED": "generic_charger_enabled",
+        "CONF_SIGENERGY_CHARGER_ENABLED": "sigenergy_charger_enabled",
+    }
+    for options, expected in (
+        ({"generic_charger_enabled": True, "sigenergy_charger_enabled": False}, {"generic": True, "sigenergy": False}),
+        ({"generic_charger_enabled": False, "sigenergy_charger_enabled": True}, {"generic": False, "sigenergy": True}),
+        ({}, {"generic": False, "sigenergy": False}),
+    ):
+        assert eval(compiled, names, {"opts": options}) == expected

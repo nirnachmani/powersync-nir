@@ -1,6 +1,6 @@
-<!-- release: v2.12.1478-nir.1 -->
+<!-- release: v2.12.1478-nir.2 -->
 
 ## PowerSync Nir fork
-- Bring the fork through upstream v2.12.1478 in strict chronological review. Port relevant Amber billing/current prices, Sigenergy export and manual-discharge controls, EV battery-hold release, optimiser reserve/export/normal-mode fixes, dashboard provenance, and AI explanation improvements; adapt the custom-duration no-op to avoid stale reload flags.
-- Reserve shared managed-EV import headroom and level total site import across Sigenergy spread-charge windows, without Tesla-only dispatch controls. Reject native Tesla Powerwall-only controls and skip release bookkeeping. Preserve shared logical-EV safeguards, Android API compatibility, upstream attribution and the no-paywall optimiser boundary.
-- Add this repository to HACS as a **custom integration repository** for installation and updates; it is not in the default HACS catalogue. This release did not deploy to Home Assistant.
+- Hide disabled Generic/Sigenergy charger backends' unused Smart Schedule rows in the dashboard. Keep their saved settings so switching the selected physical backend later restores its plan; never hide a contradictory enabled plan.
+- Preserve existing Generic EV settings, logical EV profiles, optimizer/charger control, and the Android API response. The loadpoint-status endpoint gains additive backend-configuration flags for dashboard presentation.
+- Based on selectively reviewed upstream v2.12.1478. This release does not deploy to Home Assistant; apply it through the HACS custom repository when a safe update window is available.

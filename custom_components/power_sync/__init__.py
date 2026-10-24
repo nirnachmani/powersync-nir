@@ -19439,6 +19439,7 @@ class EVLoadpointStatusView(HomeAssistantView):
                 CONF_GENERIC_CHARGER_STATUS_ENTITY,
                 CONF_GENERIC_CHARGER_SWITCH_ENTITY,
                 CONF_OCPP_ENABLED,
+                CONF_SIGENERGY_CHARGER_ENABLED,
             )
 
             entry_id = self._config_entry.entry_id
@@ -19800,6 +19801,10 @@ class EVLoadpointStatusView(HomeAssistantView):
                 "success": True,
                 "site": site,
                 "loadpoints": loadpoints,
+                "enabled_charger_backends": {
+                    "generic": bool(opts.get(CONF_GENERIC_CHARGER_ENABLED)),
+                    "sigenergy": bool(opts.get(CONF_SIGENERGY_CHARGER_ENABLED)),
+                },
                 "modes": {
                     "coordinator": coordinator.get_state() if coordinator else None,
                     "price_level": price_level.get_state() if price_level else None,

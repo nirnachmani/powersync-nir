@@ -6315,8 +6315,7 @@ class PowerSyncEVPanel extends HTMLElement {
     if (this._data?.solarConfig?.enabled) enabledModes.push('Solar Surplus');
     if (this._data?.priceSettings?.enabled) enabledModes.push('Price Level');
     if (this._data?.scheduledSettings?.enabled) enabledModes.push('Scheduled');
-    const smartSettings = this._data?.autoStatus?.settings || {};
-    if (Object.values(smartSettings).some((vehicle) => !!vehicle?.enabled)) {
+    if (this._visibleSmartScheduleEntries().some(([, vehicle]) => !!vehicle?.enabled)) {
       enabledModes.push('Smart Schedule');
     }
     if (!enabledModes.length) return 'All off';
@@ -6346,6 +6345,17 @@ class PowerSyncEVPanel extends HTMLElement {
     `;
   }
 
+  _visibleSmartScheduleEntries() {
+    const settings = this._data?.autoStatus?.settings || {};
+    const backends = this._data?.status?.enabled_charger_backends;
+    return Object.entries(settings).filter(([vehicleId, vehicle]) => {
+      if (vehicle?.enabled) return true; // Never conceal an inconsistent active plan.
+      if (vehicleId === 'generic_ev') return backends?.generic !== false;
+      if (vehicleId === 'sigenergy_charger') return backends?.sigenergy !== false;
+      return true; // Logical profiles and other vehicles are not charger backends.
+    });
+  }
+
   _fieldHtml(kind, settings, field) {
     const value = settings[field.key];
     const dataKey = `${kind}:${field.key}`;
@@ -6368,9 +6378,8 @@ class PowerSyncEVPanel extends HTMLElement {
   }
 
   _smartScheduleCard() {
-    const settings = this._data?.autoStatus?.settings || {};
     const vehicleConfigs = this._data?.vehicleConfigs || [];
-    const entries = Object.entries(settings);
+    const entries = this._visibleSmartScheduleEntries();
     const dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
     const rows = entries.length ? entries.map(([vehicleId, vehicle]) => {
       const enabled = !!vehicle.enabled;
