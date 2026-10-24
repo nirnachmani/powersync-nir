@@ -11,6 +11,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .force_discharge_duration import CUSTOM_DISCHARGE_DURATION
 from .const import (
     DOMAIN,
     CONF_BATTERY_CURTAILMENT_ENABLED,
@@ -19,6 +20,9 @@ from .const import (
     CONF_POWERWALL_LOCAL_PAIRED,
     DEFAULT_DISCHARGE_DURATION,
     DISCHARGE_DURATIONS,
+    FORCE_DISCHARGE_DURATIONS,
+    CONF_HOLD_SELF_DURATION,
+    CONF_SIGENERGY_STATION_ID,
     family_device_info,
     SENSOR_FAMILY_BATTERY,
     SENSOR_FAMILY_GRID_HOME,
@@ -59,6 +63,10 @@ async def async_setup_entry(
     # Persist defaults immediately (so values survive restart even before user changes them)
     options = dict(entry.options)
     changed = False
+    if CONF_HOLD_SELF_DURATION not in options and entry.data.get(CONF_SIGENERGY_STATION_ID):
+        previous = options.get(CONF_FORCE_DISCHARGE_DURATION, default_value)
+        options[CONF_HOLD_SELF_DURATION] = previous if str(previous) in {str(x) for x in DISCHARGE_DURATIONS} else default_value
+        changed = True
     for key in (CONF_FORCE_CHARGE_DURATION, CONF_FORCE_DISCHARGE_DURATION):
         if key not in options:
             options[key] = default_value
@@ -109,6 +117,12 @@ async def async_setup_entry(
         ),
     ]
 
+    if entry.data.get(CONF_SIGENERGY_STATION_ID):
+        select_entities.append(PowerSyncDurationSelect(
+            entry=entry, key=CONF_HOLD_SELF_DURATION, name="Hold/Self Consumption Duration",
+            suggested_object_id="power_sync_hold_self_duration",
+        ))
+
     # Tesla Energy Site selects (universally supported — no capability probe needed)
     from .const import CONF_TESLA_ENERGY_SITE_ID
     tesla_site_id = entry.options.get(
@@ -142,6 +156,8 @@ class PowerSyncDurationSelect(SelectEntity):
 
         # SelectEntity options must be strings
         self._attr_options = [str(x) for x in DISCHARGE_DURATIONS]
+        if key == CONF_FORCE_DISCHARGE_DURATION and entry.data.get(CONF_SIGENERGY_STATION_ID):
+            self._attr_options = [str(x) for x in FORCE_DISCHARGE_DURATIONS] + [CUSTOM_DISCHARGE_DURATION]
 
     @property
     def device_info(self):

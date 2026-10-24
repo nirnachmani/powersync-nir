@@ -16,6 +16,10 @@ from homeassistant.const import EntityCategory, PERCENTAGE, UnitOfPower
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .force_discharge_duration import (
+    CUSTOM_DISCHARGE_DURATION_KEY, MAX_FORCE_DISCHARGE_MINUTES,
+    validate_discharge_duration,
+)
 from .const import (
     DOMAIN,
     CONF_TESLA_ENERGY_SITE_ID,
@@ -109,6 +113,8 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up PowerSync number entities."""
+    if entry.data.get(CONF_SIGENERGY_STATION_ID):
+        async_add_entities([ForceDischargeCustomDurationNumber(hass, entry)])
     tesla_site_id = entry.options.get(
         CONF_TESLA_ENERGY_SITE_ID,
         entry.data.get(CONF_TESLA_ENERGY_SITE_ID, ""),
@@ -158,6 +164,47 @@ async def async_setup_entry(
     )
     if _supports_force_power:
         async_add_entities([ForcePowerNumber(hass, entry)])
+
+
+class ForceDischargeCustomDurationNumber(NumberEntity):
+    """Persist the whole-minute value used when Discharge Duration is Custom."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Force Discharge Custom Duration"
+    _attr_icon = "mdi:timer-edit-outline"
+    _attr_mode = NumberMode.BOX
+    _attr_native_min_value = 1
+    _attr_native_max_value = MAX_FORCE_DISCHARGE_MINUTES
+    _attr_native_step = 1
+    _attr_native_unit_of_measurement = "min"
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self.hass = hass
+        self._entry_id = entry.entry_id
+        self._attr_unique_id = f"{entry.entry_id}_{CUSTOM_DISCHARGE_DURATION_KEY}"
+        self._attr_suggested_object_id = "power_sync_force_discharge_custom_duration"
+
+    @property
+    def device_info(self):
+        return family_device_info(self._entry_id, SENSOR_FAMILY_BATTERY)
+
+    @property
+    def native_value(self) -> int | None:
+        entry = self.hass.config_entries.async_get_entry(self._entry_id)
+        try:
+            return validate_discharge_duration(entry.options.get(CUSTOM_DISCHARGE_DURATION_KEY, 30)) if entry else 30
+        except ValueError:
+            return None
+
+    async def async_set_native_value(self, value: float) -> None:
+        minutes = validate_discharge_duration(value)
+        entry = self.hass.config_entries.async_get_entry(self._entry_id)
+        if entry is None:
+            return
+        options = {**entry.options, CUSTOM_DISCHARGE_DURATION_KEY: minutes}
+        self.hass.data.setdefault(DOMAIN, {}).setdefault(self._entry_id, {})["_skip_reload"] = True
+        self.hass.config_entries.async_update_entry(entry, options=options)
+        self.async_write_ha_state()
 
 
 class _TeslaSiteNumberBase(NumberEntity):

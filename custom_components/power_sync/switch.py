@@ -130,6 +130,11 @@ def _coerce_duration(value: Any, default: int = DEFAULT_DISCHARGE_DURATION) -> i
 
 def _selected_duration(entry: ConfigEntry, key: str) -> int:
     """Read the duration selected by the matching select entity."""
+    if key == CONF_FORCE_DISCHARGE_DURATION and entry.data.get(CONF_SIGENERGY_STATION_ID):
+        from .force_discharge_duration import selected_discharge_duration
+        return selected_discharge_duration(
+            entry.options.get(key, entry.data.get(key, DEFAULT_DISCHARGE_DURATION)), entry.options,
+        )
     return _coerce_duration(
         entry.options.get(key, entry.data.get(key, DEFAULT_DISCHARGE_DURATION))
     )

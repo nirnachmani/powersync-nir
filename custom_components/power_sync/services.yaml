@@ -44,12 +44,13 @@ force_discharge:
   fields:
     duration:
       name: Duration
-      description: Duration in minutes (15 minutes to 4 hours)
+      description: Sigenergy supports whole minutes from 1 to 1440 (24 hours); other batteries retain their existing presets. Custom uses the discharge duration entity.
       required: false
       default: 30
       example: 60
       selector:
         select:
+          custom_value: true
           options:
             - label: "15 minutes"
               value: "15"
@@ -83,6 +84,22 @@ force_discharge:
               value: "225"
             - label: "4 hours"
               value: "240"
+            - label: "255 min (Sigenergy)"
+              value: "255"
+            - label: "270 min (Sigenergy)"
+              value: "270"
+            - label: "285 min (Sigenergy)"
+              value: "285"
+            - label: "300 min (Sigenergy)"
+              value: "300"
+            - label: "315 min (Sigenergy)"
+              value: "315"
+            - label: "330 min (Sigenergy)"
+              value: "330"
+            - label: "345 min (Sigenergy)"
+              value: "345"
+            - label: "360 min (Sigenergy)"
+              value: "360"
     power_w:
       name: Power (W)
       description: Target power in watts. 0 or omitted means use the inverter's rated/BMS max.

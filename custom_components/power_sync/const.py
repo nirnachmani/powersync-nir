@@ -1593,6 +1593,10 @@ DISCHARGE_DURATIONS = [
 ]
 DEFAULT_DISCHARGE_DURATION = 30
 
+# Manual Sigenergy discharge only; charge and hold keep their original options.
+FORCE_DISCHARGE_DURATIONS = [*DISCHARGE_DURATIONS, *range(255, 361, 15)]
+CONF_HOLD_SELF_DURATION = "hold_self_duration"
+
 # Duration dropdown entity option keys (stored in ConfigEntry.options)
 CONF_FORCE_CHARGE_DURATION = "force_charge_duration"
 CONF_FORCE_DISCHARGE_DURATION = "force_discharge_duration"
