@@ -13327,9 +13327,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return max_charge_w
             load_w = _forecast_kw(load_forecast, pos) * 1000.0
             solar_w = _forecast_kw(solar_forecast, pos) * 1000.0
+            # LP-managed EV demand is separate from site load_forecast; reserve
+            # its physical import once, regardless of the selected logical EV.
+            ev_w = max(0.0, float(getattr(actions[pos], "ev_charge_w", 0.0) or 0.0))
             return max(
                 0.0,
-                min(max_charge_w, max_grid_import_w - load_w + solar_w),
+                min(max_charge_w, max_grid_import_w - load_w - ev_w + solar_w),
             )
 
         def _spread_power_by_cap(total_wh: float, caps_w: list[float]) -> list[float]:

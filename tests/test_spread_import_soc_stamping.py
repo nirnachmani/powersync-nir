@@ -484,3 +484,33 @@ def test_spread_export_schedule_floor_check_uses_true_soc_not_stale_label(opt_mo
     )
     assert stale_spread.actions[1].action == "export"
     assert stale_spread.actions[1].battery_discharge_w > 0.0
+
+
+def test_sigenergy_shared_ev_spread_retains_physical_import_headroom(opt_module):
+    """A selected logical EV contributes once to the physical site's load."""
+    coordinator = _coordinator(opt_module, "amber")
+    coordinator.battery_system = "sigenergy"
+    coordinator._config.spread_import_enabled = True
+    coordinator._config.interval_minutes = 60
+    coordinator._config.battery_capacity_wh = 100000
+    coordinator._config.max_charge_w = 14700
+    coordinator._config.max_grid_import_w = 16100
+    start = datetime(2026, 5, 3, 2, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start + timedelta(hours=i), action="charge",
+            power_w=8600 if i == 0 else 14700,
+            battery_charge_w=8600 if i == 0 else 14700,
+            ev_charge_w=7000 if i == 0 else 0, soc=.1,
+        ) for i in range(2)
+    ]
+    schedule = opt_module.OptimizationSchedule(actions, 0, 0, start)
+    result = coordinator._spread_import_schedule(
+        schedule, [.1, .1], [False, False], .1,
+        load_forecast=[.5, .5], solar_forecast=[0, 0],
+    )
+    assert [a.ev_charge_w for a in result.actions] == [7000, 0]
+    assert result.actions[0].battery_charge_w <= 8600
+    assert sum(a.battery_charge_w for a in result.actions) == pytest.approx(23300, abs=.1)
+    for action in result.actions:
+        assert action.battery_charge_w + action.ev_charge_w + 500 <= 16100 + .1
