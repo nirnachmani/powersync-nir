@@ -17356,19 +17356,32 @@ class VehicleChargingConfigView(HomeAssistantView):
             vehicle_configs = self._canonicalize_vehicle_configs(
                 data.get("vehicle_charging_configs", [])
             )
-            from .automations.shared_loadpoint import is_retired_shared_vehicle_id
+            from .automations.shared_loadpoint import (
+                PROFILE_A_ID, PROFILE_B_ID, binding_for_entry,
+                is_retired_shared_vehicle_id, shared_physical_charger_fields,
+                shared_profile_configs,
+            )
 
             entries = self._hass.config_entries.async_entries(DOMAIN)
+            physical_fields = {}
             if entries:
                 vehicle_configs = [
                     item for item in vehicle_configs
                     if not is_retired_shared_vehicle_id(entries[0], item.get("vehicle_id"))
                 ]
+                if binding_for_entry(entries[0]):
+                    profiles = shared_profile_configs(entries[0])
+                    if profiles:
+                        physical_fields = {
+                            "charger_type": profiles[0]["charger_type"],
+                            **shared_physical_charger_fields(entries[0]),
+                        }
             resolved_configs = [
                 {
                     **config,
                     **self._external_policy_contract(config),
                     **self._capacity_contract(config),
+                    **(physical_fields if config.get("vehicle_id") in (PROFILE_A_ID, PROFILE_B_ID) else {}),
                 }
                 for config in vehicle_configs
             ]
@@ -17468,6 +17481,27 @@ class VehicleChargingConfigView(HomeAssistantView):
                 entries and binding_for_entry(entries[0])
                 and vehicle_id in (PROFILE_A_ID, PROFILE_B_ID)
             )
+            physical_fields = {}
+            if logical_profile:
+                from .automations.shared_loadpoint import (
+                    shared_physical_charger_fields, shared_profile_configs,
+                )
+
+                physical_fields = shared_physical_charger_fields(entries[0])
+                physical_type = shared_profile_configs(entries[0])[0]["charger_type"]
+                if data.get("charger_type") not in (None, "", physical_type):
+                    return web.json_response({
+                        "success": False,
+                        "error": "Shared charger backend is configured in the integration options",
+                    }, status=409)
+                data["charger_type"] = physical_type
+                for key, actual in physical_fields.items():
+                    supplied = data.pop(key, None)
+                    if supplied not in (None, "", actual):
+                        return web.json_response({
+                            "success": False,
+                            "error": "Physical charger entities are configured in the integration options",
+                        }, status=409)
             # A BYD discovered through hass-byd-vehicle is telemetry-only in
             # this configuration path. Capacity metadata must never turn it
             # into a Tesla control profile merely because no charger type was
@@ -17578,6 +17612,12 @@ class VehicleChargingConfigView(HomeAssistantView):
                     "vehicle_trim": data.get("vehicle_trim", data.get("trim")),
                 }
                 vehicle_configs.append(new_config)
+
+            if logical_profile:
+                for config in vehicle_configs:
+                    if vehicle_ids_match(config.get("vehicle_id"), vehicle_id):
+                        for key in physical_fields:
+                            config.pop(key, None)
 
             # Save updated configs (update key in existing _data, don't overwrite)
             vehicle_configs = self._canonicalize_vehicle_configs(vehicle_configs)
@@ -18497,10 +18537,24 @@ class ChargingScheduleView(HomeAssistantView):
             from .automations.ev_vehicle_capacity import resolve_ev_battery_capacity
             from .const import CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH
 
-            config_options = {}
+            from .automations.shared_loadpoint import (
+                PROFILE_A_ID, PROFILE_B_ID, binding_for_entry,
+                is_retired_shared_vehicle_id,
+            )
             entries = self._hass.config_entries.async_entries(DOMAIN)
-            if entries:
-                config_options = {**entries[0].data, **entries[0].options}
+            shared_entry = entries[0] if entries and binding_for_entry(entries[0]) else None
+            if shared_entry and (
+                vehicle_id == "_default"
+                or is_retired_shared_vehicle_id(shared_entry, vehicle_id)
+            ):
+                return web.json_response({
+                    "success": False,
+                    "error": "Select a logical EV for the charging schedule preview",
+                }, status=409)
+            logical_profile = bool(
+                shared_entry and vehicle_id in (PROFILE_A_ID, PROFILE_B_ID)
+            )
+            config_options = {**entries[0].data, **entries[0].options} if entries else {}
             matched_config = matched_config or {}
             stable_id = str(vehicle_id or "").lower()
             anonymous = (
@@ -18510,19 +18564,17 @@ class ChargingScheduleView(HomeAssistantView):
             ) and not (
                 stable_id.startswith(("ble_", "byd_"))
                 or (len(stable_id) == 17 and stable_id.isalnum())
+                or logical_profile
             )
             resolved_capacity = resolve_ev_battery_capacity(
                 manual_capacity_kwh=(
                     None if anonymous else matched_config.get("battery_capacity_kwh")
                 ),
-                charger_fallback_capacity_kwh=(
+                charger_fallback_capacity_kwh=(None if logical_profile else (
                     matched_config.get("charger_fallback_battery_capacity_kwh")
-                    or (
-                        matched_config.get("battery_capacity_kwh")
-                        if anonymous else None
-                    )
+                    or (matched_config.get("battery_capacity_kwh") if anonymous else None)
                     or config_options.get(CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH)
-                ),
+                )),
                 provider_capacity_kwh=matched_config.get(
                     "provider_battery_capacity_kwh"
                 ),

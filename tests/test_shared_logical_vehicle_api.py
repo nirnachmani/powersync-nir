@@ -352,6 +352,105 @@ def test_logical_capacity_post_round_trip_and_selected_status_are_per_profile(mo
     assert status["battery_capacity_source"] == "manual"
 
 
+def test_app_projects_current_physical_entities_without_storing_per_ev_copies(monkeypatch):
+    power_sync = _power_sync_module()
+    entry = _shared_entry()
+    entry.options.update({
+        "generic_charger_switch_entity": "switch.current",
+        "generic_charger_amps_entity": "number.current",
+        "generic_charger_status_entity": "sensor.current",
+        "generic_charger_power_entity": "sensor.power",
+    })
+    class Store:
+        _data = {"vehicle_charging_configs": [
+            {"vehicle_id": "shared_ev_profile_a", "charger_type": "generic",
+             "charger_switch_entity": "switch.old", "battery_capacity_kwh": 37.1},
+            {"vehicle_id": "shared_ev_profile_b", "charger_type": "generic"},
+        ]}
+        async def async_save(self):
+            pass
+    store = Store()
+    hass = _Hass([], entry_data={"automation_store": store}, config_entries=[entry])
+    monkeypatch.setattr(power_sync.web, "json_response", lambda body, **_kwargs: body)
+    view = power_sync.VehicleChargingConfigView(hass)
+    configs = {row["vehicle_id"]: row for row in asyncio.run(view.get(None))["configs"]}
+    for config in configs.values():
+        assert config["charger_switch_entity"] == "switch.current"
+        assert config["charger_amps_entity"] == "number.current"
+        assert config["charger_status_entity"] == "sensor.current"
+        assert config["charger_power_entity"] == "sensor.power"
+    assert store._data["vehicle_charging_configs"][0]["charger_switch_entity"] == "switch.old"
+
+    class Request:
+        async def json(self):
+            return {"vehicle_id": "shared_ev_profile_b", "battery_capacity_kwh": 72,
+                    "charger_switch_entity": "switch.current"}
+    assert asyncio.run(view.post(Request()))["success"] is True
+    by_id = {row["vehicle_id"]: row for row in store._data["vehicle_charging_configs"]}
+    assert by_id["shared_ev_profile_b"]["battery_capacity_kwh"] == 72
+    assert by_id["shared_ev_profile_b"].get("charger_switch_entity") is None
+
+    class WrongRequest:
+        async def json(self):
+            return {"vehicle_id": "shared_ev_profile_b", "charger_switch_entity": "switch.wrong"}
+    assert asyncio.run(view.post(WrongRequest()))["success"] is False
+    assert by_id["shared_ev_profile_b"]["battery_capacity_kwh"] == 72
+
+    class WrongBackend:
+        async def json(self):
+            return {"vehicle_id": "shared_ev_profile_b", "charger_type": "ocpp"}
+    assert asyncio.run(view.post(WrongBackend()))["success"] is False
+    assert store._data["vehicle_charging_configs"][1]["charger_type"] == "generic"
+
+
+def test_price_level_projection_keeps_logical_ev_capacity_manual():
+    import ast
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / "custom_components/power_sync/automations/ev_charging_planner.py"
+    source = path.read_text()
+    tree = ast.parse(source)
+    method = next(node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef)
+                  and node.name == "collect_projection_snapshots")
+    body = ast.get_source_segment(source, method)
+    assert body is not None
+    assert "PROFILE_A_ID, PROFILE_B_ID" in body
+    assert "charger_fallback_capacity_kwh=(None if logical_profile" in body
+    assert "or logical_profile" in body
+
+
+def test_charging_schedule_preview_uses_each_logical_evs_capacity(monkeypatch):
+    power_sync = _power_sync_module()
+    entry = _shared_entry()
+    entry.options["generic_charger_battery_capacity_kwh"] = 37.1
+    store = SimpleNamespace(_data={"vehicle_charging_configs": [
+        {"vehicle_id": "shared_ev_profile_a", "charger_type": "generic",
+         "battery_capacity_kwh": 82},
+        {"vehicle_id": "shared_ev_profile_b", "charger_type": "generic"},
+    ]})
+    hass = _Hass([], entry_data={"automation_store": store}, config_entries=[entry])
+    monkeypatch.setattr(power_sync.web, "json_response", lambda body, **_kwargs: body)
+    captured = []
+    class Planner:
+        async def plan_charging(self, **kwargs):
+            captured.append(kwargs)
+            return SimpleNamespace(to_dict=lambda: kwargs["resolved_capacity"].to_dict())
+    view = power_sync.ChargingScheduleView(hass)
+    view._get_planner = lambda: Planner()
+    view._get_effective_max_grid_price = lambda *_args: None
+    async def charger_power(*_args):
+        return 7.0
+    view._get_vehicle_planning_charger_power_kw = charger_power
+    for profile, expected in (("shared_ev_profile_a", 82), ("shared_ev_profile_b", 60)):
+        response = asyncio.run(view.get(SimpleNamespace(query={
+            "vehicle_id": profile, "current_soc": "40", "target_soc": "80",
+        })))
+        assert response["success"] is True
+        assert captured[-1]["resolved_capacity"].effective_battery_capacity_kwh == expected
+        assert captured[-1]["resolved_capacity"].battery_capacity_source == (
+            "manual" if profile.endswith("a") else "default_estimate"
+        )
+
+
 def test_auto_schedule_keeps_stored_legacy_record_but_refuses_edits(monkeypatch):
     power_sync = _power_sync_module()
     planner = importlib.import_module("power_sync.automations.ev_charging_planner")

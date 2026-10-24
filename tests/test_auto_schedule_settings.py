@@ -511,6 +511,37 @@ def test_auto_schedule_sync_normalizes_stale_synthetic_backend():
     )
 
 
+def test_shared_logical_entity_hydration_uses_physical_options_before_planning():
+    opts = {"generic_charger_switch_entity": "switch.current",
+            "generic_charger_amps_entity": "number.current"}
+    result = ev_planner._with_configured_charger_entities(
+        types.SimpleNamespace(),
+        {"vehicle_id": "shared_ev_profile_a", "charger_switch_entity": "switch.old",
+         "charger_amps_entity": "number.old"},
+        opts, "generic",
+    )
+    assert result["charger_switch_entity"] == "switch.current"
+    assert result["charger_amps_entity"] == "number.current"
+    empty = ev_planner._with_configured_charger_entities(
+        types.SimpleNamespace(), result, {}, "generic",
+    )
+    assert empty["charger_switch_entity"] == ""
+
+
+def test_shared_evac_entity_hydration_uses_current_entry_transport():
+    opts = {"sigenergy_charger_host": "new-host", "sigenergy_charger_port": 502,
+            "sigenergy_charger_slave_id": 2, "sigenergy_charger_type": "evac"}
+    result = ev_planner._with_configured_charger_entities(
+        types.SimpleNamespace(states=types.SimpleNamespace(get=lambda *_: None)),
+        {"vehicle_id": "shared_ev_profile_a", "sigenergy_charger_host": "old-host",
+         "sigenergy_charger_port": 9999},
+        opts, "sigenergy",
+    )
+    assert result["sigenergy_charger_host"] == "new-host"
+    assert result["sigenergy_charger_port"] == 502
+    assert result["sigenergy_charger_slave_id"] == 2
+
+
 def test_generic_options_override_stale_app_profile_entities():
     """A saved Generic Charger replacement wins over legacy generic_ev data."""
     opts = {

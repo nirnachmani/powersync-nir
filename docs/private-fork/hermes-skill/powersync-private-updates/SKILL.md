@@ -106,6 +106,15 @@ permission, command-fencing and hosted-access code out.
    `docs/private-fork/powersync-private-updates-reference.md`.
 3. Fetch and compare the explicit upstream range deterministically using the
    repository tools; identify changed paths, symbols, tests, and release notes.
+   For **each relevant upstream hunk**, compare the same path/function with the
+   fork's current implementation before copying or discarding it. A difference
+   from upstream is not an invitation to restore upstream: first identify why
+   the fork diverged (inventory, fork commits/tests, and dependent callers).
+   Treat the capacity source of truth, physical charger entity projection and
+   fail-closed shared command path as deliberate semantic differences. If the
+   reason cannot be established, do not assume equivalence or overwrite it;
+   stop at that ledger commit for review. The structural classifier is only a
+   triage signal and cannot prove that an apparently no-overlap hunk is safe.
 4. Apply this relevance and interaction screen before the no-paywall classification:
    - Is it relevant to Amber, Sigenergy, solar/site flows, private shared EVs,
      an existing AI explanation provider, or another explicitly approved optional

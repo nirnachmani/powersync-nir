@@ -8,7 +8,11 @@ import math
 from typing import Any, Mapping
 
 from ..const import (
+    CONF_GENERIC_CHARGER_AMPS_ENTITY,
     CONF_GENERIC_CHARGER_ENABLED,
+    CONF_GENERIC_CHARGER_POWER_ENTITY,
+    CONF_GENERIC_CHARGER_STATUS_ENTITY,
+    CONF_GENERIC_CHARGER_SWITCH_ENTITY,
     CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY,
     CONF_SHARED_LOADPOINT_PROFILE_A_NAME,
     CONF_SHARED_LOADPOINT_PROFILE_A_SOC_ENTITY,
@@ -17,7 +21,15 @@ from ..const import (
     CONF_SHARED_LOADPOINT_PROFILE_B_SOC_ENTITY,
     CONF_SHARED_LOADPOINT_PROFILE_B_STATE,
     CONF_SIGENERGY_CHARGER_ENABLED,
+    CONF_SIGENERGY_CHARGER_HOST,
+    CONF_SIGENERGY_CHARGER_PORT,
+    CONF_SIGENERGY_CHARGER_SLAVE_ID,
+    CONF_SIGENERGY_CHARGER_CHARGE_POWER_LIMIT_ENTITY,
+    CONF_SIGENERGY_CHARGER_DISCHARGE_POWER_LIMIT_ENTITY,
     CONF_SIGENERGY_CHARGER_TYPE,
+    CONF_SIGENERGY_MODBUS_HOST,
+    DEFAULT_SIGENERGY_CHARGER_PORT,
+    DEFAULT_SIGENERGY_CHARGER_SLAVE_ID,
     SIGENERGY_CHARGER_EVAC,
 )
 
@@ -291,6 +303,45 @@ def is_retired_shared_vehicle_id(config_entry: Any, vehicle_id: Any) -> bool:
     return physical_id is not None and str(vehicle_id or "") == physical_id
 
 
+def shared_physical_charger_fields(config_entry: Any) -> dict[str, Any]:
+    """Project the active physical controller's entry settings, never EV copies."""
+    if not shared_profile_configs(config_entry):
+        return {}
+    options = {**config_entry.data, **config_entry.options}
+    if options.get(CONF_GENERIC_CHARGER_ENABLED):
+        return {
+            field: options.get(option) or ""
+            for field, option in (
+                ("charger_switch_entity", CONF_GENERIC_CHARGER_SWITCH_ENTITY),
+                ("charger_amps_entity", CONF_GENERIC_CHARGER_AMPS_ENTITY),
+                ("charger_status_entity", CONF_GENERIC_CHARGER_STATUS_ENTITY),
+                ("charger_power_entity", CONF_GENERIC_CHARGER_POWER_ENTITY),
+            )
+        }
+    return {
+        "sigenergy_charger_host": (
+            options.get(CONF_SIGENERGY_CHARGER_HOST)
+            or options.get(CONF_SIGENERGY_MODBUS_HOST)
+            or ""
+        ),
+        "sigenergy_charger_port": options.get(
+            CONF_SIGENERGY_CHARGER_PORT, DEFAULT_SIGENERGY_CHARGER_PORT
+        ),
+        "sigenergy_charger_slave_id": options.get(
+            CONF_SIGENERGY_CHARGER_SLAVE_ID, DEFAULT_SIGENERGY_CHARGER_SLAVE_ID
+        ),
+        "sigenergy_charger_type": options.get(
+            CONF_SIGENERGY_CHARGER_TYPE, SIGENERGY_CHARGER_EVAC
+        ),
+        "sigenergy_charger_charge_power_limit_entity": options.get(
+            CONF_SIGENERGY_CHARGER_CHARGE_POWER_LIMIT_ENTITY
+        ) or "",
+        "sigenergy_charger_discharge_power_limit_entity": options.get(
+            CONF_SIGENERGY_CHARGER_DISCHARGE_POWER_LIMIT_ENTITY
+        ) or "",
+    }
+
+
 def resolve_shared_loadpoint_command(
     hass: Any,
     config_entry: Any,
@@ -334,6 +385,7 @@ def resolve_shared_loadpoint_command(
 
     return {
         **params,
+        **shared_physical_charger_fields(config_entry),
         "vehicle_id": physical_id,
         "vehicle_vin": physical_id,
         "logical_vehicle_id": requested_id,
@@ -407,6 +459,43 @@ def shared_profile_configs(config_entry: Any) -> list[dict[str, Any]]:
             "shared_loadpoint": True,
         },
     ]
+
+
+async def save_shared_profile_capacities(
+    store: Any, capacities: Mapping[str, Any],
+) -> bool:
+    """Save Options capacities to the same vehicle records edited by the app."""
+    from .ev_vehicle_capacity import validate_ev_battery_capacity
+
+    validated = {
+        profile_id: validate_ev_battery_capacity(capacities[profile_id])
+        for profile_id in (PROFILE_A_ID, PROFILE_B_ID)
+        if profile_id in capacities
+    }
+    if not validated:
+        return False
+    original = store._data.get("vehicle_charging_configs", [])
+    updated: list[dict[str, Any]] = [dict(item) for item in original]
+    for profile_id, value in validated.items():
+        row = next((item for item in updated if item.get("vehicle_id") == profile_id), None)
+        if row is None:
+            if value is None:
+                continue
+            row = {"vehicle_id": profile_id}
+            updated.append(row)
+        if value is None:
+            row.pop("battery_capacity_kwh", None)
+        else:
+            row["battery_capacity_kwh"] = value
+    if updated == original:
+        return False
+    store._data["vehicle_charging_configs"] = updated
+    try:
+        await store.async_save()
+    except Exception:
+        store._data["vehicle_charging_configs"] = original
+        raise
+    return True
 
 
 async def ensure_shared_logical_vehicle_configs(config_entry: Any, store: Any) -> bool:

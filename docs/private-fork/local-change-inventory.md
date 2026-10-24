@@ -32,6 +32,35 @@ current repository only; it is not a deployment or upstream-update procedure.
   Generic/EVAC command addressed to an unselected logical profile or directly
   to a legacy physical ID, then supplies canonical physical and logical IDs.
 
+## Logical EV capacity and physical settings (intentional fork divergence)
+
+- A/B are vehicle identities even when `charger_type` is `generic` or
+  `sigenergy`. `battery_capacity_kwh` is owned by each logical EV in
+  `vehicle_charging_configs`. The integration Options Flow edits that **same**
+  record as the app/dashboard; it must never create a parallel options copy.
+  An absent manual capacity may be an estimate, never the sibling's or the
+  former Generic Charger's value. The charging-schedule preview and Price-Level
+  projection must make the same identity distinction as the executor, vehicle
+  config GET/POST, vehicle list, and selected loadpoint status.
+- The four Generic switch/amps/status/power entities and the Sigenergy EVAC
+  connection/transport fields belong to the physical charger entry options.
+  Logical EV records may carry policy/limits, not independent actuator entity
+  overrides. The app's per-EV fields project the current physical values for
+  display; a POST may echo those values but must reject edits that conflict with
+  entry options. Start/stop/current, external-session stop, handoff, manual
+  controls, and planner hydration must use the physical options even when old
+  per-EV records contain stale entities. A missing physical switch must remain
+  missing; never resurrect an old profile's switch as a fallback.
+- Changing options must not silently clear per-EV capacity when a form field is
+  absent. The explicit clear control deletes only that EV's manual override.
+  Do not resurrect the retired global Generic capacity in logical mode.
+- Any upstream change to these paths is a **semantic private overlap**, even if
+  the same file also contains upstream code. Review the changed hunk against
+  current fork behavior and its callers; preserve this identity/ownership split
+  before accepting a port. Run the focused logical-capacity/app/preview and
+  shared-action regressions. Do not rely on the architecture validator's
+  structural checks alone.
+
 ## Generic/EVAC physical command guards
 
 The shared gate is enforced at these command boundaries:
@@ -177,8 +206,13 @@ canonical identity and ownership checks; they are not API payload bypasses.
 - `custom_components/power_sync/automations/ev_ownership.py`
 - `custom_components/power_sync/automations/ev_charging_session.py`
 - `custom_components/power_sync/automations/shared_loadpoint_diagnostics.py`
+- `custom_components/power_sync/automations/ev_vehicle_capacity.py`
+- `custom_components/power_sync/config_flow.py`
+- `custom_components/power_sync/frontend/power-sync-strategy.js`
 - `custom_components/power_sync/__init__.py`
-- `tests/test_shared_loadpoint_*.py`, `tests/test_external_session_reconciler.py`,
+- `tests/test_shared_loadpoint_*.py`, `tests/test_shared_logical_vehicle_api.py`,
+  `tests/test_ev_vehicle_capacity.py`, `tests/test_config_flow_weather_options.py`,
+  `tests/test_auto_schedule_settings.py`, `tests/test_external_session_reconciler.py`,
   `tests/test_android_app_contract.py`, and
   `tests/test_android_app_multi_vehicle_contract.py`
 

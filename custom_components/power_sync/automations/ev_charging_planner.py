@@ -9068,17 +9068,19 @@ def _with_configured_charger_entities(
             CONF_GENERIC_CHARGER_SWITCH_ENTITY,
         )
 
+        from .shared_loadpoint import PROFILE_A_ID, PROFILE_B_ID
+
         for param_key, option_key in (
             ("charger_switch_entity", CONF_GENERIC_CHARGER_SWITCH_ENTITY),
             ("charger_amps_entity", CONF_GENERIC_CHARGER_AMPS_ENTITY),
             ("charger_status_entity", CONF_GENERIC_CHARGER_STATUS_ENTITY),
             ("charger_power_entity", CONF_GENERIC_CHARGER_POWER_ENTITY),
         ):
-            # The synthetic single Generic Charger is configured through the
-            # entry options.  Per-vehicle generic profiles retain their own
-            # entity overrides for multi-loadpoint/app configurations.
-            if str(params.get("vehicle_id") or "").lower() == "generic_ev":
-                params[param_key] = opts.get(option_key) or params.get(param_key, "")
+            # The selected shared loadpoint has one physical actuator. A stale
+            # per-EV app record cannot override it during planning or action.
+            vehicle_id = str(params.get("vehicle_id") or "").lower()
+            if vehicle_id in ("generic_ev", PROFILE_A_ID, PROFILE_B_ID):
+                params[param_key] = opts.get(option_key) or ""
             else:
                 params[param_key] = params.get(param_key) or opts.get(option_key, "")
     elif charger_type == "ocpp":
@@ -9099,19 +9101,17 @@ def _with_configured_charger_entities(
             DEFAULT_SIGENERGY_EVDC_DISCHARGE_POWER_LIMIT_ENTITY,
         )
 
-        params["sigenergy_charger_host"] = params.get("sigenergy_charger_host") or opts.get(
-            CONF_SIGENERGY_CHARGER_HOST,
-            opts.get(CONF_SIGENERGY_MODBUS_HOST, ""),
+        from .shared_loadpoint import PROFILE_A_ID, PROFILE_B_ID
+        shared_profile = str(params.get("vehicle_id") or "") in (PROFILE_A_ID, PROFILE_B_ID)
+        configured_host = opts.get(CONF_SIGENERGY_CHARGER_HOST) or opts.get(CONF_SIGENERGY_MODBUS_HOST)
+        params["sigenergy_charger_host"] = (
+            configured_host if shared_profile else
+            params.get("sigenergy_charger_host") or configured_host
         )
-        params["sigenergy_charger_port"] = params.get("sigenergy_charger_port") or opts.get(
-            CONF_SIGENERGY_CHARGER_PORT
-        )
-        params["sigenergy_charger_slave_id"] = params.get("sigenergy_charger_slave_id") or opts.get(
-            CONF_SIGENERGY_CHARGER_SLAVE_ID
-        )
-        params["sigenergy_charger_type"] = params.get("sigenergy_charger_type") or opts.get(
-            CONF_SIGENERGY_CHARGER_TYPE
-        )
+        for key in ("sigenergy_charger_port", "sigenergy_charger_slave_id", "sigenergy_charger_type"):
+            params[key] = (
+                opts.get(key) if shared_profile else params.get(key) or opts.get(key)
+            )
         charge_limit_entity = str(
             params.get(CONF_SIGENERGY_CHARGER_CHARGE_POWER_LIMIT_ENTITY)
             or opts.get(CONF_SIGENERGY_CHARGER_CHARGE_POWER_LIMIT_ENTITY)
@@ -10555,25 +10555,30 @@ class PriceLevelChargingExecutor:
                 or charger_params.get("charger_type")
                 or "tesla"
             )
+            from .shared_loadpoint import PROFILE_A_ID, PROFILE_B_ID, binding_for_entry
+
+            logical_profile = bool(
+                binding_for_entry(self.config_entry)
+                and vehicle_id in (PROFILE_A_ID, PROFILE_B_ID)
+            )
             anonymous = charger_type in {
                 "generic",
                 "ocpp",
                 "sigenergy",
                 "zaptec",
             } and not (
-                len(vehicle_id) == 17
-                and vehicle_id.isalnum()
-                and not vehicle_id.isdigit()
+                (len(vehicle_id) == 17 and vehicle_id.isalnum() and not vehicle_id.isdigit())
+                or logical_profile
             )
             try:
                 resolved_capacity = resolve_ev_battery_capacity(
                     manual_capacity_kwh=(
                         None if anonymous else config.get("battery_capacity_kwh")
                     ),
-                    charger_fallback_capacity_kwh=config.get(
+                    charger_fallback_capacity_kwh=(None if logical_profile else config.get(
                         "charger_fallback_battery_capacity_kwh",
                         config.get("battery_capacity_kwh") if anonymous else None,
-                    ),
+                    )),
                     provider_capacity_kwh=config.get(
                         "provider_battery_capacity_kwh"
                     ),

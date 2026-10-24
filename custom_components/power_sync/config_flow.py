@@ -698,6 +698,13 @@ CUSTOM_TOU_PROVIDER_OPTIONS = ("agl", "globird", "aemo_vpp", "other", "tou_only"
 
 _LOGGER = logging.getLogger(__name__)
 
+# These are form-only keys. Capacity lives in vehicle_charging_configs, not in
+# entry options, so app/dashboard edits and Options edit the same record.
+CONF_SHARED_PROFILE_A_CAPACITY_FORM = "shared_loadpoint_profile_a_capacity_kwh"
+CONF_SHARED_PROFILE_B_CAPACITY_FORM = "shared_loadpoint_profile_b_capacity_kwh"
+CONF_SHARED_PROFILE_A_CAPACITY_CLEAR_FORM = "shared_loadpoint_profile_a_capacity_clear"
+CONF_SHARED_PROFILE_B_CAPACITY_CLEAR_FORM = "shared_loadpoint_profile_b_capacity_clear"
+
 
 def _flow_power_form_selection(
     user_input: dict[str, Any], stored: dict[str, Any] | None = None,
@@ -8302,6 +8309,44 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         except Exception as e:
             _LOGGER.error(f"Error restoring export rule: {e}")
 
+    def _get_shared_capacity_store(self) -> Any:
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
+        return entry_data.get("automation_store") if isinstance(entry_data, dict) else None
+
+    def _shared_profile_capacity(self, profile_id: str) -> float | None:
+        store = self._get_shared_capacity_store()
+        if store is None:
+            return None
+        for row in getattr(store, "_data", {}).get("vehicle_charging_configs", []):
+            if row.get("vehicle_id") == profile_id:
+                return row.get("battery_capacity_kwh")
+        return None
+
+    async def _save_ev_options_and_capacities(self, ev_input: dict[str, Any]) -> FlowResult:
+        """Persist UI-only capacity in per-EV storage before committing options."""
+        from .automations.shared_loadpoint import (
+            PROFILE_A_ID, PROFILE_B_ID, SharedLoadpointBinding,
+            save_shared_profile_capacities,
+        )
+
+        if SharedLoadpointBinding.from_options(ev_input) is not None:
+            updates = {}
+            for profile_id, capacity_key, clear_key in (
+                (PROFILE_A_ID, CONF_SHARED_PROFILE_A_CAPACITY_FORM, CONF_SHARED_PROFILE_A_CAPACITY_CLEAR_FORM),
+                (PROFILE_B_ID, CONF_SHARED_PROFILE_B_CAPACITY_FORM, CONF_SHARED_PROFILE_B_CAPACITY_CLEAR_FORM),
+            ):
+                if ev_input.get(clear_key):
+                    updates[profile_id] = None
+                elif capacity_key in ev_input:
+                    updates[profile_id] = ev_input[capacity_key]
+            store = self._get_shared_capacity_store()
+            if store is None:
+                if updates:
+                    raise RuntimeError("Logical EV vehicle storage is unavailable")
+            elif updates:
+                await save_shared_profile_capacities(store, updates)
+        return self._save_ev_options(ev_input)
+
     def _get_option(self, key: str, default: Any = None) -> Any:
         """Get option value with fallback to data for backwards compatibility."""
         return self.config_entry.options.get(
@@ -15866,7 +15911,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 if now_standalone and (not was_standalone or not has_credentials):
                     return await self.async_step_zaptec_cloud_options()
 
-                return self._save_ev_options(user_input)
+                try:
+                    return await self._save_ev_options_and_capacities(user_input)
+                except (RuntimeError, ValueError) as err:
+                    _LOGGER.error("Logical EV capacity options were not saved: %s", err)
+                    errors["base"] = "shared_profile_capacity_save_failed"
 
         # Build schema for EV and OCPP options
         current_ev_enabled = self._get_option(CONF_EV_CHARGING_ENABLED, False)
@@ -15902,6 +15951,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         )
         current_shared_profile_b_soc_entity = _normalize_optional_entity(
             self._get_option(CONF_SHARED_LOADPOINT_PROFILE_B_SOC_ENTITY)
+        )
+        from .automations.shared_loadpoint import PROFILE_A_ID, PROFILE_B_ID
+        current_shared_profile_a_capacity = self._shared_profile_capacity(PROFILE_A_ID)
+        current_shared_profile_b_capacity = self._shared_profile_capacity(PROFILE_B_ID)
+        shared_binding_configured = bool(
+            self._get_option(CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY)
+            and self._get_option(CONF_SHARED_LOADPOINT_PROFILE_A_NAME)
+            and self._get_option(CONF_SHARED_LOADPOINT_PROFILE_B_NAME)
         )
 
         schema_dict: dict[vol.Marker, Any] = {
@@ -16044,6 +16101,17 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 ),
             ): EntitySelector(EntitySelectorConfig(domain="sensor")),
             vol.Optional(
+                CONF_SHARED_PROFILE_A_CAPACITY_FORM,
+                description=(
+                    {"suggested_value": current_shared_profile_a_capacity}
+                    if current_shared_profile_a_capacity is not None else None
+                ),
+            ): NumberSelector(NumberSelectorConfig(
+                min=1.0, max=250.0, step=0.1,
+                mode=NumberSelectorMode.BOX, unit_of_measurement="kWh",
+            )),
+            vol.Optional(CONF_SHARED_PROFILE_A_CAPACITY_CLEAR_FORM, default=False): BooleanSelector(),
+            vol.Optional(
                 CONF_SHARED_LOADPOINT_PROFILE_B_NAME,
                 default=self._get_option(CONF_SHARED_LOADPOINT_PROFILE_B_NAME, ""),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
@@ -16059,6 +16127,17 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     else None
                 ),
             ): EntitySelector(EntitySelectorConfig(domain="sensor")),
+            vol.Optional(
+                CONF_SHARED_PROFILE_B_CAPACITY_FORM,
+                description=(
+                    {"suggested_value": current_shared_profile_b_capacity}
+                    if current_shared_profile_b_capacity is not None else None
+                ),
+            ): NumberSelector(NumberSelectorConfig(
+                min=1.0, max=250.0, step=0.1,
+                mode=NumberSelectorMode.BOX, unit_of_measurement="kWh",
+            )),
+            vol.Optional(CONF_SHARED_PROFILE_B_CAPACITY_CLEAR_FORM, default=False): BooleanSelector(),
             # Sigenergy EVAC/EVDC charger direct Modbus control
             vol.Optional(
                 CONF_SIGENERGY_CHARGER_ENABLED,
@@ -16114,6 +16193,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 ),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         }
+
+        if shared_binding_configured:
+            # Charger-wide capacity is not a second EV and must not compete
+            # with either logical profile's vehicle record.
+            schema_dict = {
+                marker: selector for marker, selector in schema_dict.items()
+                if marker.schema != CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH
+            }
 
         return self.async_show_form(
             step_id="ev_charging",
@@ -16321,7 +16408,15 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         final_data[CONF_GENERIC_CHARGER_SOC_ENTITY_2] = ev_input.get(
             CONF_GENERIC_CHARGER_SOC_ENTITY_2, ""
         ).strip()
-        generic_capacity = ev_input.get(CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH)
+        generic_capacity = (
+            None if all(ev_input.get(key) for key in (
+                CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY,
+                CONF_SHARED_LOADPOINT_PROFILE_A_NAME,
+                CONF_SHARED_LOADPOINT_PROFILE_A_STATE,
+                CONF_SHARED_LOADPOINT_PROFILE_B_NAME,
+                CONF_SHARED_LOADPOINT_PROFILE_B_STATE,
+            )) else ev_input.get(CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH)
+        )
         if generic_capacity is None:
             final_data.pop(CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH, None)
         else:
@@ -16397,7 +16492,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                                 0
                             ].get("Id", "")
 
-                        return self._save_ev_options(ev_data)
+                        return await self._save_ev_options_and_capacities(ev_data)
                     else:
                         errors["base"] = "zaptec_auth_failed"
                         _LOGGER.error("Zaptec Cloud auth failed: %s", message)

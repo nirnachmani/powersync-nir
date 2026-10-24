@@ -104,6 +104,43 @@ def _options(**overrides):
     return options
 
 
+def test_options_capacity_saves_in_vehicle_records_and_clear_does_not_touch_sibling():
+    store = FakeStore()
+    store._data["vehicle_charging_configs"] = [
+        {"vehicle_id": PROFILE_A_ID, "battery_capacity_kwh": 37.1, "priority": 2},
+        {"vehicle_id": PROFILE_B_ID, "battery_capacity_kwh": 72},
+    ]
+    persist = shared_loadpoint.save_shared_profile_capacities
+    asyncio.run(persist(store, {PROFILE_A_ID: 81, PROFILE_B_ID: None}))
+    by_id = {row["vehicle_id"]: row for row in store._data["vehicle_charging_configs"]}
+    assert by_id[PROFILE_A_ID] == {
+        "vehicle_id": PROFILE_A_ID, "battery_capacity_kwh": 81, "priority": 2,
+    }
+    assert by_id[PROFILE_B_ID] == {"vehicle_id": PROFILE_B_ID}
+    assert store.saves == 1
+    asyncio.run(persist(store, {PROFILE_A_ID: 81, PROFILE_B_ID: None}))
+    assert store.saves == 1
+
+
+def test_options_capacity_rejects_invalid_without_partial_save():
+    store = FakeStore()
+    store._data["vehicle_charging_configs"] = [
+        {"vehicle_id": PROFILE_A_ID, "battery_capacity_kwh": 37.1},
+    ]
+    try:
+        asyncio.run(shared_loadpoint.save_shared_profile_capacities(
+            store, {PROFILE_A_ID: 81, PROFILE_B_ID: -3},
+        ))
+    except ValueError:
+        pass
+    else:
+        assert False, "Invalid capacity must be rejected"
+    assert store._data["vehicle_charging_configs"] == [
+        {"vehicle_id": PROFILE_A_ID, "battery_capacity_kwh": 37.1},
+    ]
+    assert store.saves == 0
+
+
 def test_binding_resolves_two_profiles_and_fails_closed():
     binding = SharedLoadpointBinding.from_options(_options())
 
@@ -162,6 +199,45 @@ def test_selected_profile_resolves_to_one_physical_generic_command_target():
     assert resolved["vehicle_vin"] == "generic_ev"
     assert resolved["active_logical_vehicle_id"] == PROFILE_A_ID
     assert resolved["max_charge_amps"] == 20
+
+
+def test_shared_command_uses_current_physical_options_not_stale_per_ev_entities():
+    entry = _entry(**_options(
+        generic_charger_switch_entity="switch.current",
+        generic_charger_amps_entity="number.current",
+        generic_charger_status_entity="sensor.current",
+        generic_charger_power_entity="sensor.power",
+    ))
+    params = {"charger_type": "generic", "charger_switch_entity": "switch.old",
+              "charger_amps_entity": "number.old", "max_charge_amps": 16}
+    resolved = shared_loadpoint.resolve_shared_loadpoint_command(
+        FakeHass("tank"), entry, PROFILE_A_ID, params,
+    )
+    assert resolved["charger_switch_entity"] == "switch.current"
+    assert resolved["charger_amps_entity"] == "number.current"
+    assert resolved["charger_status_entity"] == "sensor.current"
+    assert resolved["charger_power_entity"] == "sensor.power"
+    assert resolved["max_charge_amps"] == 16
+    assert params["charger_switch_entity"] == "switch.old"
+    empty = shared_loadpoint.resolve_shared_loadpoint_command(
+        FakeHass("tank"), _entry(**_options()), PROFILE_A_ID, params,
+    )
+    assert empty["charger_switch_entity"] == ""
+
+
+def test_shared_command_uses_current_evac_transport_not_stale_profile_transport():
+    entry = _entry(**_options(
+        generic_charger_enabled=False, sigenergy_charger_enabled=True,
+        sigenergy_charger_type="evac", sigenergy_charger_host="current-host",
+        sigenergy_charger_port=502, sigenergy_charger_slave_id=2,
+    ))
+    resolved = shared_loadpoint.resolve_shared_loadpoint_command(
+        FakeHass("tank"), entry, PROFILE_A_ID,
+        {"charger_type": "sigenergy", "sigenergy_charger_host": "old-host"},
+    )
+    assert resolved["sigenergy_charger_host"] == "current-host"
+    assert resolved["sigenergy_charger_port"] == 502
+    assert resolved["sigenergy_charger_slave_id"] == 2
 
 
 def test_inactive_or_unknown_profile_cannot_resolve_a_shared_command():

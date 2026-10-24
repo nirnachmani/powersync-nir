@@ -551,6 +551,108 @@ def test_ev_charging_save_persists_explicit_shared_profile_soc_entity_clears():
     assert saved["unrelated_option"] == "must-survive"
 
 
+def test_shared_capacity_options_edit_vehicle_records_not_duplicate_options():
+    form = ast.get_source_segment(CONFIG_FLOW_PATH.read_text(), _options_flow_method("async_step_ev_charging"))
+    save = ast.get_source_segment(CONFIG_FLOW_PATH.read_text(), _options_flow_method("_save_ev_options"))
+    assert form is not None and save is not None
+    for key in ("CONF_SHARED_PROFILE_A_CAPACITY_FORM", "CONF_SHARED_PROFILE_B_CAPACITY_FORM"):
+        assert key in form
+        assert key not in save  # UI-only: stored in the shared EV vehicle record
+    assert "_save_ev_options_and_capacities" in form
+    assert "current_shared_profile_a_capacity" in form
+    assert "current_shared_profile_b_capacity" in form
+
+
+def test_options_flow_capacity_save_round_trips_through_shared_vehicle_store():
+    from test_ev_vehicle_status import _power_sync_module
+    _power_sync_module()
+    import importlib
+
+    shared = importlib.import_module("power_sync.automations.shared_loadpoint")
+    method = _options_flow_method("_save_ev_options_and_capacities")
+    namespace = {"__package__": "power_sync", "Any": object, "FlowResult": object,
+                 "CONF_SHARED_PROFILE_A_CAPACITY_FORM": "shared_loadpoint_profile_a_capacity_kwh",
+                 "CONF_SHARED_PROFILE_B_CAPACITY_FORM": "shared_loadpoint_profile_b_capacity_kwh",
+                 "CONF_SHARED_PROFILE_A_CAPACITY_CLEAR_FORM": "shared_loadpoint_profile_a_capacity_clear",
+                 "CONF_SHARED_PROFILE_B_CAPACITY_CLEAR_FORM": "shared_loadpoint_profile_b_capacity_clear"}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(CONFIG_FLOW_PATH), "exec"), namespace)
+
+    class Store:
+        def __init__(self):
+            self._data = {"vehicle_charging_configs": [
+                {"vehicle_id": shared.PROFILE_A_ID, "battery_capacity_kwh": 37.1},
+                {"vehicle_id": shared.PROFILE_B_ID, "battery_capacity_kwh": 55},
+            ]}
+            self.saves = 0
+        async def async_save(self):
+            self.saves += 1
+    store = Store()
+    flow = SimpleNamespace(_get_shared_capacity_store=lambda: store,
+                           _save_ev_options=lambda data: {"options": data})
+    data = {
+        "generic_charger_enabled": True,
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_ev",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Future EV",
+        "shared_loadpoint_profile_b_state": "future",
+        "shared_loadpoint_profile_a_capacity_kwh": 82,
+        "shared_loadpoint_profile_b_capacity_kwh": None,
+    }
+    result = asyncio.run(namespace["_save_ev_options_and_capacities"](flow, data))
+    assert result["options"] is data
+    assert store.saves == 1
+    records = {row["vehicle_id"]: row for row in store._data["vehicle_charging_configs"]}
+    assert records[shared.PROFILE_A_ID]["battery_capacity_kwh"] == 82
+    assert "battery_capacity_kwh" not in records[shared.PROFILE_B_ID]
+
+
+def test_options_capacity_omission_preserves_existing_vehicle_capacity():
+    from test_ev_vehicle_status import _power_sync_module
+    _power_sync_module()
+    import importlib
+    shared = importlib.import_module("power_sync.automations.shared_loadpoint")
+    method = _options_flow_method("_save_ev_options_and_capacities")
+    namespace = {"__package__": "power_sync", "Any": object, "FlowResult": object,
+                 "CONF_SHARED_PROFILE_A_CAPACITY_FORM": "shared_loadpoint_profile_a_capacity_kwh",
+                 "CONF_SHARED_PROFILE_B_CAPACITY_FORM": "shared_loadpoint_profile_b_capacity_kwh",
+                 "CONF_SHARED_PROFILE_A_CAPACITY_CLEAR_FORM": "shared_loadpoint_profile_a_capacity_clear",
+                 "CONF_SHARED_PROFILE_B_CAPACITY_CLEAR_FORM": "shared_loadpoint_profile_b_capacity_clear"}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(CONFIG_FLOW_PATH), "exec"), namespace)
+    class Store:
+        _data = {"vehicle_charging_configs": [
+            {"vehicle_id": shared.PROFILE_A_ID, "battery_capacity_kwh": 37.1},
+            {"vehicle_id": shared.PROFILE_B_ID, "battery_capacity_kwh": 71},
+        ]}
+        async def async_save(self):
+            pass
+    flow = SimpleNamespace(_get_shared_capacity_store=lambda: Store(),
+                           _save_ev_options=lambda data: {"options": data})
+    base = {"generic_charger_enabled": True,
+            "shared_loadpoint_connected_vehicle_entity": "sensor.connected_ev",
+            "shared_loadpoint_profile_a_name": "Tank", "shared_loadpoint_profile_a_state": "tank",
+            "shared_loadpoint_profile_b_name": "Future", "shared_loadpoint_profile_b_state": "future"}
+    asyncio.run(namespace["_save_ev_options_and_capacities"](flow, base))
+    assert Store._data["vehicle_charging_configs"][0]["battery_capacity_kwh"] == 37.1
+    asyncio.run(namespace["_save_ev_options_and_capacities"](
+        flow, {**base, "shared_loadpoint_profile_b_capacity_clear": True}))
+    assert "battery_capacity_kwh" not in Store._data["vehicle_charging_configs"][1]
+
+
+def test_shared_options_retire_global_capacity_without_copying_it_to_profiles():
+    submitted = {"generic_charger_enabled": True,
+                 "generic_charger_battery_capacity_kwh": 37.1,
+                 "shared_loadpoint_connected_vehicle_entity": "sensor.connected_ev",
+                 "shared_loadpoint_profile_a_name": "Tank",
+                 "shared_loadpoint_profile_a_state": "tank",
+                 "shared_loadpoint_profile_b_name": "Future",
+                 "shared_loadpoint_profile_b_state": "future"}
+    saved = _save_ev_options({"generic_charger_battery_capacity_kwh": 37.1}, submitted)
+    assert "generic_charger_battery_capacity_kwh" not in saved
+    assert "shared_loadpoint_profile_a_capacity_kwh" not in saved
+    assert "shared_loadpoint_profile_b_capacity_kwh" not in saved
+
+
 def test_ev_charging_generic_capacity_round_trip_and_clear():
     """Anonymous chargers expose one optional, clearable capacity fallback."""
     source = CONFIG_FLOW_PATH.read_text()

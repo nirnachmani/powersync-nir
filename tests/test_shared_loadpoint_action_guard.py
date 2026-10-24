@@ -100,6 +100,9 @@ class _Entry:
     data = {}
     options = {
         "generic_charger_enabled": True,
+        "generic_charger_switch_entity": "switch.shared_ev",
+        "generic_charger_amps_entity": "number.shared_ev_amps",
+        "generic_charger_power_entity": "sensor.shared_ev_power",
         "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
         "shared_loadpoint_profile_a_name": "Tank",
         "shared_loadpoint_profile_a_state": "tank",

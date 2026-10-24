@@ -1,6 +1,8 @@
-<!-- release: v2.12.1478-nir.4 -->
+<!-- release: v2.12.1478-nir.5 -->
 
 ## PowerSync Nir fork
-- An idle Generic Charger with its switch off no longer appears as externally commanded just because its retained current limit reads 32 A. The physical 32 A limit remains visible as a target; no charging command or mode is changed.
-- Logical EVs now read and save their own usable battery capacity, independently of the old charger-wide capacity fallback. Old charger-as-EV settings remain stored for rollback; no capacity is copied to A or B. Until a profile's own capacity is configured, its effective capacity is a **60 kWh default estimate**, not the other EV's 37.1 kWh.
-- Focused tests and private regression gates passed. This release does not change live Home Assistant settings or operate the charger; update through HACS in an idle/rollback window.
+- Both logical EVs now display the physical Generic Charger entities configured in integration options. Physical switch/current/status/power settings (or selected Sigenergy EVAC transport) remain owned by the integration, not separate per-EV app records; conflicting app edits are rejected and stale vehicle overrides cannot drive shared commands.
+- Logical EV A and B usable capacities can be edited or explicitly cleared in integration options. They use the same per-EV vehicle records as the app/dashboard; an omitted field preserves its existing capacity. The old charger-wide Generic capacity no longer applies to bound logical EVs.
+- Charging-schedule preview and Price-Level projection use each logical EV's own capacity instead of treating a Generic-backed logical EV as an anonymous charger.
+- The fork's maintainer inventory and repository instructions now identify this split as an intentional upstream divergence requiring hunk-by-hunk review.
+- Local private regression gates and focused capacity/app/preview tests passed. This release does not install or restart Home Assistant and does not operate the charger; update through HACS in an idle, backed-up window.
