@@ -1,7 +1,6 @@
-<!-- release: v2.12.1447-nir.2 -->
+<!-- release: v2.12.1478-nir.1 -->
 
-## PowerSync Nir private fork
-
-- Port three previously rejected AI explanation updates: defer unused ChatGPT host registration, avoid opening unselected ChatGPT credential storage at startup while restoring it on selection, and add a configurable 30–600-second local AI timeout with one request budget across retries.
-- Preserve the existing shared logical-EV safeguards, Android API compatibility, and no-paywall optimiser boundary; no HA deployment was performed.
-- Keep the fork private. This release is available from the private GitHub repository but is **not installable through standard HACS**, which does not support private repositories.
+## PowerSync Nir fork
+- Bring the fork through upstream v2.12.1478 in strict chronological review. Port relevant Amber billing/current prices, Sigenergy export and manual-discharge controls, EV battery-hold release, optimiser reserve/export/normal-mode fixes, dashboard provenance, and AI explanation improvements; adapt the custom-duration no-op to avoid stale reload flags.
+- Reserve shared managed-EV import headroom and level total site import across Sigenergy spread-charge windows, without Tesla-only dispatch controls. Reject native Tesla Powerwall-only controls and skip release bookkeeping. Preserve shared logical-EV safeguards, Android API compatibility, upstream attribution and the no-paywall optimiser boundary.
+- Add this repository to HACS as a **custom integration repository** for installation and updates; it is not in the default HACS catalogue. This release did not deploy to Home Assistant.

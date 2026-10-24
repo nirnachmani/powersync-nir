@@ -1,9 +1,9 @@
-# PowerSync private fork
+# PowerSync Nir fork
 
-- **Repository/release slug:** `nirnachmani/powersync-nir` (private)
+- **Repository/release slug:** `nirnachmani/powersync-nir` (public HACS custom repository)
 - **Home Assistant integration:** `PowerSync`
 - HA domain/package: `power_sync`
-- **Upstream:** `bolagnaise/PowerSync`, currently based on `v2.12.1363`
+- **Upstream:** `bolagnaise/PowerSync`, changes reviewed through `v2.12.1478` (selectively ported)
 
 ## Scope
 
@@ -11,11 +11,11 @@ This fork adds two logical EV profiles sharing one selected physical Generic Cha
 
 ## Android compatibility exception
 
-The released PowerSync Android app hard-codes `/api/power_sync/...`. The private fork keeps that HTTP namespace and response contract. Therefore it replaces—not coexists with—the original PowerSync integration in an HA instance. The versioned static route/vehicle-field baseline and controlled-capture procedure are in [`tests/contracts/android_app/`](tests/contracts/android_app/README.md).
+The released PowerSync Android app hard-codes `/api/power_sync/...`. This fork keeps that HTTP namespace and response contract. Therefore it replaces—not coexists with—the original PowerSync integration in an HA instance. The versioned static route/vehicle-field baseline and controlled-capture procedure are in [`tests/contracts/android_app/`](tests/contracts/android_app/README.md).
 
 ## Deployment
 
-Deployment is separately authorized work, not an updater outcome. After explicit authorization, deploy only the private `main` branch through the documented updater gates. Disable/remove the original component before enabling this replacement. Roll back by restoring the prior verified private release and restarting Home Assistant.
+Deployment is separately authorized work, not an updater outcome. After explicit authorization, deploy only the fork's `main` branch through the documented updater gates. Disable/remove the original component before enabling this replacement. Roll back by restoring the prior verified fork release and restarting Home Assistant.
 
 ## Non-goals
 
