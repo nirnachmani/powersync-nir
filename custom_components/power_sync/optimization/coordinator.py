@@ -13306,7 +13306,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         max_grid_import_w = self._normalize_optional_power_w(
             self._config.max_grid_import_w
         )
-        cap_by_slot = max_grid_import_w is not None
         new_actions: list[ScheduleAction] = list(actions)
         fixed_manual_positions = self._manual_control_slot_indices(
             actions,
@@ -13334,28 +13333,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 0.0,
                 min(max_charge_w, max_grid_import_w - load_w - ev_w + solar_w),
             )
-
-        def _spread_power_by_cap(total_wh: float, caps_w: list[float]) -> list[float]:
-            """Spread total Wh evenly while respecting per-slot caps."""
-            if not caps_w:
-                return []
-            remaining = min(total_wh, sum(caps_w) * interval_hours)
-            output = [0.0] * len(caps_w)
-            open_slots = set(range(len(caps_w)))
-            while open_slots and remaining > 1e-6:
-                target_w = remaining / (len(open_slots) * interval_hours)
-                capped_now = [
-                    pos for pos in open_slots if caps_w[pos] <= target_w + 1e-6
-                ]
-                if not capped_now:
-                    for pos in open_slots:
-                        output[pos] = target_w
-                    break
-                for pos in capped_now:
-                    output[pos] = caps_w[pos]
-                    remaining -= caps_w[pos] * interval_hours
-                    open_slots.remove(pos)
-            return [round(max(0.0, value), 1) for value in output]
 
         def _advance_soc(soc: float, action: Any) -> float:
             if capacity_wh <= 0:
@@ -13457,23 +13434,34 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         soc_cursor = _advance_soc(soc_cursor, new_actions[pos])
                     continue
 
-            if cap_by_slot:
-                target_by_pos = _spread_power_by_cap(
-                    charge_wh,
-                    [_slot_charge_cap_w(pos) for pos in spread_positions],
+            # Level total site import rather than battery watts: LP-managed EV
+            # demand is separate from the load forecast, and each physical
+            # loadpoint contributes only its planned demand in this slot.
+            net_loads = [
+                (_forecast_kw(load_forecast, pos) - _forecast_kw(solar_forecast, pos)) * 1000.0
+                + max(0.0, float(getattr(actions[pos], "ev_charge_w", 0.0) or 0.0))
+                for pos in spread_positions
+            ]
+            caps = [_slot_charge_cap_w(pos) for pos in spread_positions]
+            low = min(net_loads)
+            high = max(base + cap for base, cap in zip(net_loads, caps))
+            if max_grid_import_w is not None:
+                high = min(high, max_grid_import_w)
+            required_w = min(charge_wh / interval_hours, sum(caps))
+            for _ in range(64):
+                middle = (low + high) / 2
+                delivered_w = sum(
+                    max(0.0, min(cap, middle - base))
+                    for base, cap in zip(net_loads, caps)
                 )
-            else:
-                target_w = min(
-                    max_charge_w,
-                    charge_wh / (len(spread_positions) * interval_hours),
-                )
-                target_w = round(max(0.0, target_w), 1)
-                target_by_pos = [target_w] * len(spread_positions)
-
-            if not any(target_w > 0 for target_w in target_by_pos):
-                for pos in range(start, end):
-                    soc_cursor = _advance_soc(soc_cursor, new_actions[pos])
-                continue
+                if delivered_w < required_w:
+                    low = middle
+                else:
+                    high = middle
+            target_by_pos = [
+                max(0.0, min(cap, round(high - base, 1)))
+                for base, cap in zip(net_loads, caps)
+            ]
 
             spread_targets = dict(zip(spread_positions, target_by_pos))
             for pos in range(start, end):

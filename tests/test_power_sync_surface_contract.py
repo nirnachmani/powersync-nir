@@ -214,6 +214,20 @@ _NEGATIVE_IMPORT_SOLAR_DIFF_SHA256 = (
     "1793df84bc2bb8f9afdbac1c291b7b393a5a5adfce20da1a9d6160778ea53940"
 )
 
+# Exact generic slot-cap adaptation of upstream 2c875c9b. The prior private
+# optimizer contract is checked independently before allowing this delta.
+_MANAGED_EV_HEADROOM_SOURCE = "fb4684ff9ac2b582b6e32543fcf07523d9dfb84d"
+_MANAGED_EV_HEADROOM_DIFF_SHA256 = (
+    "4627a4eeb4353c6f305da989d0f4ef053c68dd5a3cf7a79f062d2223b3294fde"
+)
+
+# Exact generic total-grid leveling adaptation of upstream b50a2cba. The
+# preceding 2c875c9b source is checked separately; no Tesla actuator follows.
+_TOTAL_GRID_IMPORT_SOURCE = "07bdfcad76e2d758f65949d7d6281eb4a2ff52fa"
+_TOTAL_GRID_IMPORT_DIFF_SHA256 = (
+    "0d507adf8da331a1a3bc155c6618ea8eefd90b0b3f1107dc899d529ac9777e94"
+)
+
 # Exact, path-specific exception for the reviewed Cost Neutral reachable-
 # deadline fix. The normal optimizer baseline contract stays intact: only the
 # complete b20bffb2 source delta is admitted.
@@ -295,6 +309,26 @@ def _negative_import_solar_diff_is_allowlisted(actual: str) -> bool:
         hashlib.sha256(diff.encode("utf-8")).hexdigest()
         == _NEGATIVE_IMPORT_SOLAR_DIFF_SHA256
     )
+
+
+def _managed_ev_headroom_diff_is_allowlisted(actual: str) -> bool:
+    expected = _git_show(_MANAGED_EV_HEADROOM_SOURCE, COORDINATOR)
+    diff = "\n".join(difflib.unified_diff(
+        expected.splitlines(), actual.splitlines(),
+        fromfile="private_fb4684ff", tofile="managed_ev_headroom_candidate",
+        lineterm="",
+    ))
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _MANAGED_EV_HEADROOM_DIFF_SHA256
+
+
+def _total_grid_import_diff_is_allowlisted(actual: str) -> bool:
+    expected = _git_show(_TOTAL_GRID_IMPORT_SOURCE, COORDINATOR)
+    diff = "\n".join(difflib.unified_diff(
+        expected.splitlines(), actual.splitlines(),
+        fromfile="private_07bdfcad", tofile="total_grid_import_candidate",
+        lineterm="",
+    ))
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _TOTAL_GRID_IMPORT_DIFF_SHA256
 
 
 def _cost_neutral_reachable_deadline_diff_is_allowlisted(
@@ -438,7 +472,13 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
         if relative_path == COORDINATOR:
             source = _git_show(_NEGATIVE_IMPORT_SOLAR_SOURCE, COORDINATOR)
             assert _amber_coordinator_diff_is_allowlisted(expected, source)
-            assert _negative_import_solar_diff_is_allowlisted(actual)
+            assert _negative_import_solar_diff_is_allowlisted(
+                _git_show(_MANAGED_EV_HEADROOM_SOURCE, COORDINATOR)
+            )
+            assert _managed_ev_headroom_diff_is_allowlisted(
+                _git_show(_TOTAL_GRID_IMPORT_SOURCE, COORDINATOR)
+            )
+            assert _total_grid_import_diff_is_allowlisted(actual)
         elif relative_path == BATTERY_OPTIMIZER:
             # Preserve proof that e3c17217 itself contains only the earlier,
             # reviewed solar-refill and reachable-deadline changes before
@@ -481,13 +521,23 @@ def test_negative_import_solar_allowlist_rejects_a_nearby_policy_mutation():
     actual = (ROOT / COORDINATOR).read_text(encoding="utf-8").replace(
         "\r\n", "\n"
     )
+    prior = _git_show(_MANAGED_EV_HEADROOM_SOURCE, COORDINATOR)
 
-    assert _negative_import_solar_diff_is_allowlisted(actual)
-    assert not _negative_import_solar_diff_is_allowlisted(
-        actual.replace("from ..const import (\n    DOMAIN,", "from ..const import (", 1)
+    assert _negative_import_solar_diff_is_allowlisted(prior)
+    headroom = _git_show(_TOTAL_GRID_IMPORT_SOURCE, COORDINATOR)
+    assert _managed_ev_headroom_diff_is_allowlisted(headroom)
+    assert not _managed_ev_headroom_diff_is_allowlisted(
+        headroom.replace("- load_w - ev_w + solar_w", "- load_w + solar_w", 1)
+    )
+    assert _total_grid_import_diff_is_allowlisted(actual)
+    assert not _total_grid_import_diff_is_allowlisted(
+        actual.replace("middle - base", "middle", 1)
     )
     assert not _negative_import_solar_diff_is_allowlisted(
-        actual.replace(
+        prior.replace("from ..const import (\n    DOMAIN,", "from ..const import (", 1)
+    )
+    assert not _negative_import_solar_diff_is_allowlisted(
+        prior.replace(
             "enabled=bool(production and production.can_project()),",
             "enabled=True,",
             1,

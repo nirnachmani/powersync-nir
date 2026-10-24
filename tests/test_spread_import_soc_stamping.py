@@ -514,3 +514,50 @@ def test_sigenergy_shared_ev_spread_retains_physical_import_headroom(opt_module)
     assert sum(a.battery_charge_w for a in result.actions) == pytest.approx(23300, abs=.1)
     for action in result.actions:
         assert action.battery_charge_w + action.ev_charge_w + 500 <= 16100 + .1
+
+
+@pytest.mark.parametrize("import_limit", [None, 14900])
+def test_sigenergy_spread_levels_total_grid_draw_not_battery_power(opt_module, import_limit):
+    coordinator = _coordinator(opt_module, "amber")
+    coordinator.battery_system = "sigenergy"
+    coordinator._config.spread_import_enabled = True
+    coordinator._config.interval_minutes = 60
+    coordinator._config.battery_capacity_wh = 100000
+    coordinator._config.max_charge_w = 14000
+    coordinator._config.max_grid_import_w = import_limit
+    start = datetime(2026, 5, 3, 2, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start + timedelta(hours=i), action="charge",
+            power_w=6000 if i == 0 else 10000,
+            battery_charge_w=6000 if i == 0 else 10000,
+            ev_charge_w=4000 if i == 0 else 0, soc=.1,
+        ) for i in range(2)
+    ]
+    result = coordinator._spread_import_schedule(
+        opt_module.OptimizationSchedule(actions, 0, 0, start),
+        [.1, .1], [False, False], .1,
+        load_forecast=[3, 3], solar_forecast=[0, 0],
+    )
+    assert [a.battery_charge_w for a in result.actions] == pytest.approx([6000, 10000])
+    assert [a.ev_charge_w for a in result.actions] == [4000, 0]
+    assert [a.battery_charge_w + a.ev_charge_w + 3000 for a in result.actions] == pytest.approx([13000, 13000])
+    assert sum(a.battery_charge_w for a in result.actions) == pytest.approx(16000)
+
+
+def test_sigenergy_spread_clears_charge_when_no_slot_has_import_headroom(opt_module):
+    coordinator = _coordinator(opt_module, "amber")
+    coordinator.battery_system = "sigenergy"
+    coordinator._config.spread_import_enabled = True
+    coordinator._config.interval_minutes = 60
+    coordinator._config.battery_capacity_wh = 100000
+    coordinator._config.max_charge_w = 14000
+    coordinator._config.max_grid_import_w = 1000
+    start = datetime(2026, 5, 3, 2, tzinfo=timezone.utc)
+    action = opt_module.ScheduleAction(start, "charge", 5000, soc=.1, battery_charge_w=5000)
+    result = coordinator._spread_import_schedule(
+        opt_module.OptimizationSchedule([action], 0, 0, start),
+        [.1], [False], .1, load_forecast=[2], solar_forecast=[0],
+    )
+    assert result.actions[0].action == "self_consumption"
+    assert result.actions[0].battery_charge_w == 0
