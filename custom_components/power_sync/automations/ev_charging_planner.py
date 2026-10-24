@@ -5972,7 +5972,22 @@ class AutoScheduleExecutor:
             live_status: Current Powerwall/system status with battery_soc, solar_power, etc.
             current_price_cents: Current import price (from Amber/tariff)
         """
+        from .shared_loadpoint import is_retired_shared_vehicle_id
         for vehicle_id, settings in self._settings.items():
+            if self.config_entry and is_retired_shared_vehicle_id(self.config_entry, vehicle_id):
+                if settings.enabled:
+                    reported = getattr(self, "_reported_retired_shared_plans", set())
+                    if vehicle_id not in reported:
+                        _LOGGER.warning(
+                            "Parked Smart Schedule for %s is enabled while a shared "
+                            "logical EV is bound; it will not execute. Review at an idle window.",
+                            vehicle_id,
+                        )
+                        reported.add(vehicle_id)
+                        self._reported_retired_shared_plans = reported
+                # Preserve the old record and any in-flight state for review;
+                # neither start a second physical session nor silently stop one.
+                continue
             if not settings.enabled:
                 self._clear_start_failure(vehicle_id)
                 self._clear_active_charging_preserve_intent(
@@ -6909,8 +6924,11 @@ class AutoScheduleExecutor:
     ) -> Dict[str, float]:
         """Return hourly site capacity already reserved by other EV plans."""
         reserved: Dict[str, float] = {}
+        from .shared_loadpoint import is_retired_shared_vehicle_id
         for other_id, other_state in self._state.items():
             if vehicle_ids_match(vehicle_id, other_id):
+                continue
+            if self.config_entry and is_retired_shared_vehicle_id(self.config_entry, other_id):
                 continue
             other_settings = self._settings.get(other_id)
             if other_settings is None or not other_settings.enabled:

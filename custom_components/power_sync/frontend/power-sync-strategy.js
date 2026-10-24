@@ -5431,7 +5431,10 @@ class PowerSyncEVPanel extends HTMLElement {
   }
 
   _loadpoints() {
-    return Array.isArray(this._data?.status?.loadpoints) ? this._data.status.loadpoints : [];
+    const loadpoints = Array.isArray(this._data?.status?.loadpoints) ? this._data.status.loadpoints : [];
+    return this._data?.status?.shared_loadpoint_active
+      ? loadpoints.filter((lp) => !lp.shared_loadpoint || !!lp.vehicle_id)
+      : loadpoints;
   }
 
   _bydVehicles() {
@@ -6348,7 +6351,11 @@ class PowerSyncEVPanel extends HTMLElement {
   _visibleSmartScheduleEntries() {
     const settings = this._data?.autoStatus?.settings || {};
     const backends = this._data?.status?.enabled_charger_backends;
+    const boundId = this._data?.status?.shared_loadpoint_id;
     return Object.entries(settings).filter(([vehicleId, vehicle]) => {
+      if (this._data?.status?.shared_loadpoint_active &&
+          (boundId ? vehicleId === boundId :
+            (vehicleId === 'generic_ev' || vehicleId === 'sigenergy_charger'))) return false;
       if (vehicle?.enabled) return true; // Never conceal an inconsistent active plan.
       if (vehicleId === 'generic_ev') return backends?.generic !== false;
       if (vehicleId === 'sigenergy_charger') return backends?.sigenergy !== false;
@@ -6380,6 +6387,11 @@ class PowerSyncEVPanel extends HTMLElement {
   _smartScheduleCard() {
     const vehicleConfigs = this._data?.vehicleConfigs || [];
     const entries = this._visibleSmartScheduleEntries();
+    const oldSettings = this._data?.autoStatus?.settings || {};
+    const boundId = this._data?.status?.shared_loadpoint_id;
+    const legacyPlanEnabled = this._data?.status?.shared_loadpoint_active &&
+      (boundId ? oldSettings[boundId]?.enabled :
+        (oldSettings.generic_ev?.enabled || oldSettings.sigenergy_charger?.enabled));
     const dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
     const rows = entries.length ? entries.map(([vehicleId, vehicle]) => {
       const enabled = !!vehicle.enabled;
@@ -6438,6 +6450,7 @@ class PowerSyncEVPanel extends HTMLElement {
           <div class="mode-title">Smart Schedule</div>
           <div class="pill ${anyEnabled ? 'on' : ''}">${anyEnabled ? 'On' : 'Off'}</div>
         </div>
+        ${legacyPlanEnabled ? this._noticeHtml('warn', 'A legacy EV Smart Schedule is still enabled in storage. It cannot control a shared logical EV; review its configuration.') : ''}
         <div class="smart-list">${rows}</div>
       </div>
     `;
@@ -6506,7 +6519,7 @@ class PowerSyncEVPanel extends HTMLElement {
     if (!loadpoint) return;
     await this._runCommand(
       'command:start',
-      this._commandPath(loadpoint.loadpoint_id),
+      this._commandPath(loadpoint.vehicle_id || loadpoint.loadpoint_id),
       {
         command: 'start_policy_charging',
         policy: this._policy,
@@ -6521,7 +6534,7 @@ class PowerSyncEVPanel extends HTMLElement {
     if (!loadpoint) return;
     await this._runCommand(
       'command:stop',
-      this._commandPath(loadpoint.loadpoint_id),
+      this._commandPath(loadpoint.vehicle_id || loadpoint.loadpoint_id),
       { command: 'stop_charging' },
       'Charging stopped',
     );
@@ -6534,7 +6547,7 @@ class PowerSyncEVPanel extends HTMLElement {
       'command:boost',
       EV_PANEL_PATHS.boost,
       {
-        vehicle_id: loadpoint.loadpoint_id,
+        vehicle_id: loadpoint.vehicle_id || loadpoint.loadpoint_id,
         duration_minutes: this._durationMinutes,
       },
       'Boost started',

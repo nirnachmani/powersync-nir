@@ -64,7 +64,10 @@ def display_snapshot_to_sensor_data(snapshot: dict[str, Any]) -> dict[str, Any]:
         # than labelling a site-wide total as one vehicle when several rows are
         # active. The canonical snapshot retains the explicit site aggregate.
         "ev_power_kw": None,
-        "vehicle_count": len(loadpoints),
+        "vehicle_count": sum(
+            1 for item in loadpoints
+            if not item.get("shared_loadpoint") or item.get("vehicle_id")
+        ),
         "loadpoint_count": len(loadpoints),
         "observation_quality": site.get("observation_quality"),
     }
@@ -74,8 +77,14 @@ def display_snapshot_to_sensor_data(snapshot: dict[str, Any]) -> dict[str, Any]:
     data.update(
         {
             "ev_power_kw": _optional_float_value(active.get("current_power_kw")),
-            "vehicle_id": active.get("vehicle_id") or active.get("loadpoint_id"),
-            "vehicle_name": active.get("vehicle_name") or "EV",
+            "vehicle_id": (
+                active.get("vehicle_id") if active.get("shared_loadpoint")
+                else active.get("vehicle_id") or active.get("loadpoint_id")
+            ),
+            "vehicle_name": (
+                active.get("vehicle_name") if active.get("shared_loadpoint")
+                else active.get("vehicle_name") or "EV"
+            ),
             "ev_soc": active.get("soc"),
             "is_connected": bool(active.get("connected")),
             "is_charging": _is_charging(active),
@@ -93,6 +102,8 @@ def display_snapshot_to_widgets(snapshot: dict[str, Any]) -> list[dict[str, Any]
     surplus_kw = _float_value(site.get("surplus_kw"))
     widgets = []
     for loadpoint in snapshot.get("loadpoints") or []:
+        if loadpoint.get("shared_loadpoint") and not loadpoint.get("vehicle_id"):
+            continue
         power_kw = _optional_float_value(loadpoint.get("current_power_kw"))
         widgets.append(
             {
@@ -103,7 +114,10 @@ def display_snapshot_to_widgets(snapshot: dict[str, Any]) -> list[dict[str, Any]
                 "charger_type": loadpoint.get("charger_type"),
                 "is_charging": _is_charging(loadpoint),
                 "is_connected": bool(loadpoint.get("connected")),
-                "current_soc": loadpoint.get("soc") or 0,
+                "current_soc": (
+                    loadpoint.get("soc") if loadpoint.get("shared_loadpoint")
+                    else loadpoint.get("soc") or 0
+                ),
                 "target_soc": loadpoint.get("target_soc") or 80,
                 "current_power_kw": round(power_kw, 2) if power_kw is not None else None,
                 "source": loadpoint.get("source") or (

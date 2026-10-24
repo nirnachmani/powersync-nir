@@ -171,6 +171,35 @@ def test_unknown_active_ev_power_is_not_projected_as_idle_zero() -> None:
     assert widget["source"] == "unknown"
 
 
+def test_shared_charger_without_selection_is_not_a_generic_vehicle_widget():
+    snapshot = {
+        "shared_loadpoint_active": True,
+        "site": {"ev_power_kw": 4.2},
+        "loadpoints": [{
+            "loadpoint_id": "generic_ev", "vehicle_id": None,
+            "vehicle_name": None, "shared_loadpoint": True,
+            "charger_type": "generic", "soc": None,
+            "connected": True, "actual_charging": True,
+            "current_power_kw": 4.2,
+        }],
+    }
+    assert display_snapshot_to_widgets(snapshot) == []
+    sensor = display_snapshot_to_sensor_data(snapshot)
+    assert sensor["ev_power_kw"] == 4.2
+    assert sensor["vehicle_id"] is None
+    assert sensor["vehicle_name"] is None
+    assert sensor["ev_soc"] is None
+
+
+def test_shared_selected_vehicle_with_unknown_soc_is_not_zero_percent():
+    snapshot = {"site": {}, "loadpoints": [{
+        "loadpoint_id": "generic_ev", "vehicle_id": "shared_ev_profile_a",
+        "vehicle_name": "Tank", "shared_loadpoint": True,
+        "soc": None, "connected": True, "current_power_kw": 0,
+    }]}
+    assert display_snapshot_to_widgets(snapshot)[0]["current_soc"] is None
+
+
 def test_display_coordinator_shares_one_refresh_with_all_consumers() -> None:
     calls = 0
 

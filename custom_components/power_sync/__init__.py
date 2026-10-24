@@ -16139,6 +16139,20 @@ class EVVehicleCommandView(HomeAssistantView):
 
     def _manual_action_params(self, vehicle_vin: str | None) -> dict:
         """Build shared action parameters for mobile/manual EV commands."""
+        from .automations.shared_loadpoint import (
+            PROFILE_A_ID,
+            PROFILE_B_ID,
+            canonical_shared_loadpoint_id,
+            is_retired_shared_vehicle_id,
+        )
+
+        entry_lookup = getattr(self, "_get_powersync_entry", None)
+        entry = entry_lookup() if entry_lookup else None
+        if entry and canonical_shared_loadpoint_id(entry, PROFILE_A_ID) and (
+            vehicle_vin in (None, "_default")
+            or is_retired_shared_vehicle_id(entry, vehicle_vin)
+        ):
+            return {"_shared_loadpoint_rejected": True}
         manual_vehicle_id, manual_params = self._manual_session_identity(vehicle_vin)
         params = dict(manual_params)
         params["vehicle_id"] = manual_vehicle_id
@@ -16149,6 +16163,18 @@ class EVVehicleCommandView(HomeAssistantView):
             params["vehicle_vin"] = None
 
         stored_config = self._get_vehicle_charging_config(vehicle_vin, manual_vehicle_id)
+        if entry and canonical_shared_loadpoint_id(entry, PROFILE_A_ID) and (
+            vehicle_vin in (PROFILE_A_ID, PROFILE_B_ID)
+            and (
+                not stored_config
+                or stored_config.get("charger_type") != (
+                    "generic"
+                    if canonical_shared_loadpoint_id(entry, PROFILE_A_ID) == "generic_ev"
+                    else "sigenergy"
+                )
+            )
+        ):
+            return {"_shared_loadpoint_rejected": True}
         if stored_config:
             if stored_config.get("display_name"):
                 params["vehicle_name"] = stored_config["display_name"]
@@ -16820,8 +16846,36 @@ class EVVehicleCommandView(HomeAssistantView):
                     "error": f"Invalid command. Must be one of: {', '.join(valid_commands)}"
                 }, status=400)
 
-            # Get VIN from request body, or look up from vehicle_id in URL path
-            vehicle_vin = data.get("vin")
+            # The path is authoritative for logical EVs. An old cached URL or
+            # body VIN must not bypass the selected-profile command guard.
+            from .automations.shared_loadpoint import (
+                PROFILE_A_ID, PROFILE_B_ID,
+                canonical_shared_loadpoint_id,
+                resolve_active_shared_profile,
+            )
+            entry = self._get_powersync_entry()
+            shared_physical_id = (
+                canonical_shared_loadpoint_id(entry, PROFILE_A_ID) if entry else None
+            )
+            body_vin = data.get("vin")
+            if shared_physical_id and (
+                vehicle_id in (shared_physical_id, "_default")
+                or body_vin == shared_physical_id
+                or (body_vin in (PROFILE_A_ID, PROFILE_B_ID) and body_vin != vehicle_id)
+            ):
+                return web.json_response({
+                    "success": False, "error": "The charger EV ID is not a command target",
+                }, status=409)
+            if shared_physical_id and vehicle_id in (PROFILE_A_ID, PROFILE_B_ID):
+                if body_vin not in (None, "", vehicle_id) or (
+                    resolve_active_shared_profile(self._hass, entry) != vehicle_id
+                ):
+                    return web.json_response({
+                        "success": False, "error": "The requested logical EV is not selected",
+                    }, status=409)
+                vehicle_vin = vehicle_id
+            else:
+                vehicle_vin = body_vin
             if not vehicle_vin and vehicle_id:
                 # Map vehicle_id (sequential number) to VIN
                 vehicle_vin = self._get_vin_from_vehicle_id(vehicle_id)
@@ -17293,6 +17347,14 @@ class VehicleChargingConfigView(HomeAssistantView):
             vehicle_configs = self._canonicalize_vehicle_configs(
                 data.get("vehicle_charging_configs", [])
             )
+            from .automations.shared_loadpoint import is_retired_shared_vehicle_id
+
+            entries = self._hass.config_entries.async_entries(DOMAIN)
+            if entries:
+                vehicle_configs = [
+                    item for item in vehicle_configs
+                    if not is_retired_shared_vehicle_id(entries[0], item.get("vehicle_id"))
+                ]
             resolved_configs = [
                 {
                     **config,
@@ -17350,6 +17412,14 @@ class VehicleChargingConfigView(HomeAssistantView):
             stored_data = getattr(store, '_data', {}) or {}
             vehicle_configs = stored_data.get("vehicle_charging_configs", [])
             vehicle_id = self._canonical_vehicle_id(vehicle_id, vehicle_configs)
+            from .automations.shared_loadpoint import is_retired_shared_vehicle_id
+
+            entries = self._hass.config_entries.async_entries(DOMAIN)
+            if entries and is_retired_shared_vehicle_id(entries[0], vehicle_id):
+                return web.json_response({
+                    "success": False,
+                    "error": "The former charger EV record is parked while logical EVs are bound",
+                }, status=409)
             data = {**data, "vehicle_id": vehicle_id}
 
             from .automations.ev_vehicle_capacity import (
@@ -18643,6 +18713,27 @@ class ChargingBoostView(HomeAssistantView):
             warnings: list[str] = []
 
             opts = {**self._config_entry.data, **self._config_entry.options}
+            from .automations.shared_loadpoint import (
+                binding_for_entry,
+                resolve_active_shared_profile,
+            )
+
+            if binding_for_entry(self._config_entry):
+                active_profile = resolve_active_shared_profile(self._hass, self._config_entry)
+                if not active_profile or vehicle_id != active_profile:
+                    return web.json_response({
+                        "success": False,
+                        "error": "Select the connected logical EV before starting Boost",
+                    }, status=409)
+                resolved = EVVehicleCommandView(self._hass)._manual_action_params(vehicle_id)
+                if resolved.get("_shared_loadpoint_rejected") or not resolved.get("shared_loadpoint_binding"):
+                    return web.json_response({
+                        "success": False,
+                        "error": "The connected logical EV cannot be controlled",
+                    }, status=409)
+                action_params.update(resolved)
+                boost_vehicle_id = str(resolved["vehicle_id"])
+                action_vehicle_vin = None
             if boost_vehicle_id == "generic_ev":
                 from .const import (
                     CONF_GENERIC_CHARGER_AMPS_ENTITY,
@@ -19811,6 +19902,12 @@ class EVLoadpointStatusView(HomeAssistantView):
                     "scheduled": scheduled.get_state() if scheduled else None,
                 },
             }
+            from .automations.shared_loadpoint import project_shared_loadpoint_status
+
+            payload = project_shared_loadpoint_status(
+                self._hass, self._config_entry, payload,
+                vehicle_configs=vehicle_configs,
+            )
             return web.json_response(payload)
 
         except Exception as e:
@@ -20145,6 +20242,11 @@ class AutoScheduleSettingsView(HomeAssistantView):
 
             data = await request.json()
             vehicle_id = data.get("vehicle_id", "_default")
+            from .automations.shared_loadpoint import is_retired_shared_vehicle_id
+            if is_retired_shared_vehicle_id(self._config_entry, vehicle_id):
+                return web.json_response({
+                    "success": False, "error": "The former charger EV record is parked",
+                }, status=409)
 
             executor = get_auto_schedule_executor()
             if not executor:
@@ -20303,6 +20405,11 @@ class AutoScheduleToggleView(HomeAssistantView):
             data = await request.json()
             vehicle_id = data.get("vehicle_id", "_default")
             enabled = data.get("enabled")
+            from .automations.shared_loadpoint import is_retired_shared_vehicle_id
+            if is_retired_shared_vehicle_id(self._config_entry, vehicle_id):
+                return web.json_response({
+                    "success": False, "error": "The former charger EV record is parked",
+                }, status=409)
 
             executor = get_auto_schedule_executor()
             if not executor:

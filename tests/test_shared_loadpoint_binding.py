@@ -173,6 +173,91 @@ def test_inactive_or_unknown_profile_cannot_resolve_a_shared_command():
     assert resolver(FakeHass("unknown"), entry, PROFILE_A_ID, {"charger_type": "generic"}) is None
 
 
+def test_shared_status_attributes_physical_charger_only_to_selected_profile():
+    project = shared_loadpoint.project_shared_loadpoint_status
+    entry = _entry(**_options(shared_loadpoint_profile_a_soc_entity="sensor.tank_soc"))
+    hass = FakeHass("tank")
+    hass.states = SimpleNamespace(get=lambda entity_id: {
+        "sensor.connected_vehicle": SimpleNamespace(state="tank"),
+        "sensor.tank_soc": SimpleNamespace(state="92"),
+    }.get(entity_id))
+    original = {"site": {"ev_power_kw": 4.2}, "loadpoints": [{
+        "loadpoint_id": "generic_ev", "vehicle_id": "generic_ev",
+        "vehicle_name": "EV", "charger_type": "generic", "soc": 14,
+        "connected": True, "actual_charging": True, "current_power_kw": 4.2,
+    }]}
+
+    projected = project(hass, entry, original)
+
+    assert original["loadpoints"][0]["vehicle_id"] == "generic_ev"
+    assert projected["site"]["ev_power_kw"] == 4.2
+    assert len(projected["loadpoints"]) == 1
+    assert projected["loadpoints"][0]["loadpoint_id"] == "generic_ev"
+    assert projected["loadpoints"][0]["vehicle_id"] == PROFILE_A_ID
+    assert projected["loadpoints"][0]["vehicle_name"] == "GWM Tank 500"
+    assert projected["loadpoints"][0]["soc"] == 92
+
+
+def test_shared_status_capacity_belongs_to_selected_profile_not_old_charger_ev():
+    project = shared_loadpoint.project_shared_loadpoint_status
+    entry = _entry(**_options())
+    payload = {"loadpoints": [{
+        "loadpoint_id": "generic_ev", "vehicle_id": "generic_ev",
+        "battery_capacity_kwh": 90, "effective_battery_capacity_kwh": 90,
+        "battery_capacity_source": "charger_fallback",
+    }]}
+    configs = [
+        {"vehicle_id": PROFILE_A_ID, "battery_capacity_kwh": 82},
+        {"vehicle_id": PROFILE_B_ID, "battery_capacity_kwh": 57},
+        {"vehicle_id": "generic_ev", "battery_capacity_kwh": 90},
+    ]
+    for selector, expected in (("tank", 82), ("model_y", 57)):
+        row = project(FakeHass(selector), entry, payload, vehicle_configs=configs)["loadpoints"][0]
+        assert row["effective_battery_capacity_kwh"] == expected
+        assert row["battery_capacity_kwh"] == expected
+        assert row["battery_capacity_source"] == "manual"
+    unknown = project(FakeHass("unknown"), entry, payload,
+                      vehicle_configs=configs)["loadpoints"][0]
+    assert unknown["battery_capacity_kwh"] is None
+    assert unknown["effective_battery_capacity_kwh"] is None
+
+
+def test_shared_status_unknown_selector_keeps_power_but_no_vehicle_identity():
+    project = shared_loadpoint.project_shared_loadpoint_status
+    physical = {"loadpoint_id": "sigenergy_charger", "vehicle_id": "sigenergy_charger",
+                "vehicle_name": "EV", "charger_type": "sigenergy", "soc": 91,
+                "connected": True, "current_power_kw": 6.0}
+    entry = _entry(**_options(generic_charger_enabled=False,
+                             sigenergy_charger_enabled=True, sigenergy_charger_type="evac"))
+    for selector in ("none", "unknown"):
+        projected = project(FakeHass(selector), entry, {"site": {"ev_power_kw": 6.0},
+                                                         "loadpoints": [physical]})
+        item = projected["loadpoints"][0]
+        assert item["loadpoint_id"] == "sigenergy_charger"
+        assert item["vehicle_id"] is None
+        assert item["soc"] is None
+        assert item["current_power_kw"] == 6.0
+        assert projected["site"]["ev_power_kw"] == 6.0
+
+
+def test_unbound_status_retains_legacy_vehicle_record():
+    project = shared_loadpoint.project_shared_loadpoint_status
+    payload = {"loadpoints": [{"loadpoint_id": "generic_ev", "vehicle_id": "generic_ev",
+                               "vehicle_name": "EV", "soc": 92}]}
+    assert project(FakeHass("tank"), _entry(generic_charger_enabled=True), payload) == payload
+
+
+def test_retired_charger_ev_id_only_when_shared_binding_is_active():
+    retired = shared_loadpoint.is_retired_shared_vehicle_id
+    assert retired(_entry(**_options()), "generic_ev") is True
+    assert retired(_entry(**_options()), "shared_ev_profile_a") is False
+    assert retired(_entry(generic_charger_enabled=True), "generic_ev") is False
+    evac = _entry(**_options(generic_charger_enabled=False,
+                             sigenergy_charger_enabled=True, sigenergy_charger_type="evac"))
+    assert retired(evac, "sigenergy_charger") is True
+    assert retired(evac, "generic_ev") is False
+
+
 def test_fresh_idle_observation_hands_shared_runtime_to_selected_profile_in_place():
     handoff = getattr(shared_loadpoint, "handoff_idle_shared_profile", None)
     assert handoff is not None

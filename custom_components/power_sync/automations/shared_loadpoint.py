@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 import math
 from typing import Any, Mapping
@@ -234,6 +235,62 @@ def resolve_shared_profile_soc(
         source="state",
         timestamp=getattr(state, "last_updated", None),
     )
+
+
+def project_shared_loadpoint_status(
+    hass: Any, config_entry: Any, payload: dict[str, Any],
+    *, vehicle_configs: list[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Attribute a physical status row without changing metering or runtime keys."""
+    binding = binding_for_entry(config_entry)
+    physical_id = canonical_shared_loadpoint_id(config_entry, PROFILE_A_ID)
+    if binding is None or physical_id is None:
+        return payload
+
+    result = deepcopy(payload)
+    selected = resolve_active_shared_profile(hass, config_entry)
+    result["shared_loadpoint_active"] = True
+    result["shared_loadpoint_id"] = physical_id
+    result["selected_vehicle_id"] = selected
+    for row in result.get("loadpoints") or ():
+        if row.get("loadpoint_id") != physical_id:
+            continue
+        row["vehicle_id"] = selected
+        row["vehicle_name"] = binding.profile_name(selected) if selected else None
+        sample = resolve_shared_profile_soc(hass, config_entry, selected) if selected else None
+        row["soc"] = sample.value if sample else None
+        row["shared_loadpoint"] = True
+        if selected:
+            from .ev_vehicle_capacity import resolve_ev_battery_capacity
+
+            profile_config = next(
+                (item for item in vehicle_configs or [] if item.get("vehicle_id") == selected),
+                {},
+            )
+            capacity = resolve_ev_battery_capacity(
+                manual_capacity_kwh=profile_config.get("battery_capacity_kwh"),
+                charger_fallback_capacity_kwh=profile_config.get(
+                    "charger_fallback_battery_capacity_kwh"
+                ),
+                provider_capacity_kwh=profile_config.get("provider_battery_capacity_kwh"),
+                model=profile_config.get("vehicle_model"),
+                trim=profile_config.get("vehicle_trim"),
+                anonymous_loadpoint=True,
+            )
+            row.update(capacity.to_dict())
+        else:
+            row.update({
+                "battery_capacity_kwh": None,
+                "effective_battery_capacity_kwh": None,
+                "battery_capacity_source": None,
+            })
+    return result
+
+
+def is_retired_shared_vehicle_id(config_entry: Any, vehicle_id: Any) -> bool:
+    """The former EV record is never a selectable target for an active binding."""
+    physical_id = canonical_shared_loadpoint_id(config_entry, PROFILE_A_ID)
+    return physical_id is not None and str(vehicle_id or "") == physical_id
 
 
 def resolve_shared_loadpoint_command(

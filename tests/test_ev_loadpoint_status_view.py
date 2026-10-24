@@ -285,3 +285,9 @@ def test_loadpoint_status_reports_configured_charger_backends_not_connection_sta
         ({}, {"generic": False, "sigenergy": False}),
     ):
         assert eval(compiled, names, {"opts": options}) == expected
+
+
+def test_loadpoint_status_projects_selected_logical_ev_after_physical_accounting():
+    source = ast.unparse(_get_method())
+    assert "project_shared_loadpoint_status(self._hass, self._config_entry, payload, vehicle_configs=vehicle_configs)" in source
+    assert source.index('project_shared_loadpoint_status(') > source.index('loadpoint.update(capacity.to_dict())')
