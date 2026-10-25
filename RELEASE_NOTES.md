@@ -1,4 +1,9 @@
-<!-- release: v2.12.1492-nir.2 -->
+<!-- release: v2.12.1492-nir.3 -->
+
+## v2.12.1492-nir.3 — shared EV Scheduled and Price-Level commands
+- Scheduled Charging and its external-session stop now resolve the currently selected logical EV before issuing Generic Charger or Sigenergy EVAC commands. The coordinator's direct start/stop paths do the same. Unavailable or unmapped selection issues no shared command; retired physical IDs remain rejected at the command boundary.
+- Price-Level Charging now tracks A/B by logical identity, uses only the selected EV's SoC for recovery/opportunity decisions, and routes starts/stops through that profile. A selector change mid-decision cannot authorise the other EV. External-session adoption seeds the same logical state, avoiding a duplicate start; a sibling's decision cannot clear the old home-battery hold until a fresh idle observation confirms that the origin EV no longer owns the charger.
+- Scheduled Charging retries the new selected EV after an A/B handoff within the same charging window instead of treating A's global charging flag as proof that B has started. Smart Schedule's existing physical-command path was verified for both A/B and Generic/EVAC. The nonshared/Tesla paths retain their prior selection. Focused charging-path and private architecture gates passed. Source publication only: no Home Assistant installation, restart, setting change, or charger action.
 
 ## v2.12.1492-nir.2 — Solar Surplus logical-EV selection
 - With a shared Generic Charger or Sigenergy EVAC, Solar Surplus now considers only the currently selected logical EV for that physical charger. A retained, enabled legacy charger record can no longer win the first priority slot and have its start rejected by the shared safety guard. An unknown selector starts neither logical EV; saved legacy records are not deleted or changed.

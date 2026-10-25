@@ -2323,6 +2323,314 @@ def test_shared_schedule_keeps_only_the_selected_profile_plan(
                 assert state.current_window is None
 
 
+@pytest.mark.parametrize("backend,physical_id", [("generic", "generic_ev"), ("sigenergy", "sigenergy_charger")])
+@pytest.mark.parametrize("selected_state,profile_id", [("tank", "shared_ev_profile_a"), ("future", "shared_ev_profile_b")])
+@pytest.mark.parametrize("mode", ["scheduled", "price_level_opportunity"])
+def test_coordinated_shared_start_and_stop_use_selected_logical_profile(
+    monkeypatch, backend, physical_id, selected_state, profile_id, mode,
+):
+    hass = _FakeHass(states={"sensor.connected_vehicle": selected_state})
+    entry = _FakeConfigEntry()
+    entry.options = {
+        "generic_charger_enabled": backend == "generic",
+        "sigenergy_charger_enabled": backend == "sigenergy",
+        "sigenergy_charger_type": "evac" if backend == "sigenergy" else None,
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Future",
+        "shared_loadpoint_profile_b_state": "future",
+    }
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data = {
+        "vehicle_charging_configs": [
+            {"vehicle_id": physical_id, "charger_type": backend, "max_amps": 10},
+            {"vehicle_id": "shared_ev_profile_a", "charger_type": backend, "max_amps": 16},
+            {"vehicle_id": "shared_ev_profile_b", "charger_type": backend, "max_amps": 20},
+        ],
+    }
+    actions = importlib.import_module("power_sync.automations.actions")
+    ownership = importlib.import_module("power_sync.automations.ev_ownership")
+    monkeypatch.setattr(ownership, "can_claim_ev_ownership", lambda *a, **k: (True, physical_id, None, ""))
+    monkeypatch.setattr(ev_planner, "_can_stop_loadpoint_for_mode", lambda *a, **k: True)
+    start = AsyncMock(return_value=True)
+    stop = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_action_start_ev_charging_dynamic", start)
+    monkeypatch.setattr(actions, "_action_stop_ev_charging_dynamic", stop)
+    requested = profile_id
+
+    assert asyncio.run(ev_planner._start_coordinated_charging(
+        hass, "power_sync", entry, owner_mode=mode, reason="test",
+        vehicle_vin=requested,
+    )) is True
+    assert asyncio.run(ev_planner._stop_coordinated_charging(
+        hass, "power_sync", entry, expected_owner_mode=mode, reason="test",
+        vehicle_vin=requested,
+    )) is True
+    for action in (start, stop):
+        assert action.await_args is not None
+        params = action.await_args.args[2]
+        assert params["vehicle_id"] == physical_id
+        assert params["logical_vehicle_id"] == profile_id
+        assert params["max_charge_amps"] == (16 if profile_id.endswith("a") else 20)
+
+    start.reset_mock()
+    stop.reset_mock()
+    # Retired physical identities must stay rejected at the command boundary.
+    assert asyncio.run(ev_planner._start_coordinated_charging(
+        hass, "power_sync", entry, owner_mode=mode, reason="retired",
+        vehicle_vin=physical_id,
+    )) is False
+    assert asyncio.run(ev_planner._stop_coordinated_charging(
+        hass, "power_sync", entry, expected_owner_mode=mode, reason="retired",
+        vehicle_vin=physical_id,
+    )) is False
+    start.assert_not_awaited()
+    stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize("selected,expected", [("tank", "shared_ev_profile_a"), ("future", "shared_ev_profile_b"), ("unknown", None)])
+@pytest.mark.parametrize("backend", ["generic", "sigenergy"])
+def test_scheduled_executor_routes_commands_by_live_shared_selector(monkeypatch, selected, expected, backend):
+    hass = _FakeHass(states={"sensor.connected_vehicle": selected})
+    entry = _FakeConfigEntry()
+    entry.options = {
+        "generic_charger_enabled": backend == "generic",
+        "sigenergy_charger_enabled": backend == "sigenergy",
+        "sigenergy_charger_type": "evac",
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Future",
+        "shared_loadpoint_profile_b_state": "future",
+    }
+    executor = ev_planner.ScheduledChargingExecutor(hass, entry)
+    start = AsyncMock(return_value=True)
+    stop = AsyncMock(return_value=True)
+    monkeypatch.setattr(ev_planner, "_start_coordinated_charging", start)
+    monkeypatch.setattr(ev_planner, "_stop_coordinated_charging", stop)
+    assert asyncio.run(executor._start_charging("window")) is (expected is not None)
+    if expected:
+        assert start.await_args.kwargs["vehicle_vin"] == expected
+    else:
+        start.assert_not_awaited()
+    assert asyncio.run(executor._stop_charging("window ended")) is (expected is not None)
+    if expected:
+        assert stop.await_args.kwargs["vehicle_vin"] == expected
+    else:
+        stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize("selected,expected", [("tank", "shared_ev_profile_a"), ("future", "shared_ev_profile_b"), ("unknown", None)])
+@pytest.mark.parametrize("backend", ["generic", "sigenergy"])
+def test_price_level_evaluation_uses_selected_logical_identity(monkeypatch, selected, expected, backend):
+    hass = _FakeHass(states={"sensor.connected_vehicle": selected})
+    entry = _FakeConfigEntry()
+    entry.options = {
+        "generic_charger_enabled": backend == "generic",
+        "sigenergy_charger_enabled": backend == "sigenergy",
+        "sigenergy_charger_type": "evac",
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Future",
+        "shared_loadpoint_profile_b_state": "future",
+    }
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data = {
+        "price_level_charging": {"enabled": True},
+    }
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    decision = AsyncMock(return_value=(True, "low price", "price_level_opportunity"))
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(executor, "get_charging_decision", decision)
+    monkeypatch.setattr(executor, "_start_charging", start)
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", AsyncMock(return_value=[]))
+    results = asyncio.run(executor.evaluate_all_vehicles(5))
+    if expected:
+        assert expected in results
+        assert start.await_args.kwargs["vehicle_vin"] == expected
+    else:
+        start.assert_not_awaited()
+        assert not results
+
+
+@pytest.mark.parametrize("backend", ["generic", "sigenergy"])
+def test_price_level_selector_change_during_decision_issues_no_cross_profile_permission(
+    monkeypatch, backend,
+):
+    hass = _FakeHass(states={"sensor.connected_vehicle": "tank"})
+    entry = _FakeConfigEntry()
+    entry.options = {
+        "generic_charger_enabled": backend == "generic",
+        "sigenergy_charger_enabled": backend == "sigenergy",
+        "sigenergy_charger_type": "evac",
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Future",
+        "shared_loadpoint_profile_b_state": "future",
+    }
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    async def changed_selector(_price):
+        hass.states._states["sensor.connected_vehicle"].state = "future"
+        return True, "cheap for old selection", "price_level_opportunity"
+    executor.get_charging_decision = changed_selector
+    executor._start_charging = AsyncMock(return_value=True)
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _no_vehicles)
+    results = asyncio.run(executor.evaluate_all_vehicles(5))
+    assert results == {}
+    executor._start_charging.assert_not_awaited()
+    assert not hass.data["power_sync"]["entry-1"].get("_automated_shared_loadpoint_decision_ledger")
+
+
+@pytest.mark.parametrize("selected,expected", [("tank", 42), ("future", 73), ("unknown", None)])
+def test_price_level_soc_uses_only_selected_shared_profile(selected, expected):
+    hass = _FakeHass(states={
+        "sensor.connected_vehicle": selected,
+        "sensor.tank_soc": "42",
+        "sensor.future_soc": "73",
+        "sensor.generic_soc": "99",
+    })
+    entry = _FakeConfigEntry()
+    entry.options = {
+        "generic_charger_enabled": True,
+        "generic_charger_soc_entity": "sensor.generic_soc",
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_a_soc_entity": "sensor.tank_soc",
+        "shared_loadpoint_profile_b_name": "Future",
+        "shared_loadpoint_profile_b_state": "future",
+        "shared_loadpoint_profile_b_soc_entity": "sensor.future_soc",
+    }
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    assert asyncio.run(executor._get_ev_soc()) == expected
+
+
+@pytest.mark.parametrize("selected,expected_mode,should_charge", [
+    ("tank", "price_level_recovery", True),
+    ("future", "", False),
+])
+def test_price_level_policy_uses_selected_ev_soc_for_recovery(
+    monkeypatch, selected, expected_mode, should_charge,
+):
+    hass = _FakeHass(states={
+        "sensor.connected_vehicle": selected,
+        "sensor.tank_soc": "42",
+        "sensor.future_soc": "73",
+        "sensor.generic_soc": "99",
+    })
+    entry = _FakeConfigEntry()
+    entry.options = {
+        "generic_charger_enabled": True,
+        "generic_charger_soc_entity": "sensor.generic_soc",
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_a_soc_entity": "sensor.tank_soc",
+        "shared_loadpoint_profile_b_name": "Future",
+        "shared_loadpoint_profile_b_state": "future",
+        "shared_loadpoint_profile_b_soc_entity": "sensor.future_soc",
+    }
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data = {
+        "price_level_charging": {
+            "enabled": True, "recovery_soc": 50, "recovery_price_cents": 30,
+            "opportunity_price_cents": 10, "home_battery_minimum": 0,
+        },
+    }
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    monkeypatch.setattr(executor, "_is_grid_charging_blocked_now", lambda: False)
+    decision, _reason, mode = asyncio.run(executor.get_charging_decision(20))
+    assert (decision, mode) == (should_charge, expected_mode)
+
+
+@pytest.mark.parametrize("selected,expected", [("tank", "shared_ev_profile_a"), ("future", "shared_ev_profile_b"), ("unknown", None)])
+def test_coordinator_shared_commands_and_external_stop_use_live_selector(monkeypatch, selected, expected):
+    hass = _FakeHass(states={"sensor.connected_vehicle": selected})
+    entry = _FakeConfigEntry()
+    entry.options = {
+        "generic_charger_enabled": True,
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Future",
+        "shared_loadpoint_profile_b_state": "future",
+    }
+    coordinator = ev_planner.EVChargingModeCoordinator(hass, entry)
+    start = AsyncMock(return_value=True)
+    stop = AsyncMock(return_value=True)
+    monkeypatch.setattr(ev_planner, "_start_coordinated_charging", start)
+    monkeypatch.setattr(ev_planner, "_stop_coordinated_charging", stop)
+    assert asyncio.run(coordinator._start_charging(["Scheduled"], "window")) is (expected is not None)
+    assert asyncio.run(coordinator._stop_charging("window ended")) is (expected is not None)
+    assert asyncio.run(coordinator._stop_external_scheduled_charging("external")) is (expected is not None)
+    if expected:
+        assert start.await_args.kwargs["vehicle_vin"] == expected
+        assert stop.await_count == 2
+        assert all(call.kwargs["vehicle_vin"] == expected for call in stop.await_args_list)
+    else:
+        start.assert_not_awaited()
+        stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize("selected,expected_start", [("tank", False), ("future", True), ("unknown", False)])
+def test_scheduled_coordinator_rechecks_selector_after_active_profile_handoff(
+    monkeypatch, selected, expected_start,
+):
+    hass = _FakeHass(states={"sensor.connected_vehicle": selected})
+    entry = _FakeConfigEntry()
+    entry.options = {
+        "generic_charger_enabled": True,
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Future",
+        "shared_loadpoint_profile_b_state": "future",
+    }
+    scheduled = ev_planner.ScheduledChargingExecutor(hass, entry)
+    scheduled._state.is_charging = True
+    scheduled._active_shared_profile_id = "shared_ev_profile_a"
+    scheduled.get_charging_decision = AsyncMock(return_value=(True, "in window", "scheduled"))
+    scheduled._start_charging = AsyncMock(return_value=True)
+    scheduled.apply_preserve_home_battery = AsyncMock()
+    monkeypatch.setattr(ev_planner, "get_price_level_executor", lambda: None)
+    monkeypatch.setattr(ev_planner, "get_scheduled_charging_executor", lambda: scheduled)
+    coordinator = ev_planner.EVChargingModeCoordinator(hass, entry)
+    coordinator._active_modes = ["Scheduled"]
+    asyncio.run(coordinator.evaluate({}, 5))
+    if expected_start:
+        scheduled._start_charging.assert_awaited_once_with("in window")
+    else:
+        scheduled._start_charging.assert_not_awaited()
+    assert ("Scheduled" in coordinator._active_modes) is (selected != "unknown")
+
+
+def test_scheduled_handoff_retry_preserves_prior_state_until_new_profile_starts(monkeypatch):
+    hass = _FakeHass(states={"sensor.connected_vehicle": "future"})
+    entry = _FakeConfigEntry()
+    entry.options = {
+        "generic_charger_enabled": True,
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Future",
+        "shared_loadpoint_profile_b_state": "future",
+    }
+    executor = ev_planner.ScheduledChargingExecutor(hass, entry)
+    executor._active_shared_profile_id = "shared_ev_profile_a"
+    executor._state.is_charging = True
+    start = AsyncMock(side_effect=[False, True])
+    monkeypatch.setattr(ev_planner, "_start_coordinated_charging", start)
+    assert asyncio.run(executor._start_charging("window")) is False
+    assert executor._state.is_charging is True
+    assert executor._active_shared_profile_id == "shared_ev_profile_a"
+    assert asyncio.run(executor._start_charging("window")) is True
+    assert executor._state.is_charging is True
+    assert executor._active_shared_profile_id == "shared_ev_profile_b"
+    assert all(call.kwargs["vehicle_vin"] == "shared_ev_profile_b" for call in start.await_args_list)
+
+
 def test_scheduled_shared_decision_is_logged_before_existing_start_behavior(monkeypatch):
     hass = _FakeHass(states={"sensor.connected_vehicle": "tank"})
     entry = _FakeConfigEntry()
@@ -2407,10 +2715,10 @@ def test_price_level_shared_generic_decision_is_logged_before_existing_start_beh
     results = asyncio.run(executor.evaluate_all_vehicles(10))
 
     assert results == {
-        "generic_ev": (True, "Price-level: cheap window", "price_level_opportunity")
+        "shared_ev_profile_a": (True, "Price-level: cheap window", "price_level_opportunity")
     }
     executor._start_charging.assert_awaited_once_with(
-        "price_level_opportunity", "Price-level: cheap window", vehicle_vin="generic_ev"
+        "price_level_opportunity", "Price-level: cheap window", vehicle_vin="shared_ev_profile_a"
     )
 
 
@@ -2436,7 +2744,7 @@ def test_price_level_shared_evac_denial_is_logged(monkeypatch):
     results = asyncio.run(executor.evaluate_all_vehicles(50))
 
     assert results == {
-        "sigenergy_charger": (
+        "shared_ev_profile_a": (
             False,
             "Price-level: above threshold",
             "price_level_opportunity",
@@ -3735,6 +4043,47 @@ def test_price_level_adopted_shared_session_prevents_allowed_restart_and_uses_no
     adopt_runtime.assert_awaited_once()
 
 
+@pytest.mark.parametrize(
+    "backend,physical_id", [("generic", "generic_ev"), ("sigenergy", "sigenergy_charger")],
+)
+def test_price_level_adopted_bound_profile_does_not_restart_and_stops_same_profile(
+    monkeypatch, fake_actions, backend, physical_id,
+):
+    hass = _FakeHass(states={"sensor.connected_vehicle": "tank"})
+    entry = _FakeConfigEntry()
+    entry.options = {
+        "generic_charger_enabled": backend == "generic",
+        "sigenergy_charger_enabled": backend == "sigenergy",
+        "sigenergy_charger_type": "evac",
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Future",
+        "shared_loadpoint_profile_b_state": "future",
+    }
+    fake_actions._adopt_observed_price_level_shared_session = AsyncMock(return_value=True)
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _no_vehicles)
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    executor.get_charging_decision = AsyncMock(
+        return_value=(True, "low price", "price_level_opportunity"),
+    )
+    executor._start_charging = AsyncMock(return_value=True)
+    executor._stop_charging = AsyncMock(return_value=True)
+
+    assert asyncio.run(executor.adopt_observed_shared_session(
+        physical_id, "shared_ev_profile_a", {"charger_type": backend},
+        datetime(2026, 10, 10, tzinfo=timezone.utc),
+    )) is True
+    assert executor._get_or_create_vehicle_state("shared_ev_profile_a").is_charging
+    asyncio.run(executor.evaluate_all_vehicles(5))
+    executor._start_charging.assert_not_awaited()
+    executor.get_charging_decision = AsyncMock(return_value=(False, "too costly", ""))
+    asyncio.run(executor.evaluate_all_vehicles(50))
+    executor._stop_charging.assert_awaited_once_with(
+        "too costly", vehicle_vin="shared_ev_profile_a",
+    )
+
+
 def test_scheduled_generic_start_uses_generic_loadpoint_id(fake_actions):
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
 
@@ -4978,7 +5327,11 @@ def test_auto_schedule_sigenergy_start_uses_modbus_backend(monkeypatch, fake_act
     assert params["target_battery_charge_kw"] == 0
 
 
-def test_auto_schedule_shared_profile_keeps_logical_attribution(monkeypatch, fake_actions):
+@pytest.mark.parametrize("backend,physical_id", [("generic", "generic_ev"), ("sigenergy", "sigenergy_charger")])
+@pytest.mark.parametrize("selected,profile_id", [("tank", "shared_ev_profile_a"), ("tesla", "shared_ev_profile_b")])
+def test_auto_schedule_shared_profile_keeps_logical_attribution(
+    monkeypatch, fake_actions, backend, physical_id, selected, profile_id,
+):
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
     monkeypatch.setattr(
         ev_planner.dt_util,
@@ -4988,7 +5341,9 @@ def test_auto_schedule_shared_profile_keeps_logical_attribution(monkeypatch, fak
 
     class SharedEntry(_FakeConfigEntry):
         options = {
-            "generic_charger_enabled": True,
+            "generic_charger_enabled": backend == "generic",
+            "sigenergy_charger_enabled": backend == "sigenergy",
+            "sigenergy_charger_type": "evac",
             "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
             "shared_loadpoint_profile_a_name": "Tank",
             "shared_loadpoint_profile_a_state": "tank",
@@ -4996,15 +5351,14 @@ def test_auto_schedule_shared_profile_keeps_logical_attribution(monkeypatch, fak
             "shared_loadpoint_profile_b_state": "tesla",
         }
 
-    profile_id = "shared_ev_profile_a"
     executor = ev_planner.AutoScheduleExecutor(
-        _FakeHass(states={"sensor.connected_vehicle": "tank"}),
+        _FakeHass(states={"sensor.connected_vehicle": selected}),
         SharedEntry(),
         planner=SimpleNamespace(),
     )
     settings = ev_planner.AutoScheduleSettings(
         vehicle_id=profile_id,
-        charger_type="generic",
+        charger_type=backend,
     )
     state = ev_planner.AutoScheduleState(vehicle_id=profile_id)
 
@@ -5013,8 +5367,8 @@ def test_auto_schedule_shared_profile_keeps_logical_attribution(monkeypatch, fak
     ) is True
 
     _hass, _entry, params = fake_actions._action_start_ev_charging_dynamic.await_args.args
-    assert params["vehicle_id"] == "generic_ev"
-    assert params["vehicle_vin"] == "generic_ev"
+    assert params["vehicle_id"] == physical_id
+    assert params["vehicle_vin"] == physical_id
     assert params["logical_vehicle_id"] == profile_id
     assert params["active_logical_vehicle_id"] == profile_id
     assert params["shared_loadpoint_binding"] is True
@@ -9216,6 +9570,61 @@ def test_generic_stopped_price_level_preserve_retains_scheduled_intent(
     assert preserve["source"] == "scheduled_charging"
 
 
+@pytest.mark.parametrize("backend,physical_id,evidence", [
+    ("generic", "generic_ev", "fresh_power"),
+    ("sigenergy", "sigenergy_charger", "fresh_evac_state"),
+])
+def test_price_level_handoff_releases_origin_hold_only_after_fresh_idle(
+    monkeypatch, backend, physical_id, evidence,
+):
+    hass = _FakeHass(price_settings={"preserve_home_battery": True}, states={
+        "sensor.connected_vehicle": "future",
+    })
+    entry = _FakeConfigEntry()
+    entry.options = {
+        "generic_charger_enabled": backend == "generic",
+        "sigenergy_charger_enabled": backend == "sigenergy",
+        "sigenergy_charger_type": "evac",
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Future",
+        "shared_loadpoint_profile_b_state": "future",
+    }
+    monkeypatch.setattr(ev_planner, "get_scheduled_charging_executor", lambda: None)
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    data = hass.data["power_sync"]["entry-1"]
+    hold = data["scheduled_ev_preserve_state"] = {
+        "active": True, "source": "price_level_charging",
+        "active_profile_id": "shared_ev_profile_a",
+    }
+    executor._preserve_home_battery_active = True
+    data["_shared_loadpoint_cycle_context"] = {
+        "binding_id": physical_id, "active_profile_id": "shared_ev_profile_b",
+        "physical_active": True, "observed_at": datetime.now(timezone.utc),
+        "evidence": evidence,
+    }
+    asyncio.run(executor.apply_preserve_home_battery(False, "B ended"))
+    assert hold["active"] is True
+    data["_shared_loadpoint_cycle_context"]["physical_active"] = False
+    data["_shared_loadpoint_cycle_context"]["observed_at"] = (
+        datetime.now(timezone.utc) - timedelta(minutes=5)
+    )
+    asyncio.run(executor.apply_preserve_home_battery(False, "B ended"))
+    assert hold["active"] is True
+    data["_shared_loadpoint_cycle_context"]["observed_at"] = datetime.now(timezone.utc)
+    ownership = importlib.import_module("power_sync.automations.ev_ownership")
+    leases = ownership.get_ev_ownerships(hass, entry)
+    leases[physical_id] = {
+        "owner": "powersync", "active_profile_id": "shared_ev_profile_a",
+    }
+    asyncio.run(executor.apply_preserve_home_battery(False, "B ended"))
+    assert hold["active"] is True
+    leases.pop(physical_id)
+    asyncio.run(executor.apply_preserve_home_battery(False, "B ended"))
+    assert hold["active"] is False
+
+
 @pytest.mark.parametrize("status,power,age,expected", [
     ("Connected", "3.5", 0, True),
     ("Charging", "0", 0, True),
@@ -9265,7 +9674,7 @@ def test_shared_generic_stopped_readback_releases_only_origin_profile_hold(
     monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _no_vehicles)
     monkeypatch.setattr(ev_planner, "get_scheduled_charging_executor", lambda: None)
     executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
-    state = executor._get_or_create_vehicle_state("generic_ev")
+    state = executor._get_or_create_vehicle_state("shared_ev_profile_a")
     state.is_charging = True
     executor._set_preserve_home_battery_intent("charging")
     hold = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
@@ -9290,5 +9699,7 @@ def test_shared_generic_stopped_readback_releases_only_origin_profile_hold(
     asyncio.run(executor.evaluate_all_vehicles(5))
     assert hold["active"] is False
     assert state.is_charging is True
-    executor._start_charging.assert_not_awaited()
+    executor._start_charging.assert_awaited_once_with(
+        "price_level_opportunity", "Cheap price", vehicle_vin="shared_ev_profile_b",
+    )
     executor._stop_charging.assert_not_awaited()

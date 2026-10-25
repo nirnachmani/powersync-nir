@@ -8605,6 +8605,21 @@ def _configured_charger_type(opts: Mapping[str, Any]) -> str:
     return "tesla"
 
 
+def _selected_shared_coordinated_vehicle(
+    hass: Any, config_entry: Any,
+) -> tuple[bool, Optional[str]]:
+    """Resolve the live logical identity before a coordinated physical command.
+
+    A configured binding with no known selection must fail closed; the legacy
+    ``None``/physical pseudo-ID fallback must never borrow another EV's config.
+    """
+    from .shared_loadpoint import binding_for_entry, resolve_active_shared_profile
+
+    if binding_for_entry(config_entry) is None:
+        return False, None
+    return True, resolve_active_shared_profile(hass, config_entry)
+
+
 def _effective_auto_schedule_charger_type(
     settings: AutoScheduleSettings,
     opts: Mapping[str, Any],
@@ -10180,7 +10195,25 @@ class PriceLevelChargingExecutor:
             CONF_GENERIC_CHARGER_ENABLED,
         )
         from .generic_charger_soc import resolve_generic_charger_soc
+        from .shared_loadpoint import (
+            PROFILE_A_ID, PROFILE_B_ID, resolve_shared_profile_soc,
+        )
         from homeassistant.helpers import entity_registry as er, device_registry as dr
+
+        shared, selected = _selected_shared_coordinated_vehicle(
+            self.hass, self.config_entry,
+        )
+        if shared and vehicle_vin in (
+            None, "_default", "generic_ev", "sigenergy_charger", "ev",
+            PROFILE_A_ID, PROFILE_B_ID,
+        ):
+            profile_id = vehicle_vin if vehicle_vin in (PROFILE_A_ID, PROFILE_B_ID) else selected
+            sample = (
+                resolve_shared_profile_soc(self.hass, self.config_entry, profile_id)
+                if profile_id else None
+            )
+            # Never inherit a sibling's or the retired charger's SoC.
+            return int(sample.value) if sample is not None else None
 
         config_entries = getattr(self.hass, "config_entries", None)
         if vehicle_vin in (None, "_default", "generic_ev", "ev") and config_entries:
@@ -10741,12 +10774,19 @@ class PriceLevelChargingExecutor:
         )
         if not adopted:
             return False
-        self.mark_observed_shared_session_adopted(binding_id)
+        self.mark_observed_shared_session_adopted(binding_id, active_profile_id)
         return True
 
-    def mark_observed_shared_session_adopted(self, binding_id: str) -> None:
-        """Mark canonical Price-Level state after no-I/O shared adoption."""
-        state = self._get_or_create_vehicle_state(binding_id)
+    def mark_observed_shared_session_adopted(
+        self, binding_id: str, active_profile_id: str,
+    ) -> None:
+        """Mark the adopted logical EV, while retaining physical runtime ownership."""
+        shared, _selected = _selected_shared_coordinated_vehicle(
+            self.hass, self.config_entry,
+        )
+        state = self._get_or_create_vehicle_state(
+            active_profile_id if shared else binding_id
+        )
         state.is_charging = True
         state.charging_mode = "price_level"
         state.last_decision = "charging"
@@ -10802,6 +10842,48 @@ class PriceLevelChargingExecutor:
         if state.get("source") not in (None, "price_level_charging"):
             self._preserve_home_battery_active = False
             return
+        shared, selected = _selected_shared_coordinated_vehicle(
+            self.hass, self.config_entry,
+        )
+        if (
+            shared and state.get("active") and state.get("active_profile_id")
+            and state["active_profile_id"] != selected
+        ):
+            # A sibling's policy decision cannot release an active A hold.
+            # Once this cycle actually observes the physical charger idle and
+            # A no longer owns it, the old hold must not remain latched forever.
+            from .shared_loadpoint import canonical_shared_loadpoint_id
+            from .ev_ownership import get_ev_ownerships
+            from .actions import _dynamic_ev_state
+            from .external_session_reconciler import DEFAULT_FRESHNESS_SECONDS
+
+            physical_id = canonical_shared_loadpoint_id(self.config_entry, selected) or ""
+            if not physical_id:
+                return
+            context = entry_data.get("_shared_loadpoint_cycle_context") or {}
+            observed_at = context.get("observed_at")
+            age = (
+                (datetime.now(timezone.utc) - observed_at).total_seconds()
+                if isinstance(observed_at, datetime) and observed_at.tzinfo else None
+            )
+            evidence = (
+                "fresh_power" if physical_id == "generic_ev"
+                else "fresh_evac_state"
+            )
+            lease = get_ev_ownerships(self.hass, self.config_entry).get(physical_id)
+            runtime = _dynamic_ev_state.get(self.config_entry.entry_id, {}).get(
+                physical_id, {}
+            )
+            if not (
+                context.get("binding_id") == physical_id
+                and context.get("active_profile_id") == selected
+                and context.get("physical_active") is False
+                and context.get("evidence") == evidence
+                and age is not None and 0 <= age <= DEFAULT_FRESHNESS_SECONDS
+                and not (isinstance(lease, dict) and lease.get("active_profile_id") == state["active_profile_id"])
+                and not (runtime.get("active") and runtime.get("active_profile_id") == state["active_profile_id"])
+            ):
+                return
         scheduled = get_scheduled_charging_executor()
         if scheduled and getattr(scheduled, "_preserve_home_battery_active", False):
             state.update({
@@ -11056,6 +11138,14 @@ class PriceLevelChargingExecutor:
         Evaluate charging decision (legacy method for standalone use).
         For coordinated mode, use get_charging_decision() instead.
         """
+        shared, _selected = _selected_shared_coordinated_vehicle(
+            self.hass, self.config_entry,
+        )
+        if shared:
+            # Even legacy callers must use the selected logical profile. A
+            # default start/stop would be rejected by the shared command gate.
+            await self.evaluate_all_vehicles(current_price_cents)
+            return
         should_charge, reason, mode = await self.get_charging_decision(current_price_cents)
 
         # Take action
@@ -11250,9 +11340,20 @@ class PriceLevelChargingExecutor:
                 return results
 
             if opts.get(CONF_SIGENERGY_CHARGER_ENABLED):
+                shared, selected = _selected_shared_coordinated_vehicle(
+                    self.hass, self.config_entry,
+                )
+                if shared and not selected:
+                    _LOGGER.info("Price-level charging: shared EV selector unresolved; not commanding EVAC")
+                    return results
                 decision = await self.get_charging_decision(current_price_cents)
+                if shared and _selected_shared_coordinated_vehicle(
+                    self.hass, self.config_entry,
+                )[1] != selected:
+                    _LOGGER.info("Price-level EVAC selector changed during decision; retrying next cycle")
+                    return results
                 should_charge, reason, mode = decision
-                pseudo_vin = "sigenergy_charger"
+                pseudo_vin = selected or "sigenergy_charger"
                 results[pseudo_vin] = decision
 
                 try:
@@ -11287,9 +11388,20 @@ class PriceLevelChargingExecutor:
 
             # Also check Generic Charger (OCPP via lbbrhzn/ocpp or any switch-based charger)
             if opts.get(CONF_GENERIC_CHARGER_ENABLED):
+                shared, selected = _selected_shared_coordinated_vehicle(
+                    self.hass, self.config_entry,
+                )
+                if shared and not selected:
+                    _LOGGER.info("Price-level charging: shared EV selector unresolved; not commanding charger")
+                    return results
                 decision = await self.get_charging_decision(current_price_cents)
+                if shared and _selected_shared_coordinated_vehicle(
+                    self.hass, self.config_entry,
+                )[1] != selected:
+                    _LOGGER.info("Price-level Generic selector changed during decision; retrying next cycle")
+                    return results
                 should_charge, reason, mode = decision
-                pseudo_vin = "generic_ev"
+                pseudo_vin = selected or "generic_ev"
                 results[pseudo_vin] = decision
 
                 try:
@@ -11605,6 +11717,7 @@ class ScheduledChargingExecutor:
         self.config_entry = config_entry
         self._domain = DOMAIN
         self._state = ScheduledChargingState()
+        self._active_shared_profile_id: Optional[str] = None
         self._preserve_home_battery_active = False
         self._vehicle_results: dict[str, dict] = {}
         self._pending_stops: dict[str, dict] = {}
@@ -11795,17 +11908,34 @@ class ScheduledChargingExecutor:
         await self.apply_preserve_home_battery(True, reason)
         success = await self._start_scheduled_tesla_vehicles(reason)
         if success is None:
-            success = await _start_coordinated_charging(
-                self.hass, self._domain, self.config_entry,
-                owner_mode="scheduled", reason=reason,
-                no_grid_import=self._get_settings().get("no_grid_import", False),
-                allow_ownership_takeover=True, log_prefix="Scheduled charging",
+            shared, selected = _selected_shared_coordinated_vehicle(
+                self.hass, self.config_entry,
             )
-            self._state.is_charging = bool(success)
+            previous_profile = self._active_shared_profile_id
+            previous_charging = self._state.is_charging
+            if shared and not selected:
+                success = False
+            else:
+                success = await _start_coordinated_charging(
+                    self.hass, self._domain, self.config_entry,
+                    owner_mode="scheduled", reason=reason,
+                    vehicle_vin=selected,
+                    no_grid_import=self._get_settings().get("no_grid_import", False),
+                    allow_ownership_takeover=True, log_prefix="Scheduled charging",
+                )
+            # A failed B handoff must not erase evidence of A's still-owned
+            # session; the physical lease/idle fence decides when B can start.
+            self._state.is_charging = bool(success) or bool(
+                shared and previous_charging and previous_profile
+                and previous_profile != selected
+            )
+            if success and shared:
+                self._active_shared_profile_id = selected
             self._state.last_decision = "started" if success else "start_failed"
             self._state.last_decision_reason = reason if success else f"{reason}; start unsuccessful"
         await self.apply_preserve_home_battery(
-            bool(success) or bool(self._pending_stops), self._state.last_decision_reason,
+            bool(self._state.is_charging) or bool(self._pending_stops),
+            self._state.last_decision_reason,
         )
         return bool(success)
 
@@ -11983,16 +12113,24 @@ class ScheduledChargingExecutor:
             )
         else:
             transferred = False
-            success = await _stop_coordinated_charging(
-                self.hass, self._domain, self.config_entry,
-                expected_owner_mode="scheduled", reason=reason,
-                log_prefix="Scheduled charging",
+            shared, selected = _selected_shared_coordinated_vehicle(
+                self.hass, self.config_entry,
             )
+            if shared and not selected:
+                success = False
+            else:
+                success = await _stop_coordinated_charging(
+                    self.hass, self._domain, self.config_entry,
+                    expected_owner_mode="scheduled", reason=reason,
+                    vehicle_vin=selected,
+                    log_prefix="Scheduled charging",
+                )
         if not success:
             self._state.last_decision = "stop_failed"
             self._state.last_decision_reason = f"{reason}; stop unconfirmed"
             return False
         self._state.is_charging = False
+        self._active_shared_profile_id = None
         self._state.last_decision = "released" if transferred else "stopped"
         self._state.last_decision_reason = f"{reason}; control transferred" if transferred else reason
         self._vehicle_results = {}
@@ -12094,6 +12232,8 @@ class ScheduledChargingExecutor:
     def update_charging_state(self, is_charging: bool, reason: str = "") -> None:
         """Update internal state when coordinator controls charging."""
         self._state.is_charging = is_charging
+        if not is_charging:
+            self._active_shared_profile_id = None
         self._state.last_decision = "charging" if is_charging else "waiting"
         if reason:
             self._state.last_decision_reason = reason
@@ -12287,12 +12427,18 @@ class EVChargingModeCoordinator:
     async def _start_charging(self, modes: List[str], reason: str) -> bool:
         """Start EV charging."""
         owner_mode = _coordinator_owner_mode(modes)
+        shared, selected = _selected_shared_coordinated_vehicle(
+            self.hass, self.config_entry,
+        )
+        if shared and not selected:
+            return False
         success = await _start_coordinated_charging(
             self.hass,
             self._domain,
             self.config_entry,
             owner_mode=owner_mode,
             reason=reason,
+            vehicle_vin=selected,
             allow_ownership_takeover=True,
             log_prefix="EV Coordinator",
         )
@@ -12309,12 +12455,18 @@ class EVChargingModeCoordinator:
 
     async def _stop_charging(self, reason: str) -> bool:
         """Stop EV charging."""
+        shared, selected = _selected_shared_coordinated_vehicle(
+            self.hass, self.config_entry,
+        )
+        if shared and not selected:
+            return False
         success = await _stop_coordinated_charging(
             self.hass,
             self._domain,
             self.config_entry,
             expected_owner_mode=_coordinator_owner_mode(self._active_modes),
             reason=reason,
+            vehicle_vin=selected,
             log_prefix="EV Coordinator",
         )
         if not success:
@@ -12332,13 +12484,18 @@ class EVChargingModeCoordinator:
         vehicle_vin: Optional[str] = None,
     ) -> bool:
         """Stop an externally-started session that violates Scheduled Charging."""
+        shared, selected = _selected_shared_coordinated_vehicle(
+            self.hass, self.config_entry,
+        )
+        if shared and (not selected or vehicle_vin not in (None, selected)):
+            return False
         success = await _stop_coordinated_charging(
             self.hass,
             self._domain,
             self.config_entry,
             expected_owner_mode="scheduled",
             reason=reason,
-            vehicle_vin=vehicle_vin,
+            vehicle_vin=selected if shared else vehicle_vin,
             command="stop_scheduled_external",
             stop_untracked=True,
             log_prefix="Scheduled charging",
@@ -12456,7 +12613,19 @@ class EVChargingModeCoordinator:
                 is_tesla = _configured_charger_type(
                     {**self.config_entry.data, **self.config_entry.options}
                 ) == "tesla"
-                if is_tesla or not scheduled_exec._state.is_charging:
+                shared, selected = _selected_shared_coordinated_vehicle(
+                    self.hass, self.config_entry,
+                )
+                if shared and not selected:
+                    scheduled_active = False
+                    scheduled_exec._state.last_decision = "waiting"
+                    scheduled_exec._state.last_decision_reason = "Shared EV selector unresolved"
+                elif (
+                    is_tesla or not scheduled_exec._state.is_charging
+                    or (shared and scheduled_exec._active_shared_profile_id != selected)
+                ):
+                    # A prior A start is not proof that B owns this physical
+                    # charger. Retry B through the lease/idle handoff fence.
                     scheduled_active = await scheduled_exec._start_charging(reason)
                 else:
                     scheduled_active = True

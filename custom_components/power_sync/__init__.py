@@ -43954,6 +43954,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         ):
                             price_level.mark_observed_shared_session_adopted(
                                 kwargs["binding_id"],
+                                kwargs["active_profile_id"],
                             )
                     return adopted
 

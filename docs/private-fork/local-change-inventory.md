@@ -37,6 +37,23 @@ current repository only; it is not a deployment or upstream-update procedure.
   the first slot and be rejected at the command guard, starving the selected
   profile. Unknown selection yields no shared-charger candidate; leave saved
   records intact and preserve unbound charger behavior.
+- Scheduled Charging, its external-session stop, and the combined coordinator
+  must resolve the live logical profile before invoking the dynamic command
+  builders. The unbound `None` lookup can otherwise select the first retained
+  physical charger record and fail the shared command gate. Price-Level must
+  use the selected profile as its decision/result/start/stop identity and read
+  only its SoC (never the Generic charger fallback or its sibling). Adoption
+  must seed the same logical decision state, while the command action retains
+  one canonical physical runtime/lease. An unknown selector issues no shared
+  command; an explicit retired physical ID remains rejected. Smart Schedule
+  already supplies the selected logical ID, but verify both backends and both
+  profiles at the physical start seam. Scheduled's global charging flag alone
+  cannot prove that a newly selected B started after A; retry the new profile
+  through the physical lease/idle fence without discarding A's state on a
+  failed handoff. Price-Level must recheck the selector after an awaited price
+  decision before recording a permission or action. Keep home-battery preserve
+  intent bound to its originating logical EV across selector handoffs; release
+  an old hold only after a fresh idle observation and no origin lease/runtime.
 
 ## Logical EV capacity and physical settings (intentional fork divergence)
 
