@@ -31,6 +31,12 @@ current repository only; it is not a deployment or upstream-update procedure.
 - `resolve_shared_loadpoint_command()` is the shared gate. It rejects a
   Generic/EVAC command addressed to an unselected logical profile or directly
   to a legacy physical ID, then supplies canonical physical and logical IDs.
+- Solar Surplus candidate selection must exclude retained physical charger
+  records and non-selected logical profiles for a configured shared binding,
+  before single-charger priority ordering. A legacy record can otherwise win
+  the first slot and be rejected at the command guard, starving the selected
+  profile. Unknown selection yields no shared-charger candidate; leave saved
+  records intact and preserve unbound charger behavior.
 
 ## Logical EV capacity and physical settings (intentional fork divergence)
 

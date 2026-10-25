@@ -9211,6 +9211,13 @@ def get_solar_surplus_vehicle_configs(
             **getattr(config_entry, "data", {}),
             **getattr(config_entry, "options", {}),
         }
+        from .shared_loadpoint import binding_for_entry, resolve_active_shared_profile
+
+        shared_binding = binding_for_entry(config_entry)
+        selected_profile = (
+            resolve_active_shared_profile(hass, config_entry)
+            if shared_binding is not None else None
+        )
         return [
             config
             for config in coalesce_paired_vehicle_configs(
@@ -9219,6 +9226,11 @@ def get_solar_surplus_vehicle_configs(
                 _configured_ble_prefixes(config_entry, None, hass=hass),
             )
             if config.get("solar_charging_enabled", True) is not False
+            and (
+                shared_binding is None
+                or config.get("charger_type") not in {"generic", "sigenergy"}
+                or config.get("vehicle_id") == selected_profile
+            )
         ]
 
     opts = {**getattr(config_entry, "data", {}), **getattr(config_entry, "options", {})}

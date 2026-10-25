@@ -8566,6 +8566,49 @@ def test_solar_surplus_config_does_not_guess_between_tesla_ble_loadpoints():
     assert configs == []
 
 
+@pytest.mark.parametrize(
+    ("backend", "physical_id"),
+    [("generic", "generic_ev"), ("sigenergy", "sigenergy_charger")],
+)
+@pytest.mark.parametrize(
+    ("selected_state", "expected_profile"),
+    [("tank_500", "shared_ev_profile_a"), ("future_ev", "shared_ev_profile_b")],
+)
+def test_solar_surplus_selects_logical_ev_before_retired_physical_record(
+    monkeypatch, backend, physical_id, selected_state, expected_profile,
+):
+    options = {
+        "generic_charger_enabled": backend == "generic",
+        "sigenergy_charger_enabled": backend == "sigenergy",
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank_500",
+        "shared_loadpoint_profile_b_name": "Future EV",
+        "shared_loadpoint_profile_b_state": "future_ev",
+    }
+    entry = SimpleNamespace(data={}, options=options)
+    stored = {"vehicle_charging_configs": [
+        {"vehicle_id": physical_id, "charger_type": backend,
+         "solar_charging_enabled": True, "priority": 1},
+        {"vehicle_id": "shared_ev_profile_a", "charger_type": backend,
+         "solar_charging_enabled": True, "priority": 1},
+        {"vehicle_id": "shared_ev_profile_b", "charger_type": backend,
+         "solar_charging_enabled": True, "priority": 2},
+    ]}
+
+    async def plugged_in(_hass, _entry, *, vehicle_vin):
+        return True
+
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
+    hass = _FakeHass(states={"sensor.connected_vehicle": selected_state})
+    configs = ev_planner.get_solar_surplus_vehicle_configs(hass, entry, stored)
+    selected = asyncio.run(ev_planner.get_solar_surplus_start_configs(
+        hass, entry, configs, set(), allow_parallel=False,
+    ))
+    assert [config["vehicle_id"] for config in selected] == [expected_profile]
+    assert stored["vehicle_charging_configs"][0]["vehicle_id"] == physical_id
+
+
 def test_solar_surplus_parallel_selects_only_available_inactive_vehicles(
     monkeypatch,
 ):
