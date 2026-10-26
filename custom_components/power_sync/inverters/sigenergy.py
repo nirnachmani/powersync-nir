@@ -8,7 +8,7 @@ Reference: https://github.com/TypQxQ/Sigenergy-Local-Modbus
 import asyncio
 from contextlib import asynccontextmanager
 import logging
-from typing import AsyncIterator, ClassVar, Optional
+from typing import AsyncIterator, Callable, ClassVar, Optional
 
 from pymodbus.client import AsyncModbusTcpClient
 from pymodbus.exceptions import ModbusException
@@ -523,6 +523,38 @@ class SigenergyController(InverterController):
         except Exception as e:
             _LOGGER.error(f"Error curtailing Sigenergy: {e}")
             return False
+
+    async def reassert_zero_export(
+        self, *, still_eligible: Callable[[], bool] | None = None,
+    ) -> bool:
+        """Reassert a drifted zero limit without recapturing the restore baseline.
+
+        This is an already-active curtailment repair, not a new curtailment
+        transition. A fresh read both prevents blind writes and confirms the
+        acknowledged Modbus write actually changed register 40038.
+        """
+        async with self._modbus_transaction():
+            if not await self.connect():
+                return False
+            current = await self._get_current_export_limit()
+            if current is None:
+                return False
+            if current == self.EXPORT_LIMIT_ZERO:
+                return True
+            # A price update or ownership handoff may occur while the Modbus
+            # read is awaited. Permission is checked again at the write seam.
+            if still_eligible is not None and not still_eligible():
+                return False
+            if not await self._write_holding_registers(
+                self.REG_GRID_EXPORT_LIMIT,
+                self._from_unsigned32(self.EXPORT_LIMIT_ZERO),
+            ):
+                return False
+            confirmed = await self._get_current_export_limit()
+            if confirmed != self.EXPORT_LIMIT_ZERO:
+                _LOGGER.warning("Sigenergy zero-export reassertion lacks register readback")
+                return False
+            return True
 
     async def restore(self) -> bool:
         """Restore normal export operation.

@@ -1,4 +1,9 @@
-<!-- release: v2.12.1492-nir.3 -->
+<!-- release: v2.12.1492-nir.4 -->
+
+## v2.12.1492-nir.4 — Sigenergy zero-export drift correction
+- When SAPN/Grid Service raises the Sigenergy plant export-limit register during active PowerSync DC curtailment, a change in the Sigen HA number now triggers one guarded native-register check and zero-export reassertion rather than waiting for the next periodic check. A successful write requires a zero register readback; retries are bounded and retain the original normal-export restore target.
+- The fast path requires a current price in its applicable slot, the existing uneconomic-export decision, enabled native DC control, and no solar-surplus EV headroom, force/export ownership, or conflicting monitoring mode. It does nothing for profitable or stale prices, normal export operation, an absent number entity, or a legitimate release; the five-minute check remains the fallback. It does not suppress DNSP commands or guarantee uninterrupted zero if the inverter gives them priority.
+- Source release only: no Home Assistant installation/restart or physical inverter command was performed during development.
 
 ## v2.12.1492-nir.3 — shared EV Scheduled and Price-Level commands
 - Scheduled Charging and its external-session stop now resolve the currently selected logical EV before issuing Generic Charger or Sigenergy EVAC commands. The coordinator's direct start/stop paths do the same. Unavailable or unmapped selection issues no shared command; retired physical IDs remain rejected at the command boundary.

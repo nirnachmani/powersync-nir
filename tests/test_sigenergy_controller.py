@@ -205,6 +205,62 @@ def test_solar_export_hold_rejects_unlimited_export_limit(sigenergy_module):
     assert asyncio.run(controller.get_grid_export_limit_kw()) is None
 
 
+@pytest.mark.parametrize("baseline", [None, 10000])
+def test_reassert_zero_export_preserves_restore_baseline_and_reads_back(sigenergy_module, baseline):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    controller._original_pv_limit = baseline
+    actual_limit = 1500  # SAPN raised 40038 after PowerSync's original zero.
+    writes = []
+
+    async def connect():
+        return True
+
+    async def read(address, count, slave_id=None):
+        assert (address, count) == (controller.REG_GRID_EXPORT_LIMIT, 2)
+        return controller._from_unsigned32(actual_limit)
+
+    async def write(address, values, slave_id=None):
+        nonlocal actual_limit
+        writes.append((address, list(values)))
+        actual_limit = controller._to_unsigned32(*values)
+        return True
+
+    controller.connect = connect
+    controller._read_holding_registers = read
+    controller._write_holding_registers = write
+
+    assert asyncio.run(controller.reassert_zero_export()) is True
+    assert writes == [(controller.REG_GRID_EXPORT_LIMIT, [0, 0])]
+    assert controller._original_pv_limit == baseline
+    assert actual_limit == 0
+
+
+def test_reassert_zero_export_rechecks_permission_after_modbus_read(sigenergy_module):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    permitted = True
+    writes = []
+
+    async def connect():
+        return True
+
+    async def read(address, count, slave_id=None):
+        nonlocal permitted
+        permitted = False  # Price became profitable during I/O.
+        return controller._from_unsigned32(1500)
+
+    async def write(address, values, slave_id=None):
+        writes.append((address, values))
+        return True
+
+    controller.connect = connect
+    controller._read_holding_registers = read
+    controller._write_holding_registers = write
+    assert asyncio.run(controller.reassert_zero_export(
+        still_eligible=lambda: permitted,
+    )) is False
+    assert writes == []
+
+
 def test_force_discharge_uses_pv_first_mode_when_solar_can_cover_target(sigenergy_module):
     controller = sigenergy_module.SigenergyController(host="127.0.0.1")
     _stub_force_discharge_reads(controller)

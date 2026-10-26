@@ -209,6 +209,22 @@ canonical identity and ownership checks; they are not API payload bypasses.
   after the shared control lock, and manual inverter services first hand off any
   overlapping production stop.
 
+## Sigenergy external export-limit drift
+
+- SA Power Networks Flexible Exports can raise Sigenergy plant register 40038
+  after native PowerSync zero-export curtailment. A polled Sigen HA number is
+  only a drift hint, never command provenance or independent write authority.
+  PowerSync's event listener may reassert zero through the existing controller
+  only while the current *fresh* tariff, enabled native-DC curtailment,
+  ownership/monitoring guards and EV-headroom checks still permit it. A cached
+  `curtailed` state alone does not permit a write; positive/stale prices and
+  export/force or EV headroom modes must retain the right to export.
+- Serialize with the existing physical Modbus lock, recheck policy after awaited
+  reads, verify register readback, bound repeated attempts, and keep the
+  pre-curtail restore baseline unchanged. Never disable CSIP/DNSP control or
+  implement a competing HA number writer; the periodic check remains a
+  fallback when the entity is absent or a fast write fails.
+
 ## Android and diagnostics contracts
 
 - `tests/test_android_app_contract.py` and

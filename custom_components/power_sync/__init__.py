@@ -13218,6 +13218,88 @@ def get_current_prices_for_curtailment(
     return None, import_price, None
 
 
+def _sigenergy_limit_rose(old_state: Any, new_state: Any) -> bool:
+    """Recognise a genuine zero→positive Sigen register readback transition."""
+    try:
+        before = float(old_state.state)
+        after = float(new_state.state)
+        return (
+            math.isfinite(before) and math.isfinite(after)
+            and 0 <= before < 0.05 <= after
+        )
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return False
+
+
+def _sigenergy_reassert_price_is_current(
+    feedin_price: float | None,
+    source: str | None,
+    price_coordinators: tuple[Any, ...],
+    now: datetime,
+) -> bool:
+    """Require a current tariff before an event-triggered *extra* zero write.
+
+    The ordinary scheduled curtailment still handles less frequent or static
+    providers. An old negative coordinator value must not override a newly
+    profitable price at a five-minute boundary while its refresh is pending.
+    """
+    if now.tzinfo is None or feedin_price is None:
+        return False
+    try:
+        if not math.isfinite(float(feedin_price)):
+            return False
+    except (TypeError, ValueError):
+        return False
+    if source == "tariff_schedule":
+        # The existing schedule resolver selects the current time slot.
+        return True
+    if source != "price_coordinator":
+        return False
+
+    slot_start = now.replace(
+        minute=now.minute - now.minute % 5, second=0, microsecond=0,
+    )
+    for coord in price_coordinators:
+        data = getattr(coord, "data", None)
+        if not isinstance(data, dict) or not getattr(coord, "last_update_success", False):
+            continue
+        updated = data.get("last_update")
+        if not isinstance(updated, datetime) or updated.tzinfo is None:
+            continue
+        # Amber refreshes on a five-minute cadence. A successful observation
+        # from this very price slot is current even if it is >90 seconds old.
+        if not slot_start <= updated <= now:
+            continue
+        for point in data.get("current", []):
+            if not isinstance(point, dict) or point.get("channelType") != "feedIn":
+                continue
+            try:
+                if abs(float(point.get("perKwh")) - float(feedin_price)) > 0.001:
+                    continue
+                start, end = point.get("startTime"), point.get("endTime")
+                if not start:
+                    # An AEMO fetch can be recent while the dispatch value
+                    # still belongs to the previous slot. No interval proof.
+                    continue
+                start_dt = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+                if end:
+                    end_dt = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+                else:
+                    duration_value = point.get("duration")
+                    if duration_value is None:
+                        continue
+                    duration = float(duration_value)
+                    if not math.isfinite(duration) or not 0 < duration <= 60:
+                        continue
+                    end_dt = start_dt + timedelta(minutes=duration)
+                if not (start_dt.tzinfo and end_dt.tzinfo and start_dt <= now < end_dt):
+                    continue
+            except (TypeError, ValueError, OverflowError):
+                continue
+            return True
+    return False
+
+
 def should_fetch_tesla_tariff_on_startup(
     electricity_provider: str,
     has_tesla_site: bool,
@@ -28593,7 +28675,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     if not _direct_dc_curtailment_write_allowed():
                         return
-                    success = await controller.restore()
+                    entry_data["_sigenergy_curtailment_releasing"] = (
+                        entry_data.get("_sigenergy_curtailment_releasing", 0) + 1
+                    )
+                    try:
+                        success = await controller.restore()
+                    finally:
+                        remaining = entry_data["_sigenergy_curtailment_releasing"] - 1
+                        if remaining:
+                            entry_data["_sigenergy_curtailment_releasing"] = remaining
+                        else:
+                            entry_data.pop("_sigenergy_curtailment_releasing", None)
                     if success:
                         entry_data["sigenergy_curtailment_state"] = "normal"
                         entry_data.pop("_last_sigenergy_curtailment_reapply", None)
@@ -28662,7 +28754,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     if not _direct_dc_curtailment_write_allowed():
                         return
-                    success = await controller.restore()
+                    entry_data["_sigenergy_curtailment_releasing"] = (
+                        entry_data.get("_sigenergy_curtailment_releasing", 0) + 1
+                    )
+                    try:
+                        success = await controller.restore()
+                    finally:
+                        remaining = entry_data["_sigenergy_curtailment_releasing"] - 1
+                        if remaining:
+                            entry_data["_sigenergy_curtailment_releasing"] = remaining
+                        else:
+                            entry_data.pop("_sigenergy_curtailment_releasing", None)
                     if success:
                         entry_data["sigenergy_curtailment_state"] = "normal"
                         entry_data.pop("_last_sigenergy_curtailment_reapply", None)
@@ -28672,6 +28774,80 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.debug("Sigenergy already in normal mode, no action needed")
         except Exception as e:
             _LOGGER.error("Sigenergy curtailment error: %s", e, exc_info=True)
+
+    _sigenergy_reassert_lock = asyncio.Lock()
+
+    async def _reassert_sigenergy_export_limit() -> bool:
+        """Repair one externally raised register only while our zero policy is current."""
+        async with _sigenergy_reassert_lock:
+            data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+            if not isinstance(data, dict):
+                return False
+            coordinators = (
+                amber_coordinator, localvolts_coordinator, aemo_sensor_coordinator,
+                flow_power_kwatch_coordinator, octopus_coordinator,
+            )
+
+            def eligible() -> bool:
+                # Recheck after every await, including immediately before the
+                # Modbus write. A cached 'curtailed' flag alone is not permission.
+                if hass.data.get(DOMAIN, {}).get(entry.entry_id) is not data:
+                    return False
+                if (data.get("sigenergy_reassert_stopping")
+                        or data.get("_sigenergy_curtailment_releasing")):
+                    return False
+                if not is_sigenergy or data.get("sigenergy_curtailment_state") != "curtailed":
+                    return False
+                if not _effective_solar_curtailment_enabled() or not _direct_dc_curtailment_write_allowed():
+                    return False
+                if data.get("ev_curtailment_override"):
+                    return False
+                if force_charge_state.get("active") or force_discharge_state.get("active"):
+                    return False
+                if (_optimizer_current_force_action_matches("charge")
+                        or _optimizer_current_force_action_matches("discharge")):
+                    return False
+                feedin, _import, source = get_current_prices_for_curtailment(
+                    data, coordinators,
+                )
+                if not _sigenergy_reassert_price_is_current(
+                    feedin, source, coordinators, dt_util.utcnow(),
+                ):
+                    return False
+                return export_earnings_are_uneconomic(
+                    -feedin,
+                    data.get("sigenergy_curtail_export_uneconomic", False),
+                    entry,
+                )
+
+            if not eligible() or await _active_solar_surplus_ev_needs_inverter_headroom():
+                return False
+            if not eligible():
+                return False
+            sig_coord = data.get("sigenergy_coordinator")
+            controller = getattr(sig_coord, "_controller", None)
+            if controller is None:
+                return False
+
+            # A malfunctioning or higher-priority writer must not trigger an
+            # unbounded Modbus contest. The scheduled check remains a fallback.
+            now = time.monotonic()
+            attempts = [t for t in data.get("_sigenergy_reassert_attempts", ())
+                        if 0 <= now - t < 300]
+            if (attempts and now - attempts[-1] < 20) or len(attempts) >= 3:
+                return False
+            data["_sigenergy_reassert_attempts"] = [*attempts, now]
+            try:
+                confirmed = await controller.reassert_zero_export(
+                    still_eligible=eligible,
+                )
+            except Exception as err:
+                _LOGGER.warning("Sigenergy zero-export reassertion failed: %s", err)
+                return False
+            if confirmed:
+                data["_last_sigenergy_curtailment_reapply"] = time.monotonic()
+                _LOGGER.info("Sigenergy zero export reasserted after external limit change")
+            return bool(confirmed)
 
     async def handle_alphaess_curtailment(feedin_price=None, import_price=None) -> None:
         """Handle AlphaESS DC curtailment via Modbus with zero-export.
@@ -42643,6 +42819,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN][entry.entry_id]["curtailment_cancel"] = curtailment_cancel_timer
     _LOGGER.info("Solar curtailment check scheduled every 5 minutes at :01 (same as TOU sync)")
 
+    if is_sigenergy:
+        from homeassistant.helpers.event import async_track_state_change_event
+
+        def _sigenergy_export_limit_changed(event) -> None:
+            """Treat Sigen's polled register rise as a hint, never permission."""
+            data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+            if not isinstance(data, dict) or data.get("sigenergy_curtailment_state") != "curtailed":
+                return
+            if not _sigenergy_limit_rose(
+                event.data.get("old_state"), event.data.get("new_state"),
+            ):
+                return
+            task = data.get("sigenergy_reassert_task")
+            if task is not None and not task.done():
+                return
+            data["sigenergy_reassert_task"] = hass.async_create_task(
+                _reassert_sigenergy_export_limit(),
+            )
+
+        hass.data[DOMAIN][entry.entry_id]["sigenergy_export_limit_unsub"] = (
+            async_track_state_change_event(
+                hass, "number.sigen_plant_grid_export_limitation",
+                _sigenergy_export_limit_changed,
+            )
+        )
+
     async def _startup_curtailment_check(_event=None) -> None:
         await asyncio.sleep(5)
         if entry.entry_id not in hass.data.get(DOMAIN, {}):
@@ -46889,6 +47091,17 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Tear down TOU sync hooks (AEMO dispatch subscriber + dispatch-trigger
     # coordinator + cron fallback + optional Octopus cron)
     entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+    if isinstance(entry_data, dict):
+        # Fence queued register writes before the first unload await. Waiting
+        # until the curtailment timer cleanup permits a late HA state event to
+        # start a new zero write during other integrations' shutdown.
+        entry_data["sigenergy_reassert_stopping"] = True
+        if reassert_unsub := entry_data.pop("sigenergy_export_limit_unsub", None):
+            reassert_unsub()
+        if reassert_task := entry_data.pop("sigenergy_reassert_task", None):
+            if not reassert_task.done():
+                reassert_task.cancel()
+            await asyncio.gather(reassert_task, return_exceptions=True)
 
     # Fence detached explanation work before unload/reload can replace the
     # entry. It has no optimizer or hardware side effects, but must not cache
