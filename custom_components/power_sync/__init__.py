@@ -10237,6 +10237,14 @@ class SigenergySettingsView(HomeAssistantView):
                 )
 
             entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            if (
+                "export_limit_kw" in validated
+                and entry_data.get("sigenergy_export_limit_owner") == "manual_force"
+            ):
+                return web.json_response(
+                    {"success": False, "error": "Stop Force Discharge before changing the grid export limit"},
+                    status=409,
+                )
             sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
 
             if not sigenergy_coordinator:
@@ -10281,12 +10289,18 @@ class SigenergySettingsView(HomeAssistantView):
 
             if "export_limit_kw" in validated:
                 configured_limit_kw = validated["export_limit_kw"]
-                curtailment_active = (
-                    entry_data.get("sigenergy_curtailment_state") == "curtailed"
+                export_owner_at_start = entry_data.get(
+                    "sigenergy_export_limit_owner", "normal"
                 )
+                curtailment_active = export_owner_at_start == "dc_zero"
                 success = await controller.apply_configured_export_limit(
                     configured_limit_kw,
                     curtailment_active=curtailment_active,
+                    still_eligible=lambda: (
+                        entry_data.get("sigenergy_export_limit_owner", "normal")
+                        == export_owner_at_start
+                        and export_owner_at_start != "manual_force"
+                    ),
                 )
 
                 if success:
@@ -13231,72 +13245,38 @@ def _sigenergy_limit_rose(old_state: Any, new_state: Any) -> bool:
         return False
 
 
-def _sigenergy_reassert_price_is_current(
-    feedin_price: float | None,
-    source: str | None,
-    price_coordinators: tuple[Any, ...],
-    now: datetime,
+
+
+async def _reconcile_sigenergy_failed_force_owner(
+    controller: Any, entry_data: dict[str, Any], previous_owner: str,
 ) -> bool:
-    """Require a current tariff before an event-triggered *extra* zero write.
-
-    The ordinary scheduled curtailment still handles less frequent or static
-    providers. An old negative coordinator value must not override a newly
-    profitable price at a five-minute boundary while its refresh is pending.
-    """
-    if now.tzinfo is None or feedin_price is None:
-        return False
-    try:
-        if not math.isfinite(float(feedin_price)):
-            return False
-    except (TypeError, ValueError):
-        return False
-    if source == "tariff_schedule":
-        # The existing schedule resolver selects the current time slot.
+    """After a failed force command, recover the prior 40038 owner if verified."""
+    key = "sigenergy_export_limit_owner"
+    if entry_data.get(key) != "manual_force":
+        return False  # Another command superseded this failed attempt.
+    if previous_owner != "dc_zero":
+        entry_data[key] = previous_owner
         return True
-    if source != "price_coordinator":
-        return False
-
-    slot_start = now.replace(
-        minute=now.minute - now.minute % 5, second=0, microsecond=0,
-    )
-    for coord in price_coordinators:
-        data = getattr(coord, "data", None)
-        if not isinstance(data, dict) or not getattr(coord, "last_update_success", False):
-            continue
-        updated = data.get("last_update")
-        if not isinstance(updated, datetime) or updated.tzinfo is None:
-            continue
-        # Amber refreshes on a five-minute cadence. A successful observation
-        # from this very price slot is current even if it is >90 seconds old.
-        if not slot_start <= updated <= now:
-            continue
-        for point in data.get("current", []):
-            if not isinstance(point, dict) or point.get("channelType") != "feedIn":
-                continue
-            try:
-                if abs(float(point.get("perKwh")) - float(feedin_price)) > 0.001:
-                    continue
-                start, end = point.get("startTime"), point.get("endTime")
-                if not start:
-                    # An AEMO fetch can be recent while the dispatch value
-                    # still belongs to the previous slot. No interval proof.
-                    continue
-                start_dt = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
-                if end:
-                    end_dt = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
-                else:
-                    duration_value = point.get("duration")
-                    if duration_value is None:
-                        continue
-                    duration = float(duration_value)
-                    if not math.isfinite(duration) or not 0 < duration <= 60:
-                        continue
-                    end_dt = start_dt + timedelta(minutes=duration)
-                if not (start_dt.tzinfo and end_dt.tzinfo and start_dt <= now < end_dt):
-                    continue
-            except (TypeError, ValueError, OverflowError):
-                continue
+    try:
+        actual = await controller._get_current_export_limit()
+        if entry_data.get(key) != "manual_force":
+            return False
+        if actual == controller.EXPORT_LIMIT_ZERO:
+            entry_data[key] = "dc_zero"
             return True
+        if actual is not None:
+            confirmed = await controller.reassert_zero_export(
+                still_eligible=lambda: entry_data.get(key) == "manual_force",
+            )
+            if entry_data.get(key) != "manual_force":
+                return False
+            if confirmed:
+                entry_data[key] = "dc_zero"
+                return True
+    except Exception:
+        pass
+    if entry_data.get(key) == "manual_force":
+        entry_data[key] = "normal"  # Unknown hardware state: let policy retry.
     return False
 
 
@@ -21807,8 +21787,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _battery_export, direct_dc_enabled = (
             get_effective_solar_curtailment_configuration(entry)
         )
-        return direct_dc_enabled and _monitoring_mode_allows_curtailment(
-            direct_dc_enabled
+        transition = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get(
+            "sigenergy_dc_option_transition", False
+        )
+        return bool(
+            direct_dc_enabled and not transition
+            and _monitoring_mode_allows_curtailment(direct_dc_enabled)
         )
 
     def _demand_grid_charging_protection_active(
@@ -22419,6 +22403,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Return whether the AC path duplicates the battery inverter connection."""
         if _solaredge_ac_inverter_matches_battery(entry):
             return True
+        inverter_brand = entry.options.get(
+            CONF_INVERTER_BRAND, entry.data.get(CONF_INVERTER_BRAND, "")
+        )
+        if is_sigenergy and inverter_brand == "sigenergy":
+            ac_host = entry.options.get(CONF_INVERTER_HOST, entry.data.get(CONF_INVERTER_HOST))
+            dc_host = entry.options.get(
+                CONF_SIGENERGY_MODBUS_HOST, entry.data.get(CONF_SIGENERGY_MODBUS_HOST)
+            )
+            if not ac_host or not dc_host:
+                return False
+            try:
+                return (
+                    str(ac_host).strip().casefold() == str(dc_host).strip().casefold()
+                    and int(entry.options.get(CONF_INVERTER_PORT, entry.data.get(CONF_INVERTER_PORT, DEFAULT_INVERTER_PORT)))
+                    == int(entry.options.get(CONF_SIGENERGY_MODBUS_PORT, entry.data.get(CONF_SIGENERGY_MODBUS_PORT, 502)))
+                )
+            except (TypeError, ValueError):
+                return False
         if not is_sungrow:
             return False
 
@@ -24252,6 +24254,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "is_custom_battery": is_custom_battery,  # Track custom external-controller telemetry
         "foxess_curtailment_state": "normal",  # Track FoxESS DC curtailment state
         "sigenergy_curtailment_state": "normal",  # Track Sigenergy DC curtailment state
+        "sigenergy_export_limit_owner": "normal",  # Entry-local 40038 authority, not physical readback
         "alphaess_curtailment_state": "normal",  # Track AlphaESS DC curtailment state
         # A saved baseline means a prior process may have left a limiter in
         # place. Never render that as confirmed until this process has read it
@@ -28666,8 +28669,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ev_needs_headroom = (
                 await _active_solar_surplus_ev_needs_inverter_headroom()
             )
+            # Assess the tariff/EV normally, but manual force owns physical 40038.
+            if force_discharge_state.get("active") and force_discharge_state.get("source") != "optimizer":
+                entry_data["sigenergy_export_limit_owner"] = "manual_force"
+                return
+            if (entry_data.get("sigenergy_dc_zero_write_pending")
+                    and current_state == "normal"
+                    and (not export_uneconomic or ev_needs_headroom)
+                    and entry_data.get("sigenergy_export_limit_owner") == "normal"):
+                # An ACK without readback might have installed zero. Never
+                # restore a positive cap over an already-positive external
+                # limit; resolve the ambiguous write from fresh readback first.
+                if not _direct_dc_curtailment_write_allowed():
+                    return
+                actual = await controller._get_current_export_limit()
+                if actual is None or entry_data.get("sigenergy_export_limit_owner") != "normal":
+                    return
+                if actual != controller.EXPORT_LIMIT_ZERO:
+                    entry_data.pop("sigenergy_dc_zero_write_pending", None)
+                    return
             if export_uneconomic and ev_needs_headroom:
-                if current_state != "normal":
+                if (current_state != "normal" or entry_data.get("sigenergy_dc_zero_write_pending")) and entry_data.get("sigenergy_export_limit_owner") in ("dc_zero", "normal"):
                     _LOGGER.info(
                         "Sigenergy curtailment RESTORED: solar surplus EV needs PV "
                         "headroom (export_earnings=%.2fc)",
@@ -28675,11 +28697,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     if not _direct_dc_curtailment_write_allowed():
                         return
+                    entry_data["sigenergy_export_limit_owner"] = "normal"
                     entry_data["_sigenergy_curtailment_releasing"] = (
                         entry_data.get("_sigenergy_curtailment_releasing", 0) + 1
                     )
                     try:
-                        success = await controller.restore()
+                        success = await controller.restore(still_eligible=lambda: (
+                            entry_data.get("sigenergy_export_limit_owner") == "normal"
+                            and not (force_discharge_state.get("active")
+                                     and force_discharge_state.get("source") != "optimizer")
+                            and _direct_dc_curtailment_write_allowed()
+                        ))
                     finally:
                         remaining = entry_data["_sigenergy_curtailment_releasing"] - 1
                         if remaining:
@@ -28688,6 +28716,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             entry_data.pop("_sigenergy_curtailment_releasing", None)
                     if success:
                         entry_data["sigenergy_curtailment_state"] = "normal"
+                        entry_data.pop("sigenergy_dc_zero_write_pending", None)
                         entry_data.pop("_last_sigenergy_curtailment_reapply", None)
                     else:
                         _LOGGER.error("Sigenergy restore() for solar surplus EV headroom failed")
@@ -28723,7 +28752,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ) or _live_export_reapply
 
                 # Negative or near-zero export earnings → zero-export curtailment
-                if current_state != "curtailed" or _needs_reapply:
+                if (current_state != "curtailed" or _needs_reapply
+                        or entry_data.get("sigenergy_export_limit_owner") != "dc_zero"):
                     if current_state == "curtailed":
                         _LOGGER.info(
                             "Sigenergy curtailment RE-APPLY: export_earnings=%.2fc (below threshold), %ds since last apply",
@@ -28737,28 +28767,48 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         )
                     if not _direct_dc_curtailment_write_allowed():
                         return
-                    success = await controller.curtail()
-                    if success:
+                    owner_before = entry_data.get("sigenergy_export_limit_owner", "normal")
+                    success = await controller.curtail(still_eligible=lambda: (
+                        entry_data.get("sigenergy_export_limit_owner", "normal") == owner_before
+                        and not (force_discharge_state.get("active")
+                                 and force_discharge_state.get("source") != "optimizer")
+                        and _direct_dc_curtailment_write_allowed()
+                    ))
+                    if success and entry_data.get("sigenergy_export_limit_owner", "normal") == owner_before:
                         entry_data["sigenergy_curtailment_state"] = "curtailed"
+                        entry_data["sigenergy_export_limit_owner"] = "dc_zero"
+                        entry_data.pop("sigenergy_dc_zero_write_pending", None)
                         entry_data["_last_sigenergy_curtailment_reapply"] = _now
                     else:
+                        if (entry_data.get("sigenergy_export_limit_owner", "normal") == owner_before
+                                and getattr(controller, "_last_curtail_zero_write_ack", False)):
+                            # ACK without zero readback: leave owner unconfirmed,
+                            # but reconcile a possible physical zero at the next
+                            # profitable/EV-headroom policy assessment.
+                            entry_data["sigenergy_dc_zero_write_pending"] = True
                         _LOGGER.error("Sigenergy curtail() failed")
                 else:
                     _LOGGER.debug("Sigenergy already curtailed (zero export), no action needed")
             else:
                 # Positive export earnings → restore
-                if current_state != "normal":
+                if (current_state != "normal" or entry_data.get("sigenergy_dc_zero_write_pending")) and entry_data.get("sigenergy_export_limit_owner") in ("dc_zero", "normal"):
                     _LOGGER.info(
                         "Sigenergy curtailment RESTORED: export_earnings=%.2fc (at or above threshold) → normal export",
                         export_earnings,
                     )
                     if not _direct_dc_curtailment_write_allowed():
                         return
+                    entry_data["sigenergy_export_limit_owner"] = "normal"
                     entry_data["_sigenergy_curtailment_releasing"] = (
                         entry_data.get("_sigenergy_curtailment_releasing", 0) + 1
                     )
                     try:
-                        success = await controller.restore()
+                        success = await controller.restore(still_eligible=lambda: (
+                            entry_data.get("sigenergy_export_limit_owner") == "normal"
+                            and not (force_discharge_state.get("active")
+                                     and force_discharge_state.get("source") != "optimizer")
+                            and _direct_dc_curtailment_write_allowed()
+                        ))
                     finally:
                         remaining = entry_data["_sigenergy_curtailment_releasing"] - 1
                         if remaining:
@@ -28767,6 +28817,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             entry_data.pop("_sigenergy_curtailment_releasing", None)
                     if success:
                         entry_data["sigenergy_curtailment_state"] = "normal"
+                        entry_data.pop("sigenergy_dc_zero_write_pending", None)
                         entry_data.pop("_last_sigenergy_curtailment_reapply", None)
                     else:
                         _LOGGER.error("Sigenergy restore() failed")
@@ -28783,11 +28834,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
             if not isinstance(data, dict):
                 return False
-            coordinators = (
-                amber_coordinator, localvolts_coordinator, aemo_sensor_coordinator,
-                flow_power_kwatch_coordinator, octopus_coordinator,
-            )
-
             def eligible() -> bool:
                 # Recheck after every await, including immediately before the
                 # Modbus write. A cached 'curtailed' flag alone is not permission.
@@ -28796,32 +28842,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if (data.get("sigenergy_reassert_stopping")
                         or data.get("_sigenergy_curtailment_releasing")):
                     return False
-                if not is_sigenergy or data.get("sigenergy_curtailment_state") != "curtailed":
+                if not is_sigenergy or data.get("sigenergy_export_limit_owner") != "dc_zero":
                     return False
                 if not _effective_solar_curtailment_enabled() or not _direct_dc_curtailment_write_allowed():
                     return False
-                if data.get("ev_curtailment_override"):
-                    return False
-                if force_charge_state.get("active") or force_discharge_state.get("active"):
-                    return False
-                if (_optimizer_current_force_action_matches("charge")
-                        or _optimizer_current_force_action_matches("discharge")):
-                    return False
-                feedin, _import, source = get_current_prices_for_curtailment(
-                    data, coordinators,
-                )
-                if not _sigenergy_reassert_price_is_current(
-                    feedin, source, coordinators, dt_util.utcnow(),
-                ):
-                    return False
-                return export_earnings_are_uneconomic(
-                    -feedin,
-                    data.get("sigenergy_curtail_export_uneconomic", False),
-                    entry,
-                )
+                return True
 
-            if not eligible() or await _active_solar_surplus_ev_needs_inverter_headroom():
-                return False
             if not eligible():
                 return False
             sig_coord = data.get("sigenergy_coordinator")
@@ -28834,7 +28860,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             now = time.monotonic()
             attempts = [t for t in data.get("_sigenergy_reassert_attempts", ())
                         if 0 <= now - t < 300]
-            if (attempts and now - attempts[-1] < 20) or len(attempts) >= 3:
+            if (attempts and now - attempts[-1] < 10) or len(attempts) >= 3:
                 return False
             data["_sigenergy_reassert_attempts"] = [*attempts, now]
             try:
@@ -33592,6 +33618,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Check if this is a Sigenergy system
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
         if is_sigenergy:
+            controller = None
+            entry_data = None
+            prior_export_owner = None
             try:
                 from .inverters.sigenergy import SigenergyController
                 modbus_host = entry.options.get(
@@ -33626,6 +33655,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     ),
                 )
 
+                # Fence queued event writes before the first force register I/O.
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                prior_export_owner = entry_data.get("sigenergy_export_limit_owner", "normal")
+                entry_data["sigenergy_export_limit_owner"] = "manual_force"
                 # Enable Remote EMS + set discharge mode + set rate
                 power_w = command_power_w
                 power_kw = power_w / 1000
@@ -33639,7 +33672,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         ),
                     )
                 )
-                await controller.disconnect()
+                if not result:
+                    await _reconcile_sigenergy_failed_force_owner(
+                        controller, entry_data, prior_export_owner,
+                    )
+                try:
+                    await controller.disconnect()
+                except Exception as disconnect_err:
+                    _LOGGER.warning("Sigenergy force discharge disconnect failed: %s", disconnect_err)
 
                 if result:
                     force_discharge_state["active"] = True
@@ -33677,6 +33717,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.error("Sigenergy force discharge failed")
                 return
             except Exception as e:
+                if (controller is not None and isinstance(entry_data, dict)
+                        and prior_export_owner is not None):
+                    await _reconcile_sigenergy_failed_force_owner(
+                        controller, entry_data, prior_export_owner,
+                    )
+                    try:
+                        await controller.disconnect()
+                    except Exception:
+                        pass
                 force_discharge_state["active"] = False
                 _LOGGER.error(f"Error in Sigenergy force discharge: {e}", exc_info=True)
                 hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "Sigenergy Modbus communication error"))
@@ -36840,6 +36889,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         restore_was_force_discharging = bool(force_discharge_state.get("active"))
         restore_was_force_charging = bool(force_charge_state.get("active"))
         restore_was_hold_soc = bool(hold_soc_state.get("active"))
+        restore_was_self_consumption = bool(self_consumption_state.get("active"))
         is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
         is_tesla = bool(
             hass.data.get(DOMAIN, {})
@@ -37253,15 +37303,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         ),
                     )
 
-                    native_control = sigenergy_native_control
+                    native_control = (
+                        sigenergy_native_control
+                        and (restore_was_force_discharging or bool(call.data.get("_native_control"))
+                             or not (restore_was_force_charging or restore_was_hold_soc
+                                     or restore_was_self_consumption))
+                    )
+                    if native_control and entry_data.get("sigenergy_export_limit_owner") == "dc_zero":
+                        # Explicit native handoff is one-shot; a charge/hold
+                        # cleanup above does not relinquish DC zero.
+                        entry_data["sigenergy_export_limit_owner"] = "explicit"
+                        native_released_dc = True
+                    else:
+                        native_released_dc = False
                     result = await controller.restore_normal(
                         native_control=native_control,
                         preserve_export_limit=(
                             not native_control
-                            and entry_data.get("sigenergy_curtailment_state")
-                            == "curtailed"
+                            and entry_data.get("sigenergy_export_limit_owner")
+                            == "dc_zero"
                         ),
                     )
+                    if native_released_dc and result:
+                        # A native handoff only owns a positive cap if 40038
+                        # actually moved. An ACK with zero still belongs to DC.
+                        if await controller._get_current_export_limit() == controller.EXPORT_LIMIT_ZERO:
+                            entry_data["sigenergy_export_limit_owner"] = "dc_zero"
+                    if not result and native_released_dc:
+                        if await controller._get_current_export_limit() == controller.EXPORT_LIMIT_ZERO:
+                            entry_data["sigenergy_export_limit_owner"] = "dc_zero"
                     await controller.disconnect()
 
                     if result:
@@ -37329,6 +37399,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 })
 
                 await persist_force_mode_state()
+                if restore_was_force_discharging and force_discharge_state.get("source") != "optimizer":
+                    entry_data["sigenergy_export_limit_owner"] = "normal"
+                    await handle_sigenergy_curtailment()
                 return
             except HomeAssistantError:
                 raise
@@ -39270,7 +39343,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     # force window may have left REG_ESS_MAX_DISCHARGE_LIMIT at 0,
                     # and only restore_normal resets the ESS limits to rated.
                     preserve_export_limit = (
-                        entry_data.get("sigenergy_curtailment_state") == "curtailed"
+                        entry_data.get("sigenergy_export_limit_owner") == "dc_zero"
                     )
                     result = await _guarded_self_consumption_write(
                         lambda: controller.restore_normal(
@@ -42825,7 +42898,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         def _sigenergy_export_limit_changed(event) -> None:
             """Treat Sigen's polled register rise as a hint, never permission."""
             data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
-            if not isinstance(data, dict) or data.get("sigenergy_curtailment_state") != "curtailed":
+            if not isinstance(data, dict) or data.get("sigenergy_export_limit_owner") != "dc_zero":
                 return
             if not _sigenergy_limit_rose(
                 event.data.get("old_state"), event.data.get("new_state"),

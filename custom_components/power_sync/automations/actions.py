@@ -4476,25 +4476,65 @@ async def _action_set_export_limit(
 
     # Accept both "limit" and "export_limit_kw" for flexibility
     # None means unlimited
-    limit_kw = params.get("limit") or params.get("export_limit_kw")
+    limit_kw = params.get("limit")
+    if limit_kw is None:
+        limit_kw = params.get("export_limit_kw")
 
     controller = await _get_sigenergy_controller(config_entry)
     if not controller:
         _LOGGER.error("set_export_limit: Sigenergy Modbus not configured")
         return False
 
+    entry_data = None
+    prior_owner = None
     try:
+        # Validate before accepting register ownership; malformed actions have
+        # no physical side effect and must not disarm an active DC decision.
+        if limit_kw is not None:
+            limit_kw = max(0, min(10, float(limit_kw)))
+        # This action is a one-shot register owner, not a DC policy decision.
+        # Fence any queued reassertion before the awaited Modbus command.
+        entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
+        prior_owner = entry_data.get("sigenergy_export_limit_owner", "normal")
+        if prior_owner == "manual_force":
+            _LOGGER.info("Export-limit action deferred: manual Force Discharge owns the register")
+            return False
+        entry_data["sigenergy_export_limit_owner"] = "explicit"
         if limit_kw is None:
             # Unlimited export
-            result = await controller.restore_export_limit()
+            result = await controller.restore_export_limit(still_eligible=lambda: (
+                entry_data.get("sigenergy_export_limit_owner") == "explicit"
+            ))
             _LOGGER.info("Restored unlimited export")
         else:
-            # Clamp to valid range (0-10 kW typical)
-            limit_kw = max(0, min(10, float(limit_kw)))
-            result = await controller.set_export_limit(limit_kw)
+            result = await controller.set_export_limit(limit_kw, still_eligible=lambda: (
+                entry_data.get("sigenergy_export_limit_owner") == "explicit"
+            ))
             _LOGGER.info(f"Set export limit to {limit_kw} kW")
+        if prior_owner == "dc_zero" and (limit_kw is None or limit_kw > 0):
+            # Do not infer a positive ceiling from a Modbus ACK. An action
+            # explicitly hands off once; a confirmed unchanged zero remains
+            # under DC ownership, and an unknown readback fails closed.
+            try:
+                actual = await controller._get_current_export_limit()
+            except Exception:
+                actual = None
+            if actual == controller.EXPORT_LIMIT_ZERO:
+                entry_data["sigenergy_export_limit_owner"] = "dc_zero"
+                return False
+            if actual is None:
+                return False
         return result
     except Exception as e:
+        if (isinstance(entry_data, dict) and prior_owner == "dc_zero"
+                and entry_data.get("sigenergy_export_limit_owner") == "explicit"):
+            # The action may have failed before changing the physical cap.
+            # Re-arm only on fresh proof that the prior zero is still present.
+            try:
+                if await controller._get_current_export_limit() == controller.EXPORT_LIMIT_ZERO:
+                    entry_data["sigenergy_export_limit_owner"] = "dc_zero"
+            except Exception:
+                pass
         _LOGGER.error(f"Failed to set export limit: {e}")
         return False
     finally:

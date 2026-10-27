@@ -146,6 +146,7 @@ class SigenergyController(InverterController):
         self._client: Optional[AsyncModbusTcpClient] = None
         self._lock = asyncio.Lock()
         self._original_pv_limit: Optional[int] = None  # Store original limit for restore
+        self._last_curtail_zero_write_ack = False  # Distinguish ACK from readback
         self._use_inverter_registers: Optional[bool] = None  # None=unknown, True=inverter, False=plant
         self._configured_max_export_limit_kw = max_export_limit_kw
         self._configured_charge_rate_limit_kw = configured_charge_rate_limit_kw
@@ -476,6 +477,8 @@ class SigenergyController(InverterController):
         self,
         home_load_w: Optional[float] = None,
         rated_capacity_w: Optional[float] = None,
+        *,
+        still_eligible: Callable[[], bool] | None = None,
     ) -> bool:
         """Curtail solar export by setting export limit to zero.
 
@@ -490,6 +493,9 @@ class SigenergyController(InverterController):
         Returns:
             True if curtailment successful
         """
+        self._last_curtail_zero_write_ack = False
+        transaction = self._modbus_transaction()
+        await transaction.__aenter__()
         try:
             if not await self.connect():
                 _LOGGER.error("Cannot curtail: failed to connect to Sigenergy")
@@ -509,12 +515,20 @@ class SigenergyController(InverterController):
 
             _LOGGER.info(f"Curtailing Sigenergy at {self.host} (zero export)")
 
+            # A manual force can take ownership while the baseline read awaits.
+            if still_eligible is not None and not still_eligible():
+                return False
             # Set export limit to 0 — inverter self-curtails PV at hardware speed
             values = self._from_unsigned32(self.EXPORT_LIMIT_ZERO)
             success = await self._write_holding_registers(self.REG_GRID_EXPORT_LIMIT, values)
+            self._last_curtail_zero_write_ack = bool(success)
 
             if success:
-                _LOGGER.info(f"Successfully set zero export on Sigenergy")
+                success = await self._get_current_export_limit() == self.EXPORT_LIMIT_ZERO
+                if success:
+                    _LOGGER.info("Successfully set zero export on Sigenergy")
+                else:
+                    _LOGGER.warning("Sigenergy curtailment lacks zero-register readback")
             else:
                 _LOGGER.error(f"Failed to curtail Sigenergy at {self.host}")
 
@@ -523,6 +537,8 @@ class SigenergyController(InverterController):
         except Exception as e:
             _LOGGER.error(f"Error curtailing Sigenergy: {e}")
             return False
+        finally:
+            await transaction.__aexit__(None, None, None)
 
     async def reassert_zero_export(
         self, *, still_eligible: Callable[[], bool] | None = None,
@@ -556,7 +572,9 @@ class SigenergyController(InverterController):
                 return False
             return True
 
-    async def restore(self) -> bool:
+    async def restore(
+        self, *, still_eligible: Callable[[], bool] | None = None,
+    ) -> bool:
         """Restore normal export operation.
 
         Restores grid export limit to the original value, safety cap, or unlimited.
@@ -566,6 +584,8 @@ class SigenergyController(InverterController):
         """
         _LOGGER.info(f"Restoring Sigenergy export at {self.host}")
 
+        transaction = self._modbus_transaction()
+        await transaction.__aenter__()
         try:
             if not await self.connect():
                 _LOGGER.error("Cannot restore: failed to connect to Sigenergy")
@@ -585,20 +605,23 @@ class SigenergyController(InverterController):
             limit_str = f"{restore_value / self.GAIN_POWER} kW" if restore_value < self.EXPORT_LIMIT_UNLIMITED else "unlimited"
             _LOGGER.info(f"Restoring export limit to: {limit_str}")
 
+            if still_eligible is not None and not still_eligible():
+                return False
             values = self._from_unsigned32(restore_value)
             success = await self._write_holding_registers(self.REG_GRID_EXPORT_LIMIT, values)
 
             if success:
+                # A Modbus ACK is not evidence that an external grid service
+                # retained our cap. Keep the pre-curtail baseline for retry.
+                readback = await self._get_current_export_limit()
+                if readback != restore_value:
+                    _LOGGER.warning(
+                        "Sigenergy export restore readback %s differs from %s",
+                        readback, restore_value,
+                    )
+                    return False
                 _LOGGER.info(f"Successfully restored Sigenergy export at {self.host}")
-                # Clear stored limit after successful restore
                 self._original_pv_limit = None
-                # Brief delay then verify
-                await asyncio.sleep(1)
-                state = await self.get_status()
-                if not state.is_curtailed:
-                    _LOGGER.info("Restore verified - normal export resumed")
-                else:
-                    _LOGGER.warning("Restore command sent but may take time to resume")
             else:
                 _LOGGER.error(f"Failed to restore Sigenergy at {self.host}")
 
@@ -607,6 +630,8 @@ class SigenergyController(InverterController):
         except Exception as e:
             _LOGGER.error(f"Error restoring Sigenergy: {e}")
             return False
+        finally:
+            await transaction.__aexit__(None, None, None)
 
     async def _read_plant_registers(self) -> dict:
         """Try to read plant-level registers."""
@@ -905,7 +930,9 @@ class SigenergyController(InverterController):
         finally:
             await transaction.__aexit__(None, None, None)
 
-    async def set_export_limit(self, limit_kw: float) -> bool:
+    async def set_export_limit(
+        self, limit_kw: float, *, still_eligible: Callable[[], bool] | None = None,
+    ) -> bool:
         """Set a specific grid export limit, clamped to the safety cap.
 
         Args:
@@ -935,6 +962,8 @@ class SigenergyController(InverterController):
                 scaled_value = 0xFFFFFFFE
 
             _LOGGER.info(f"Setting Sigenergy export limit to {limit_kw} kW")
+            if still_eligible is not None and not still_eligible():
+                return False
             values = self._from_unsigned32(scaled_value)
             return await self._write_holding_registers(self.REG_GRID_EXPORT_LIMIT, values)
 
@@ -968,6 +997,7 @@ class SigenergyController(InverterController):
         limit_kw: Optional[float],
         *,
         curtailment_active: bool,
+        still_eligible: Callable[[], bool] | None = None,
     ) -> bool:
         """Apply a durable cap without lifting active zero-export protection.
 
@@ -989,18 +1019,22 @@ class SigenergyController(InverterController):
                 if limit_kw is None
                 else int(max(0.0, float(limit_kw)) * self.GAIN_POWER)
             )
-            success = await self.set_export_limit(0.0)
+            success = await self.set_export_limit(0.0, still_eligible=still_eligible)
         elif limit_kw is None:
-            success = await self.restore_export_limit()
+            success = await self.restore_export_limit(still_eligible=still_eligible)
         else:
-            success = await self.set_export_limit(float(limit_kw))
+            success = await self.set_export_limit(
+                float(limit_kw), still_eligible=still_eligible,
+            )
 
         if not success:
             self._configured_max_export_limit_kw = previous_configured
             self._original_pv_limit = previous_original
         return success
 
-    async def restore_export_limit(self) -> bool:
+    async def restore_export_limit(
+        self, *, still_eligible: Callable[[], bool] | None = None,
+    ) -> bool:
         """Restore the export limit to the safety cap (or unlimited if no cap).
 
         Uses the export safety cap to prevent restoring to a value that
@@ -1023,6 +1057,8 @@ class SigenergyController(InverterController):
                 restore_value = self.EXPORT_LIMIT_UNLIMITED
                 _LOGGER.info("Restoring Sigenergy export limit to unlimited (no safety cap available)")
 
+            if still_eligible is not None and not still_eligible():
+                return False
             values = self._from_unsigned32(restore_value)
             success = await self._write_holding_registers(self.REG_GRID_EXPORT_LIMIT, values)
 

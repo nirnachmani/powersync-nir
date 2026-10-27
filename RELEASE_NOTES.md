@@ -1,3 +1,10 @@
+<!-- release: v2.12.1492-nir.5 -->
+
+## v2.12.1492-nir.5 — Sigenergy export-limit ownership and fast zero repair
+- The existing five-minute Sigenergy DC-curtailment handler remains the sole price/EV decision-maker. It grants zero-export ownership only after a confirmed write. A rise in the polled export-limit entity then triggers a guarded register-40038 read and zero repair only while that ownership is current; the event listener does not calculate tariff freshness or EV headroom independently. Fast attempts are limited to three in a rolling five minutes with at least ten seconds between attempts.
+- Manual Force Discharge takes priority for its duration; ending it successfully invokes the existing DC check once. Unrelated Force Charge cleanup preserves a held zero. Standalone native handoff and optional export-cap actions are one-shot; durable Controls cap edits preserve current zero without overriding manual force. In-flight Modbus writes recheck ownership; ambiguous zero-write acknowledgements are reconciled on a later policy check. Disabling DC control fences scheduled writes during restore, while disabling only battery curtailment does not release DC zero. A same-endpoint AC Sigenergy controller cannot independently command this plant register.
+- The owner is entry-local. After a restart, an already-zero physical limit without identifiable provenance is not automatically lifted on a profitable-price check; durable cross-restart recovery is not part of this release. Local focused regressions and the private architecture/optimizer gates passed. Source release only: no Home Assistant installation, restart or live inverter command was performed.
+
 <!-- release: v2.12.1492-nir.4 -->
 
 ## v2.12.1492-nir.4 — Sigenergy zero-export drift correction
