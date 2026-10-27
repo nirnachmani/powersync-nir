@@ -8036,13 +8036,19 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class PowerSyncOptionsFlow(config_entries.OptionsFlow):
     """Handle options flow for PowerSync."""
 
-    async def _restore_owned_curtailment_limits(self) -> None:
-        """Restore curtailment limits PowerSync has marked active."""
+    async def _restore_owned_curtailment_limits(
+        self, *, include_sigenergy: bool = True, only_sigenergy: bool = False,
+        fence_sigenergy: bool = False,
+    ) -> bool:
+        """Restore owned limits; report whether Sigenergy could be released."""
         entry_data = self.hass.data.get(DOMAIN, {}).get(
             self.config_entry.entry_id, {}
         )
         if not entry_data:
-            return
+            return not (fence_sigenergy and include_sigenergy)
+        prior_sigenergy_owner = entry_data.get("sigenergy_export_limit_owner", "normal")
+        if fence_sigenergy and include_sigenergy:
+            entry_data["sigenergy_dc_option_transition"] = True
 
         async def _restore_controller(
             label: str,
@@ -8050,10 +8056,20 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             state_key: str,
             *extra_state_keys: str,
             restore_when_state_lost: bool = False,
-        ) -> None:
+        ) -> bool:
             was_curtailed = entry_data.get(state_key) == "curtailed"
+            pending_sigenergy_zero = (
+                label == "Sigenergy"
+                and bool(entry_data.get("sigenergy_dc_zero_write_pending"))
+            )
+            if label == "Sigenergy":
+                owner = entry_data.get("sigenergy_export_limit_owner", "normal")
+                if owner in ("manual_force", "explicit"):
+                    # This register is no longer held by DC curtailment.
+                    return True
+                was_curtailed = was_curtailed or owner == "dc_zero" or pending_sigenergy_zero
             if not was_curtailed and not restore_when_state_lost:
-                return
+                return True
 
             coord = entry_data.get(coord_key)
             controller = getattr(coord, "_controller", coord)
@@ -8062,16 +8078,41 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     "%s curtailment was active but no restore controller is available",
                     label,
                 )
-                return
+                return False
 
+            if (label == "Sigenergy" and pending_sigenergy_zero
+                    and entry_data.get(state_key) != "curtailed"
+                    and entry_data.get("sigenergy_export_limit_owner") == "normal"):
+                try:
+                    current = await controller._get_current_export_limit()
+                except Exception:
+                    current = None
+                if (current is None or
+                        entry_data.get("sigenergy_export_limit_owner") != "normal"):
+                    return False  # Unknown zero or a concurrent owner handoff.
+                if current != controller.EXPORT_LIMIT_ZERO:
+                    entry_data.pop("sigenergy_dc_zero_write_pending", None)
+                    return True
+
+            if label == "Sigenergy":
+                # A queued fast repair may be waiting at the same Modbus lock.
+                # Revoke its permission before awaiting the physical restore.
+                entry_data["sigenergy_export_limit_owner"] = "normal"
             try:
-                success = await controller.restore()
+                if label == "Sigenergy":
+                    success = await controller.restore(still_eligible=lambda: (
+                        entry_data.get("sigenergy_export_limit_owner") == "normal"
+                    ))
+                else:
+                    success = await controller.restore()
             except Exception as err:
                 _LOGGER.error("%s curtailment restore failed: %s", label, err)
-                return
+                return False
 
             if success:
                 entry_data[state_key] = "normal"
+                if label == "Sigenergy":
+                    entry_data.pop("sigenergy_dc_zero_write_pending", None)
                 for key in extra_state_keys:
                     entry_data.pop(key, None)
                 if was_curtailed:
@@ -8087,13 +8128,37 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     )
             else:
                 _LOGGER.error("%s curtailment restore returned false", label)
+            return bool(success)
 
-        await _restore_controller(
-            "Sigenergy",
-            "sigenergy_coordinator",
-            "sigenergy_curtailment_state",
-            "_last_sigenergy_curtailment_reapply",
-        )
+        async def _rollback_failed_sigenergy_transition() -> None:
+            if not (fence_sigenergy and include_sigenergy):
+                return
+            if (prior_sigenergy_owner == "dc_zero"
+                    and entry_data.get("sigenergy_export_limit_owner") == "normal"):
+                coord = entry_data.get("sigenergy_coordinator")
+                controller = getattr(coord, "_controller", coord)
+                if controller is not None:
+                    try:
+                        current = await controller._get_current_export_limit()
+                        if (current == controller.EXPORT_LIMIT_ZERO
+                                and entry_data.get("sigenergy_export_limit_owner") == "normal"):
+                            entry_data["sigenergy_export_limit_owner"] = "dc_zero"
+                    except Exception:
+                        pass
+            entry_data.pop("sigenergy_dc_option_transition", None)
+
+        sigenergy_restored = True
+        if include_sigenergy:
+            sigenergy_restored = await _restore_controller(
+                "Sigenergy",
+                "sigenergy_coordinator",
+                "sigenergy_curtailment_state",
+                "_last_sigenergy_curtailment_reapply",
+            )
+        if not sigenergy_restored:
+            await _rollback_failed_sigenergy_transition()
+        if only_sigenergy:
+            return sigenergy_restored
         await _restore_controller(
             "AlphaESS",
             "alphaess_coordinator",
@@ -8216,10 +8281,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 _LOGGER.warning(
                     "AC inverter curtailment was active but no restore controller is available"
                 )
+        return sigenergy_restored
 
-    async def _restore_export_rule(self) -> None:
+    async def _restore_export_rule(self, *, retain_sigenergy_dc: bool = False) -> None:
         """Restore active curtailment controls when curtailment is disabled."""
-        await self._restore_owned_curtailment_limits()
+        await self._restore_owned_curtailment_limits(
+            include_sigenergy=not retain_sigenergy_dc,
+        )
 
         battery_system = self._get_option(CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA)
         if battery_system != BATTERY_SYSTEM_TESLA:
@@ -10540,6 +10608,20 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             if not modbus_host:
                 errors["base"] = "modbus_host_required"
             else:
+                was_dc_curtailment_enabled = bool(self._get_option(
+                    CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False
+                ))
+                dc_curtailment_enabled = bool(user_input.get(
+                    CONF_SIGENERGY_DC_CURTAILMENT_ENABLED,
+                    was_dc_curtailment_enabled,
+                ))
+                if was_dc_curtailment_enabled and not dc_curtailment_enabled:
+                    # Restore the held cap on the still-live controller before
+                    # updating the entry and reloading the connection.
+                    if not await self._restore_owned_curtailment_limits(
+                        only_sigenergy=True, fence_sigenergy=True,
+                    ):
+                        return self.async_abort(reason="sigenergy_curtailment_restore_failed")
                 new_data = dict(self.config_entry.data)
                 new_data[CONF_SIGENERGY_MODBUS_HOST] = modbus_host
                 new_data[CONF_SIGENERGY_MODBUS_PORT] = user_input.get(
@@ -10548,9 +10630,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 new_data[CONF_SIGENERGY_MODBUS_SLAVE_ID] = user_input.get(
                     CONF_SIGENERGY_MODBUS_SLAVE_ID, DEFAULT_SIGENERGY_MODBUS_SLAVE_ID
                 )
-                new_data[CONF_SIGENERGY_DC_CURTAILMENT_ENABLED] = user_input.get(
-                    CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False
-                )
+                new_data[CONF_SIGENERGY_DC_CURTAILMENT_ENABLED] = dc_curtailment_enabled
                 export_limit = user_input.get(CONF_SIGENERGY_EXPORT_LIMIT_KW)
                 if export_limit is not None:
                     new_data[CONF_SIGENERGY_EXPORT_LIMIT_KW] = export_limit
@@ -13622,6 +13702,19 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 # Store provider and Sigenergy settings
                 self._provider = user_input.get(CONF_ELECTRICITY_PROVIDER, "amber")
 
+                was_dc_curtailment_enabled = bool(self._get_option(
+                    CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False
+                ))
+                dc_curtailment_enabled = bool(user_input.get(
+                    CONF_SIGENERGY_DC_CURTAILMENT_ENABLED,
+                    was_dc_curtailment_enabled,
+                ))
+                if was_dc_curtailment_enabled and not dc_curtailment_enabled:
+                    if not await self._restore_owned_curtailment_limits(
+                        only_sigenergy=True, fence_sigenergy=True,
+                    ):
+                        return self.async_abort(reason="sigenergy_curtailment_restore_failed")
+
                 # Update config entry data with Sigenergy Modbus settings
                 new_data = dict(self.config_entry.data)
                 new_data[CONF_SIGENERGY_MODBUS_HOST] = modbus_host
@@ -13631,9 +13724,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 new_data[CONF_SIGENERGY_MODBUS_SLAVE_ID] = user_input.get(
                     CONF_SIGENERGY_MODBUS_SLAVE_ID, DEFAULT_SIGENERGY_MODBUS_SLAVE_ID
                 )
-                new_data[CONF_SIGENERGY_DC_CURTAILMENT_ENABLED] = user_input.get(
-                    CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False
-                )
+                new_data[CONF_SIGENERGY_DC_CURTAILMENT_ENABLED] = dc_curtailment_enabled
                 export_limit = user_input.get(CONF_SIGENERGY_EXPORT_LIMIT_KW)
                 if export_limit is not None:
                     new_data[CONF_SIGENERGY_EXPORT_LIMIT_KW] = export_limit
@@ -15127,8 +15218,33 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 )
             )
 
-            if was_curtailment_enabled and not new_curtailment_enabled:
-                await self._restore_export_rule()
+            was_dc_curtailment_enabled = (
+                bool(self._get_option(CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False))
+                if is_sigenergy else False
+            )
+            new_dc_curtailment_enabled = (
+                bool(user_input.get(
+                    CONF_SIGENERGY_DC_CURTAILMENT_ENABLED,
+                    was_dc_curtailment_enabled,
+                ))
+                if is_sigenergy else False
+            )
+            dc_curtailment_disabled = (
+                is_sigenergy
+                and was_dc_curtailment_enabled and not new_dc_curtailment_enabled
+            )
+            if dc_curtailment_disabled:
+                if not await self._restore_owned_curtailment_limits(
+                        only_sigenergy=True, fence_sigenergy=True,
+                    ):
+                    return self.async_abort(reason="sigenergy_curtailment_restore_failed")
+            battery_curtailment_disabled = (
+                was_curtailment_enabled and not new_curtailment_enabled
+            )
+            if battery_curtailment_disabled:
+                await self._restore_export_rule(
+                    retain_sigenergy_dc=is_sigenergy,
+                )
             if (
                 was_monitoring_curtailment_enabled
                 and not new_monitoring_curtailment_enabled
@@ -15136,7 +15252,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 # Relinquish only curtailment state PowerSync owns before the
                 # permission is persisted off. Monitoring Mode remains active
                 # and continues to block every unrelated control path.
-                await self._restore_owned_curtailment_limits()
+                if not await self._restore_owned_curtailment_limits(
+                    include_sigenergy=not dc_curtailment_disabled,
+                    fence_sigenergy=is_sigenergy and not dc_curtailment_disabled,
+                ):
+                    return self.async_abort(reason="sigenergy_curtailment_restore_failed")
 
             # Store curtailment settings (no weather options here)
             self._curtailment_options = {
@@ -15175,11 +15295,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             # If entered from menu, save curtailment settings and finish
             if getattr(self, "_from_menu", False):
                 if is_sigenergy:
-                    dc_enabled = user_input.get(
-                        CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False
-                    )
                     new_data = dict(self.config_entry.data)
-                    new_data[CONF_SIGENERGY_DC_CURTAILMENT_ENABLED] = dc_enabled
+                    new_data[CONF_SIGENERGY_DC_CURTAILMENT_ENABLED] = new_dc_curtailment_enabled
                     self.hass.config_entries.async_update_entry(
                         self.config_entry, data=new_data
                     )
@@ -15201,11 +15318,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
 
             if is_sigenergy:
                 # Sigenergy DC curtailment - save DC settings to config entry data
-                dc_enabled = user_input.get(
-                    CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False
-                )
                 new_data = dict(self.config_entry.data)
-                new_data[CONF_SIGENERGY_DC_CURTAILMENT_ENABLED] = dc_enabled
+                new_data[CONF_SIGENERGY_DC_CURTAILMENT_ENABLED] = new_dc_curtailment_enabled
                 self.hass.config_entries.async_update_entry(
                     self.config_entry, data=new_data
                 )

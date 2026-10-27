@@ -9,6 +9,7 @@ import sys
 import types
 import typing
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -203,6 +204,139 @@ def test_solar_export_hold_rejects_unlimited_export_limit(sigenergy_module):
     controller._read_holding_registers = read_holding
 
     assert asyncio.run(controller.get_grid_export_limit_kw()) is None
+
+
+def test_curtail_requires_zero_register_readback_before_granting_owner(sigenergy_module):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    current = [5000]
+    async def connect():
+        return True
+    async def read():
+        return current[0]
+    async def write(address, values, slave_id=None):
+        return True  # ACK alone is not physical zero.
+    controller.connect = connect
+    controller._get_current_export_limit = read
+    controller._write_holding_registers = write
+    assert asyncio.run(controller.curtail()) is False
+    assert controller._last_curtail_zero_write_ack is True
+    assert controller._original_pv_limit == 5000
+    current[0] = 0
+    assert asyncio.run(controller.curtail()) is True
+    assert controller._original_pv_limit == 5000
+
+
+def test_curtail_aborts_at_write_seam_when_manual_force_takes_ownership(sigenergy_module):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    owned = [True]
+    writes = []
+    async def connect():
+        return True
+    async def read():
+        owned[0] = False
+        return 5000
+    async def write(address, values, slave_id=None):
+        writes.append(values)
+        return True
+    controller.connect = connect
+    controller._get_current_export_limit = read
+    controller._write_holding_registers = write
+    assert not asyncio.run(controller.curtail(still_eligible=lambda: owned[0]))
+    assert writes == []
+
+
+def test_curtail_keeps_shared_modbus_transaction_through_write_guard(sigenergy_module):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    current = [5000]
+    controller.connect = AsyncMock(return_value=True)
+    controller._get_current_export_limit = AsyncMock(side_effect=lambda: current[0])
+    async def write(address, values, slave_id=None):
+        current[0] = 0
+        return True
+    controller._write_holding_registers = write
+    def eligible():
+        return controller._modbus_transaction_owner is asyncio.current_task()
+    assert asyncio.run(controller.curtail(still_eligible=eligible)) is True
+    assert current == [0]
+
+
+@pytest.mark.parametrize("baseline", [None, 10000])
+def test_reassert_zero_export_preserves_restore_baseline_and_reads_back(sigenergy_module, baseline):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    controller._original_pv_limit = baseline
+    actual_limit = 1500  # SAPN raised 40038 after PowerSync's original zero.
+    writes = []
+
+    async def connect():
+        return True
+
+    async def read(address, count, slave_id=None):
+        assert (address, count) == (controller.REG_GRID_EXPORT_LIMIT, 2)
+        return controller._from_unsigned32(actual_limit)
+
+    async def write(address, values, slave_id=None):
+        nonlocal actual_limit
+        writes.append((address, list(values)))
+        actual_limit = controller._to_unsigned32(*values)
+        return True
+
+    controller.connect = connect
+    controller._read_holding_registers = read
+    controller._write_holding_registers = write
+
+    assert asyncio.run(controller.reassert_zero_export()) is True
+    assert writes == [(controller.REG_GRID_EXPORT_LIMIT, [0, 0])]
+    assert controller._original_pv_limit == baseline
+    assert actual_limit == 0
+
+
+def test_reassert_zero_export_rechecks_permission_after_modbus_read(sigenergy_module):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    permitted = True
+    writes = []
+
+    async def connect():
+        return True
+
+    async def read(address, count, slave_id=None):
+        nonlocal permitted
+        permitted = False  # Price became profitable during I/O.
+        return controller._from_unsigned32(1500)
+
+    async def write(address, values, slave_id=None):
+        writes.append((address, values))
+        return True
+
+    controller.connect = connect
+    controller._read_holding_registers = read
+    controller._write_holding_registers = write
+    assert asyncio.run(controller.reassert_zero_export(
+        still_eligible=lambda: permitted,
+    )) is False
+    assert writes == []
+
+
+def test_restore_keeps_original_baseline_until_register_readback_confirms_it(sigenergy_module):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    controller._original_pv_limit = 5000
+    readback = [0]
+    writes = []
+    async def connect():
+        return True
+    async def write(address, values, slave_id=None):
+        writes.append(controller._to_unsigned32(*values))
+        return True
+    async def read_limit():
+        return readback[0]
+    controller.connect = connect
+    controller._write_holding_registers = write
+    controller._get_current_export_limit = read_limit
+    assert asyncio.run(controller.restore()) is False
+    assert controller._original_pv_limit == 5000
+    readback[0] = 5000
+    assert asyncio.run(controller.restore()) is True
+    assert writes == [5000, 5000]
+    assert controller._original_pv_limit is None
 
 
 def test_force_discharge_uses_pv_first_mode_when_solar_can_cover_target(sigenergy_module):
@@ -1036,6 +1170,70 @@ def test_write_holding_registers_reconnects_once_after_not_connected(sigenergy_m
     assert connects == 1
 
 
+def test_explicit_positive_cap_checks_owner_at_shared_write_seam(sigenergy_module):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    owner = ["explicit"]
+    writes = []
+    controller.connect = AsyncMock(return_value=True)
+    async def safety_cap():
+        owner[0] = "manual_force"
+        return 5.0
+    controller._get_effective_export_safety_cap_kw = safety_cap
+    async def write(address, values, slave_id=None):
+        writes.append(values)
+        return True
+    controller._write_holding_registers = write
+    assert not asyncio.run(controller.set_export_limit(
+        3.0, still_eligible=lambda: owner[0] == "explicit",
+    ))
+    assert writes == []
+    owner[0] = "explicit"
+    assert not asyncio.run(controller.restore_export_limit(
+        still_eligible=lambda: owner[0] == "explicit",
+    ))
+    assert writes == []
+
+
+def test_durable_controls_cap_edit_does_not_write_after_owner_handoff(sigenergy_module):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    controller._configured_max_export_limit_kw = 5.0
+    owner = ["normal"]
+    controller.connect = AsyncMock(return_value=True)
+    async def safety_cap():
+        owner[0] = "manual_force"
+        return 5.0
+    controller._get_effective_export_safety_cap_kw = safety_cap
+    writes = []
+    async def write(address, values, slave_id=None):
+        writes.append(values)
+        return True
+    controller._write_holding_registers = write
+    assert not asyncio.run(controller.apply_configured_export_limit(
+        3.0, curtailment_active=False,
+        still_eligible=lambda: owner[0] == "normal",
+    ))
+    assert writes == []
+    assert controller._configured_max_export_limit_kw == 5.0
+
+
+def test_policy_restore_aborts_before_write_after_manual_takeover(sigenergy_module):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    controller._original_pv_limit = 5000
+    owner = ["normal"]
+    writes = []
+    async def connect():
+        owner[0] = "manual_force"  # Handoff while restore awaited transport.
+        return True
+    controller.connect = connect
+    async def write(address, values, slave_id=None):
+        writes.append(values)
+        return True
+    controller._write_holding_registers = write
+    assert not asyncio.run(controller.restore(still_eligible=lambda: owner[0] == "normal"))
+    assert writes == []
+    assert controller._original_pv_limit == 5000
+
+
 def test_restore_normal_keeps_remote_ems_for_powersync_control(sigenergy_module):
     controller = sigenergy_module.SigenergyController(host="127.0.0.1")
     controller._restore_backup_reserve_pct = 25
@@ -1371,7 +1569,7 @@ def test_sigenergy_restore_preservation_propagates_cached_curtailment():
     assert no_discharge_source is not None
     assert "preserve_export_limit=preserve_export_limit" in no_discharge_source
     assert (
-        'entry_data.get("sigenergy_curtailment_state") == "curtailed"'
+        'entry_data.get("sigenergy_export_limit_owner") == "dc_zero"'
         in no_discharge_source
     )
 
@@ -1395,7 +1593,7 @@ def test_sigenergy_restore_preservation_propagates_cached_curtailment():
     assert "not native_control" in restore_source
     assert "preserve_export_limit=" in restore_source
     assert (
-        'entry_data.get("sigenergy_curtailment_state")' in restore_source
+        'entry_data.get("sigenergy_export_limit_owner")' in restore_source
     )
 
     self_consumption = next(
@@ -1408,7 +1606,7 @@ def test_sigenergy_restore_preservation_propagates_cached_curtailment():
     assert self_consumption_source is not None
     assert "preserve_export_limit=" in self_consumption_source
     assert (
-        'entry_data.get("sigenergy_curtailment_state")' in self_consumption_source
+        'entry_data.get("sigenergy_export_limit_owner")' in self_consumption_source
     )
 
 
@@ -1488,6 +1686,7 @@ def test_restore_treats_stored_zero_as_valid_original_limit(sigenergy_module):
 
     controller.connect = connect
     controller._write_holding_registers = write
+    controller._get_current_export_limit = lambda: asyncio.sleep(0, result=controller._to_unsigned32(*writes[-1][1]))
     controller.get_status = get_status
     controller._get_effective_export_safety_cap_kw = fail_safety_cap
 
@@ -1518,6 +1717,7 @@ def test_restore_uses_stored_original_limit_not_safety_cap(sigenergy_module):
 
     controller.connect = connect
     controller._write_holding_registers = write
+    controller._get_current_export_limit = lambda: asyncio.sleep(0, result=controller._to_unsigned32(*writes[-1][1]))
     controller.get_status = get_status
 
     assert asyncio.run(controller.restore())
@@ -1553,6 +1753,7 @@ def test_configured_export_cap_replaces_active_curtailment_restore_baseline(
 
     controller.connect = connect
     controller._write_holding_registers = write
+    controller._get_current_export_limit = lambda: asyncio.sleep(0, result=controller._to_unsigned32(*writes[-1][1]))
     controller.get_status = get_status
 
     controller.set_configured_export_limit(5.0)
@@ -1607,7 +1808,9 @@ def test_apply_active_export_cap_does_not_recapture_stale_live_limit(
         return True
 
     async def get_current_export_limit():
-        raise AssertionError("active cap update must not recapture the live register")
+        if not writes:
+            raise AssertionError("active cap update must not recapture the live register")
+        return controller._to_unsigned32(*writes[-1][1])
 
     async def get_status():
         return types.SimpleNamespace(is_curtailed=False)

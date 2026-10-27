@@ -209,6 +209,37 @@ canonical identity and ownership checks; they are not API payload bypasses.
   after the shared control lock, and manual inverter services first hand off any
   overlapping production stop.
 
+## Sigenergy external export-limit drift
+
+- SA Power Networks Flexible Exports can raise Sigenergy plant register 40038
+  after native PowerSync zero-export curtailment. A polled Sigen HA number is
+  only a drift hint, never command provenance or independent policy authority.
+  The existing scheduled Sigenergy DC handler alone decides whether zero is
+  required from the tariff and EV headroom. A confirmed zero grants entry-local
+  `dc_zero` ownership; the event listener reads the physical register and
+  repairs a nonzero limit only while that owner is current, rechecking at the
+  write seam. It does not independently evaluate tariff age, threshold or EV
+  headroom. Its three-attempt/rolling-five-minute bound and ten-second gap
+  affect only fast repair; the existing policy cadence is unchanged.
+- Manual Force Discharge owns 40038 until its successful end, when the DC
+  handler reassesses once. Native handoff and optional automation cap writes
+  relinquish DC ownership as one-shot commands; Controls durable cap edits
+  preserve current DC zero and cannot override manual force. Non-export
+  cleanup and coordinator helpers must use the current owner rather than a
+  stale `curtailed` acknowledgement. Restore/readback failures and a zero
+  write acknowledged without physical confirmation remain pending for
+  reconciliation at the next policy assessment. Battery-curtailment disable
+  cannot undo an enabled DC zero; DC-disable or permission-off fences all
+  scheduled DC writes through the restore and entry reload. A separately
+  configured AC-Sigenergy path cannot address the same plant endpoint.
+- Preserve the original pre-curtail cap; neither temporary force ceilings nor
+  an external limit rise become the restore baseline. Never disable CSIP/DNSP
+  control or add a competing HA-number writer. On startup the entry-local
+  owner is normal: a pre-restart physical zero has no reliable writer provenance
+  and is not automatically lifted at profitable prices without a separately
+  agreed durable-recovery design. Local tests cannot establish live inverter
+  behavior; HA deployment and physical validation remain separate.
+
 ## Android and diagnostics contracts
 
 - `tests/test_android_app_contract.py` and

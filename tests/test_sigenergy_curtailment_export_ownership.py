@@ -123,7 +123,7 @@ def _preserve_export_limit_expression(function_name: str) -> str:
     for node in ast.walk(function):
         if isinstance(node, ast.keyword) and node.arg == "preserve_export_limit":
             expression = ast.unparse(node.value)
-            if "sigenergy_curtailment_state" in expression:
+            if "sigenergy_export_limit_owner" in expression:
                 return expression
         if isinstance(node, ast.Assign):
             targets = [
@@ -133,7 +133,7 @@ def _preserve_export_limit_expression(function_name: str) -> str:
             ]
             if "preserve_export_limit" in targets:
                 expression = ast.unparse(node.value)
-                if "sigenergy_curtailment_state" in expression:
+                if "sigenergy_export_limit_owner" in expression:
                     return expression
     raise AssertionError(
         f"no sigenergy preserve_export_limit gate found in {function_name}"
@@ -142,9 +142,7 @@ def _preserve_export_limit_expression(function_name: str) -> str:
 
 def _evaluate_gate(expression: str, *, source: str, curtailed: bool,
                    native_control: bool = False) -> bool:
-    entry_data = {
-        "sigenergy_curtailment_state": "curtailed" if curtailed else "normal"
-    }
+    entry_data = {"sigenergy_export_limit_owner": "dc_zero" if curtailed else "normal"}
     return bool(
         eval(  # noqa: S307 — evaluating the shipped expression is the point
             expression,
@@ -285,6 +283,17 @@ def test_self_consumption_preserves_zero_export_for_every_source(source):
 
     assert _evaluate_gate(expression, source=source, curtailed=True) is True
     assert _evaluate_gate(expression, source=source, curtailed=False) is False
+
+
+def test_cleanup_preservation_uses_owner_not_old_command_ack():
+    source = INIT_PATH.read_text()
+    for function_name in ("handle_restore_normal", "handle_set_self_consumption"):
+        function = _setup_entry_function(function_name)
+        text = ast.get_source_segment(source, function)
+        assert text is not None
+        assert 'entry_data.get("sigenergy_export_limit_owner")' in text
+    coord = (COMPONENT_ROOT / "coordinator.py").read_text()
+    assert coord.count('entry_data.get("sigenergy_export_limit_owner") == "dc_zero"') >= 2
 
 
 def test_refused_export_leaves_an_active_force_charge_alone():

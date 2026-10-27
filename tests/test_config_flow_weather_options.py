@@ -3399,7 +3399,8 @@ def test_disabling_curtailment_restores_owned_inverter_limits():
 
     assert restore_source is not None
     assert helper_source is not None
-    assert "await self._restore_owned_curtailment_limits()" in restore_source
+    assert "include_sigenergy=not retain_sigenergy_dc" in restore_source
+    assert "await self._restore_owned_curtailment_limits(" in restore_source
     assert "battery_system != BATTERY_SYSTEM_TESLA" in restore_source
 
     for state_key in (

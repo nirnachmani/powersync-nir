@@ -2869,7 +2869,8 @@
       }
     },
     "abort": {
-      "solar_production_restore_pending": "The saved PV production setting could not be restored. Settings were not changed. Check device availability and retry."
+      "solar_production_restore_pending": "The saved PV production setting could not be restored. Settings were not changed. Check device availability and retry.",
+      "sigenergy_curtailment_restore_failed": "Could not restore the Sigenergy grid export limit before disabling DC curtailment. Settings were not changed; check device availability and retry."
     }
   },
   "issues": {

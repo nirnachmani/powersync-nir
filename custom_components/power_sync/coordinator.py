@@ -5931,7 +5931,7 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
         """Restore Sigenergy discharge capacity after no-discharge preserve mode."""
         entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {})
         preserve_export_limit = (
-            entry_data.get("sigenergy_curtailment_state") == "curtailed"
+            entry_data.get("sigenergy_export_limit_owner") == "dc_zero"
         )
         async with self._controller:
             return await self._controller.restore_normal(
@@ -5979,7 +5979,7 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
         del owner_id
         entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {})
         preserve_export_limit = (
-            entry_data.get("sigenergy_curtailment_state") == "curtailed"
+            entry_data.get("sigenergy_export_limit_owner") == "dc_zero"
         )
         async with self._controller:
             restored = await self._controller.restore_normal(
