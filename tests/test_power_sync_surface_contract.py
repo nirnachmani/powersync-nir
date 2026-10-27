@@ -227,7 +227,7 @@ _MANAGED_EV_HEADROOM_DIFF_SHA256 = (
 # from upstream 9595199b; this exact digest admits no other source change.
 _TOTAL_GRID_IMPORT_SOURCE = "11a227e4921164e207d19ee3244d0890bf77cd8c"
 _TOTAL_GRID_IMPORT_DIFF_SHA256 = (
-    "30a3bdfb5ef5fb0cac63fe18e783802c3308da58e2f465e89ac10be45fc9b959"
+    "0acb3f1f2c26bdb0c0f6c9bbd5752829b9fce76b1397df94e12f166e8d0edc07"
 )
 
 # Exact, path-specific exception for the reviewed Cost Neutral reachable-
