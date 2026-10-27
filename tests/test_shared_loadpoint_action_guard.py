@@ -119,6 +119,59 @@ def _generic_params() -> dict:
     }
 
 
+def test_solar_switch_writer_stops_only_selected_shared_profile(monkeypatch):
+    """The new config writer must retain the private physical/logical stop seam."""
+    dispatcher = types.ModuleType("homeassistant.helpers.dispatcher")
+    sent = []
+    dispatcher.async_dispatcher_send = lambda *args: sent.append(args)
+    monkeypatch.setitem(sys.modules, dispatcher.__name__, dispatcher)
+    sys.modules.pop("power_sync.solar_surplus_control", None)
+    control = importlib.import_module("power_sync.solar_surplus_control")
+
+    hass = _Hass(selector_state="tesla")
+    entry = _Entry()
+    store = SimpleNamespace(
+        _data={"solar_surplus_config": {"enabled": True}},
+        async_save=AsyncMock(),
+    )
+    hass.data["power_sync"][entry.entry_id]["automation_store"] = store
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state[entry.entry_id] = {
+        "shared_ev_profile_a": {
+            "active": False, "params": {"owner_mode": "solar_surplus"},
+        },
+        "shared_ev_profile_b": {
+            "active": True, "params": {"owner_mode": "solar_surplus"},
+        },
+    }
+    ownership.claim_ev_ownership(
+        hass, entry, "generic_ev", owner_mode="solar_surplus",
+        extra={"active_profile_id": "shared_ev_profile_b"},
+    )
+    stopped = []
+
+    async def stop_selected(hass_, entry_, params):
+        stopped.append(params["vehicle_id"])
+        ownership.release_ev_ownership(hass_, entry_, "generic_ev")
+        actions._dynamic_ev_state[entry_.entry_id].pop(params["vehicle_id"])
+        return True
+
+    monkeypatch.setattr(actions, "_action_stop_ev_charging_dynamic", stop_selected)
+    try:
+        result = asyncio.run(control.async_update_solar_surplus_config(
+            hass, entry, store, {"enabled": False}
+        ))
+    finally:
+        sys.modules.pop("power_sync.solar_surplus_control", None)
+
+    assert result["enabled"] is False
+    store.async_save.assert_awaited_once()
+    assert stopped == ["shared_ev_profile_b"]
+    assert "shared_ev_profile_a" in actions._dynamic_ev_state[entry.entry_id]
+    assert ownership.get_ev_ownerships(hass, entry) == {}
+    assert sent and sent[0][2] == entry.entry_id
+
+
 def test_shared_smart_schedule_cached_soc_cannot_authorize_current_write():
     """A fresh forecast cache is not live telemetry for a physical command."""
     hass = _Hass(profile_a_soc="unavailable")
