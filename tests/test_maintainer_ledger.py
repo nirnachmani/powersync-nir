@@ -290,3 +290,41 @@ def test_migration_rejects_malformed_server_legacy_upstream_metadata(tmp_path):
         assert migrated.returncode != 0
         assert "legacy state must contain last_reviewed_upstream" in migrated.stderr
         assert not ledger_state.exists()
+
+
+def test_merge_siblings_are_recorded_once_without_replaying_a_checkpoint(tmp_path):
+    repo, baseline, first, second = _repo(tmp_path)
+    trunk = _git(repo, "branch", "--show-current")
+    _git(repo, "switch", "-q", "-c", "side", second)
+    (repo / "side.txt").write_text("side\n", encoding="utf-8")
+    _git(repo, "add", "side.txt")
+    _git(repo, "commit", "-m", "side change")
+    side = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "switch", "-q", trunk)
+    (repo / "main.txt").write_text("main\n", encoding="utf-8")
+    _git(repo, "add", "main.txt")
+    _git(repo, "commit", "-m", "main change")
+    main = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "merge", "--no-ff", "side", "-m", "merge side")
+    target = _git(repo, "rev-parse", "HEAD")
+    state = tmp_path / "ledger.json"
+    _initialize(repo, state, baseline)
+
+    recorded = []
+    for _ in range(5):
+        payload = json.loads(_run(repo, "next", "--state", str(state), "--target", target).stdout)
+        sha = payload["next"]["sha"]
+        assert sha not in recorded
+        result = _run(repo, "record", "--state", str(state), "--target", target,
+                      "--sha", sha, "--outcome", "rejected", "--reason", "fixture",
+                      "--upstream-version", "v-test")
+        assert result.returncode == 0, result.stderr
+        recorded.append(sha)
+    assert set(recorded) == {first, second, side, main, target}
+    # A previously migrated schema-v1 ledger omitted the explicit baseline.
+    legacy = json.loads(state.read_text(encoding="utf-8"))
+    legacy.pop("baseline")
+    state.write_text(json.dumps(legacy), encoding="utf-8")
+    complete = _run(repo, "summary", "--state", str(state), "--target", target)
+    assert complete.returncode == 0, complete.stderr
+    assert json.loads(complete.stdout)["pending_count"] == 0

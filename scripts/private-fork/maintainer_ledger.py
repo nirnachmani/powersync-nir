@@ -118,6 +118,7 @@ def _new_ledger(baseline: str, boundary: str, references: list[str]) -> dict[str
         raise LedgerError("at least one migration reference is required")
     return {
         "schema_version": SCHEMA_VERSION,
+        "baseline": baseline,
         "checkpoint": baseline,
         "migration": {"boundary": boundary, "references": references},
         "entries": [],
@@ -126,7 +127,7 @@ def _new_ledger(baseline: str, boundary: str, references: list[str]) -> dict[str
 
 def _range(repo: Path, checkpoint: str, target: str) -> list[dict[str, str]]:
     _git(repo, "merge-base", "--is-ancestor", checkpoint, target)
-    raw = _git(repo, "log", "--format=%H%x00%s", "--reverse", f"{checkpoint}..{target}")
+    raw = _git(repo, "log", "--format=%H%x00%s", "--reverse", "--topo-order", f"{checkpoint}..{target}")
     if not raw:
         return []
     commits: list[dict[str, str]] = []
@@ -136,9 +137,38 @@ def _range(repo: Path, checkpoint: str, target: str) -> list[dict[str, str]]:
     return commits
 
 
+def _baseline(repo: Path, ledger: dict[str, Any]) -> str:
+    """Recover the migration anchor for pre-baseline-field ledgers."""
+    explicit = ledger.get("baseline")
+    if explicit is not None:
+        if not isinstance(explicit, str) or not FULL_SHA.fullmatch(explicit):
+            raise LedgerError("invalid ledger baseline")
+        return explicit
+    entries = ledger["entries"]
+    if not entries:
+        return ledger["checkpoint"]
+    first = entries[0].get("upstream", {}).get("sha")
+    if not isinstance(first, str) or not FULL_SHA.fullmatch(first):
+        raise LedgerError("cannot recover baseline from first ledger entry")
+    parents = _git(repo, "rev-list", "--parents", "-n", "1", first).split()
+    if len(parents) != 2:
+        raise LedgerError("legacy first entry must have exactly one parent; baseline is ambiguous")
+    return parents[1]
+
+
 def _pending(repo: Path, ledger: dict[str, Any], target_revision: str) -> tuple[str, list[dict[str, str]]]:
     target = _resolve_commit(repo, target_revision, "target")
-    return target, _range(repo, ledger["checkpoint"], target)
+    baseline = _baseline(repo, ledger)
+    commits = _range(repo, baseline, target)
+    known = [entry.get("upstream", {}).get("sha") for entry in ledger["entries"]]
+    if len(set(known)) != len(known) or any(sha not in {commit["sha"] for commit in commits} for sha in known):
+        raise LedgerError("ledger entries must be unique commits between baseline and target")
+    if known and ledger["checkpoint"] != known[-1]:
+        raise LedgerError("checkpoint must match the last recorded upstream commit")
+    if not known and ledger["checkpoint"] != baseline:
+        raise LedgerError("empty ledger checkpoint must equal baseline")
+    recorded = set(known)
+    return target, [commit for commit in commits if commit["sha"] not in recorded]
 
 
 def _next_payload(repo: Path, ledger: dict[str, Any], target: str) -> dict[str, Any]:
