@@ -432,8 +432,11 @@ class EnergyAccumulator:
     Resets at local midnight. Persisted via HA Store to survive restarts.
     """
 
-    def __init__(self, hass: HomeAssistant | None = None, store_key: str = "") -> None:
+    def __init__(self, hass: HomeAssistant | None = None, store_key: str = "", entry_id: str = "") -> None:
         self._hass = hass
+        self._entry_id = entry_id
+        self._supply_cost_state: dict = {}
+        self._supply_cost_tracker: Any = None
         self._last_update: datetime | None = None
         self._last_date: Any = None
         self.solar_kwh: float = 0.0
@@ -494,6 +497,7 @@ class EnergyAccumulator:
             return
         if not data:
             return
+        self._supply_cost_state = data.get("supply_cost_state") or {}
         stored_date = data.get("date")
         now = dt_util.now()
         today = now.strftime("%Y-%m-%d")
@@ -746,6 +750,10 @@ class EnergyAccumulator:
         stored_month = self._last_month or stored_date.strftime("%Y-%m")
         return {
             "date": stored_date.strftime("%Y-%m-%d"),
+            "supply_cost_state": (
+                self._supply_cost_tracker.state
+                if self._supply_cost_tracker is not None else self._supply_cost_state
+            ),
             "solar_kwh": round(self.solar_kwh, 4),
             "grid_import_kwh": round(self.grid_import_kwh, 4),
             "grid_export_kwh": round(self.grid_export_kwh, 4),
@@ -824,6 +832,15 @@ class EnergyAccumulator:
             sell_price_per_kwh: current export/feed-in price in $/kWh (None = skip cost tracking)
         """
         now = dt_util.now()  # Local time for midnight reset
+        if self._hass is not None and self._entry_id:
+            from .daily_cost import configure_supply_tracker
+
+            self._supply_cost_tracker = configure_supply_tracker(
+                self._hass, self._entry_id, now,
+                self._supply_cost_tracker, self._supply_cost_state,
+            )
+        elif self._supply_cost_tracker is not None:
+            self._supply_cost_tracker.observe(now)
 
         def _finite_price(value: float | None) -> float | None:
             try:
@@ -899,8 +916,13 @@ class EnergyAccumulator:
 
         # Integrate power × time
         if self._last_update is not None:
-            delta_h = (now - self._last_update).total_seconds() / 3600
+            delta_h = (now.timestamp() - self._last_update.timestamp()) / 3600
             if 0 < delta_h < 0.1:  # Sanity: skip if > 6 min gap (stale/restart)
+                mtd_delta_h = min(delta_h, (now.timestamp() - now.replace(
+                    day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()) / 3600)
+                # A crossing sample belongs only to the current local day.
+                delta_h = min(delta_h, (now.timestamp() - now.replace(
+                    hour=0, minute=0, second=0, microsecond=0).timestamp()) / 3600)
                 self.solar_kwh += max(0, solar_kw) * delta_h
                 self.grid_import_kwh += max(0, grid_kw) * delta_h
                 self.grid_export_kwh += max(0, -grid_kw) * delta_h
@@ -918,19 +940,19 @@ class EnergyAccumulator:
                     self.export_earnings_today += export_kwh * sell_price_per_kwh
                     self.export_earnings_covered_kwh += export_kwh
                 # MTD accumulation
-                self.mtd_solar_kwh += max(0, solar_kw) * delta_h
-                self.mtd_grid_import_kwh += max(0, grid_kw) * delta_h
-                self.mtd_grid_export_kwh += max(0, -grid_kw) * delta_h
-                self.mtd_battery_charge_kwh += max(0, -battery_kw) * delta_h
-                self.mtd_battery_discharge_kwh += max(0, battery_kw) * delta_h
+                self.mtd_solar_kwh += max(0, solar_kw) * mtd_delta_h
+                self.mtd_grid_import_kwh += max(0, grid_kw) * mtd_delta_h
+                self.mtd_grid_export_kwh += max(0, -grid_kw) * mtd_delta_h
+                self.mtd_battery_charge_kwh += max(0, -battery_kw) * mtd_delta_h
+                self.mtd_battery_discharge_kwh += max(0, battery_kw) * mtd_delta_h
                 if load_kw is not None:
-                    self.mtd_load_kwh += max(0, load_kw) * delta_h
+                    self.mtd_load_kwh += max(0, load_kw) * mtd_delta_h
                 if buy_price_per_kwh is not None:
-                    import_kwh = max(0, grid_kw) * delta_h
+                    import_kwh = max(0, grid_kw) * mtd_delta_h
                     self.mtd_import_cost += import_kwh * buy_price_per_kwh
                     self.mtd_import_cost_covered_kwh += import_kwh
                 if sell_price_per_kwh is not None:
-                    export_kwh = max(0, -grid_kw) * delta_h
+                    export_kwh = max(0, -grid_kw) * mtd_delta_h
                     self.mtd_export_earnings += export_kwh * sell_price_per_kwh
                     self.mtd_export_earnings_covered_kwh += export_kwh
                 if load_kw is None:
@@ -1020,7 +1042,7 @@ class EnergyAccumulator:
             )
             else None
         )
-        return {
+        summary = {
             "pv_today_kwh": round(self.solar_kwh, 3),
             "grid_import_today_kwh": round(self.grid_import_kwh, 3),
             "grid_export_today_kwh": round(self.grid_export_kwh, 3),
@@ -1045,6 +1067,10 @@ class EnergyAccumulator:
             "mtd_load_kwh": round(self.mtd_load_kwh, 3),
             "avg_cost_per_kwh_mtd": avg_mtd,
         }
+        return (
+            self._supply_cost_tracker.summary(summary)
+            if self._supply_cost_tracker is not None else summary
+        )
 
     def reconcile_hardware_daily_coverage(
         self,
@@ -5664,7 +5690,7 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
             configured_charge_rate_limit_kw=configured_charge_rate_limit_kw,
             configured_discharge_rate_limit_kw=configured_discharge_rate_limit_kw,
         )
-        self._energy_acc = EnergyAccumulator(hass, "sigenergy")
+        self._energy_acc = EnergyAccumulator(hass, "sigenergy", entry_id)
         # Rated charge/discharge power in kW — cached after first successful
         # read from input registers 30079/30081. Static hardware spec so it
         # only needs to be fetched once.

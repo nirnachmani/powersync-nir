@@ -8169,7 +8169,10 @@ class PowerSyncStrategy {
         costEntities.push({ entity: e('daily_import_cost'), name: 'Estimated Import Cost Today', icon: 'mdi:cash-minus' });
       }
       if (hasEntityE('daily_export_earnings')) {
-        costEntities.push({ entity: e('daily_export_earnings'), name: 'Export Earnings Today', icon: 'mdi:cash-plus' });
+        costEntities.push({ entity: e('daily_export_earnings'), name: 'Estimated Export Earnings Today', icon: 'mdi:cash-plus' });
+      }
+      if (hasEntityE('daily_net_cost')) {
+        costEntities.push({ entity: e('daily_net_cost'), name: 'Estimated Net Cost Today (incl. supply)', icon: 'mdi:cash' });
       }
       if (hasEntityE('daily_avg_cost_per_kwh')) {
         costEntities.push({ entity: e('daily_avg_cost_per_kwh'), name: 'Avg Cost per kWh (Today)', icon: 'mdi:cash-clock' });
