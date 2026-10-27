@@ -1,3 +1,12 @@
+<!-- release: v2.12.1517-nir.1 -->
+
+## v2.12.1517-nir.1 — reviewed upstream through v2.12.1517
+- Amber optimiser ignores timestamped price intervals outside its forecast horizon instead of rebasing them onto the current slot (adapted from upstream `9b5a62e6`); the exact no-paywall continuity gate and upstream pricing regressions passed.
+- Sigenergy site energy estimates now include configured daily/monthly supply costs and keep local-day/month totals separate at midnight (vendor-neutral part of `ccf8f688`). GloBird ZeroHero bonus and credit logic was excluded.
+- Solar Surplus offers an HA switch sharing the app's stored setting; disabling it still uses the private selected-logical-EV stop and physical ownership guard (`97c37ec4`). Existing Android POST behavior and routes remain compatible.
+- The maintainer ledger now handles merge-branch upstream commits without replaying prior outcomes. The published Sigenergy export-limit ownership/repair fixes from the previous release were retained when reconciling the private branches.
+- Private architecture, optimiser continuity, Android contract, shared-loadpoint and reconciliation gates passed. This is a source release only: no Home Assistant installation/restart, storage edit, or charger command was performed.
+
 <!-- release: v2.12.1492-nir.5 -->
 
 ## v2.12.1492-nir.5 — Sigenergy export-limit ownership and fast zero repair
