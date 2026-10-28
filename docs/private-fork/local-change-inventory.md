@@ -240,6 +240,19 @@ canonical identity and ownership checks; they are not API payload bypasses.
   agreed durable-recovery design. Local tests cannot establish live inverter
   behavior; HA deployment and physical validation remain separate.
 
+## HACS-only update surface
+
+- HACS owns the fork's install-capable update entity and download action. The
+  retired `Platform.UPDATE`/`update.py` was a notification-only duplicate that
+  checked upstream releases and could never install them. On entry setup,
+  remove only the exact legacy `update` entity with platform `power_sync` and
+  this config entry's unique ID; never remove HACS-owned entities, including
+  an older HACS registry row left by a prior repository.
+- The separate opt-in scheduled updater in `auto_update.py` is not part of this
+  change; it still has an upstream-release fallback and must not be described
+  as a verified automatic fork-update mechanism. HACS discovery of a new fork
+  release is distinct from this retired entity and must be checked separately.
+
 ## Android and diagnostics contracts
 
 - `tests/test_android_app_contract.py` and

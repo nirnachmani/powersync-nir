@@ -1,3 +1,9 @@
+<!-- release: v2.12.1517-nir.2 -->
+
+## v2.12.1517-nir.2 — HACS-only PowerSync updates
+- Retire PowerSync's notification-only `update.power_sync_update` platform, which checked the original upstream repository but could not install updates. HACS's install-capable update entity for the configured repository is now the only PowerSync update source; on integration setup, remove only the old PowerSync-owned update registry entry, leaving HACS update entities untouched.
+- The separate scheduled auto-update feature is unchanged and remains opt-in; this release does not fix its upstream-release fallback or enable unattended installation/restarts. Existing `power_sync` configuration and Android routes are unchanged. Source release only; no Home Assistant installation, restart, or physical device command was performed.
+
 <!-- release: v2.12.1517-nir.1 -->
 
 ## v2.12.1517-nir.1 — reviewed upstream through v2.12.1517

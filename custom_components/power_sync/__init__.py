@@ -3499,8 +3499,23 @@ PLATFORMS: list[Platform] = [
     Platform.NUMBER,
     Platform.BINARY_SENSOR,
     Platform.BUTTON,
-    Platform.UPDATE,
 ]
+
+
+def _remove_retired_power_sync_update_entity(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """Retire only this entry's non-installable update; HACS owns updates."""
+    registry = er.async_get(hass)
+    entity_id = registry.async_get_entity_id(
+        "update", DOMAIN, f"{entry.entry_id}_update"
+    )
+    if entity_id is None:
+        return
+    old_entity = registry.async_get(entity_id)
+    if old_entity is not None and old_entity.config_entry_id == entry.entry_id:
+        registry.async_remove(entity_id)
+
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
@@ -25785,8 +25800,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if inverter_control_lock is not None:
                 inverter_control_lock.release()
 
-    # Set up platforms
+    # Set up platforms; the non-installable PowerSync update was retired in
+    # favour of HACS's install-capable repository update entity.
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    _remove_retired_power_sync_update_entity(hass, entry)
 
     # Register services
     def _static_tou_tariff_schedule_for_sync() -> dict | None:
