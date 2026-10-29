@@ -26,7 +26,9 @@ def _function(name: str, globals_: dict):
     assert len(matches) == 1, f"expected one real {name} function"
     code = ast.Module(body=[matches[0]], type_ignores=[])
     ast.fix_missing_locations(code)
-    namespace = {"math": math, **globals_}
+    # Existing isolated tests run without Home Assistant installed. Tests of
+    # HA's event dispatch pass the real decorator explicitly instead.
+    namespace = {"math": math, "callback": lambda fn: fn, **globals_}
     exec(compile(code, str(INIT), "exec"), namespace)
     return namespace[name]
 
@@ -628,6 +630,57 @@ def test_sigen_number_event_schedules_one_guarded_reassertion_not_a_feedback_loo
         data["sigenergy_export_limit_owner"] = "normal"
         callback(event("0.0", "1.5"))
         reassert.assert_awaited_once()
+    asyncio.run(scenario())
+
+
+def test_sigen_number_listener_is_marked_for_event_loop_dispatch():
+    """The regular test suite must catch a missing HA callback marker."""
+    handler = next(
+        node for node in ast.walk(ast.parse(INIT.read_text()))
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_sigenergy_export_limit_changed"
+    )
+    assert any(isinstance(dec, ast.Name) and dec.id == "callback"
+               for dec in handler.decorator_list)
+
+
+def test_sigen_number_listener_runs_via_real_ha_event_helper(tmp_path):
+    """Exercise HA's executor-vs-event-loop dispatch, not direct invocation."""
+    pytest.importorskip("homeassistant")
+    from homeassistant.core import HomeAssistant, callback as ha_callback
+    from homeassistant.helpers.event import async_track_state_change_event
+
+    async def scenario():
+        hass = HomeAssistant(str(tmp_path))
+        data = {"sigenergy_export_limit_owner": "dc_zero"}
+        hass.data["power_sync"] = {"entry": data}
+        reassert = AsyncMock(return_value=True)
+        handler = _function("_sigenergy_export_limit_changed", {
+            "hass": hass, "entry": SimpleNamespace(entry_id="entry"),
+            "DOMAIN": "power_sync", "callback": ha_callback,
+            "_reassert_sigenergy_export_limit": reassert,
+            "_sigenergy_limit_rose": _function("_sigenergy_limit_rose", {}),
+        })
+        unsub = async_track_state_change_event(
+            hass, "number.sigen_plant_grid_export_limitation", handler,
+        )
+        try:
+            hass.states.async_set("number.sigen_plant_grid_export_limitation", "0.0")
+            await hass.async_block_till_done()
+            hass.states.async_set("number.sigen_plant_grid_export_limitation", "1.5")
+            await hass.async_block_till_done()
+            reassert.assert_awaited_once()
+            assert data["sigenergy_reassert_task"].done()
+
+            data["sigenergy_export_limit_owner"] = "normal"
+            hass.states.async_set("number.sigen_plant_grid_export_limitation", "0.0")
+            hass.states.async_set("number.sigen_plant_grid_export_limitation", "2.0")
+            await hass.async_block_till_done()
+            reassert.assert_awaited_once()
+        finally:
+            unsub()
+            await hass.async_stop()
+
     asyncio.run(scenario())
 
 

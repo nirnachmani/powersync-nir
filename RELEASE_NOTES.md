@@ -1,3 +1,9 @@
+<!-- release: v2.12.1517-nir.3 -->
+
+## v2.12.1517-nir.3 — Sigenergy zero-export event-loop correction
+- Mark the Sigenergy export-limit state-change listener as a Home Assistant event-loop callback. Previously the synchronous handler ran in an executor, where scheduling the guarded zero-export repair raised a thread-safety error before any Modbus work began. The existing `dc_zero` ownership, retry bounds, register readback and restore semantics are unchanged.
+- A regression using Home Assistant's actual state-change event helper reproduced the thread-safety error before the correction and passed afterward; the Sigenergy test suite passed. Publication makes the fix installable through HACS; no Home Assistant installation, restart or inverter write is part of this source release.
+
 <!-- release: v2.12.1517-nir.2 -->
 
 ## v2.12.1517-nir.2 — HACS-only PowerSync updates

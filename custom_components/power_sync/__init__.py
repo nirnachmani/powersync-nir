@@ -42863,6 +42863,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if is_sigenergy:
         from homeassistant.helpers.event import async_track_state_change_event
 
+        @callback
         def _sigenergy_export_limit_changed(event) -> None:
             """Treat Sigen's polled register rise as a hint, never permission."""
             data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
