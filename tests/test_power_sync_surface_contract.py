@@ -258,7 +258,7 @@ _NATIVE_SOLAR_CLIPPED_EXPORT_DIFF_SHA256 = (
 # final solar credits constrain discretionary exports. No broader delta is admitted.
 _DISABLE_IDLE_DEADLINE_SOURCE = "25f388110c1159fbaf08d614e77af6ef4dc32f03"
 _DISABLE_IDLE_DEADLINE_DIFF_SHA256 = (
-    "575a2dec4bc5a82eb5f766af1419ccc200ea76eaddfc09459bd5ed1ac847d3cd"
+    "03deef0461eed1cfb83eccc1a120f7c7d3cc341c2db69fce774c192ff30303fa"
 )
 
 # Exact upstream 52465064 plan-schema delta. Legacy no-solar callers remain
