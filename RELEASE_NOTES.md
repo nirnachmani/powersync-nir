@@ -1,3 +1,9 @@
+<!-- release: v2.12.1517-nir.4 -->
+
+## v2.12.1517-nir.4 — align PowerSync maintainer policy
+- Consolidate the tracked maintainer skill with the server's branch-reconciliation and merge-ledger rules and the fork's hunk-by-hunk divergence safeguard. Make upstream relevance explicitly outcome-first: identify the issue fixed or enhancement delivered, then port compatible behavior or adapt it to private invariants, while recording redundancy and excluding entitlement code.
+- Document exact tracked/profile skill synchronisation so future server-only edits cannot silently diverge. No PowerSync runtime behavior or HA configuration is changed by this source release; updating HA through HACS is unnecessary for the maintainer-policy change.
+
 <!-- release: v2.12.1517-nir.3 -->
 
 ## v2.12.1517-nir.3 — Sigenergy zero-export event-loop correction

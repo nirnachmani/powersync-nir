@@ -1,7 +1,7 @@
 ---
 name: powersync-private-updates
 description: "Use when maintaining the PowerSync Nir fork against upstream."
-version: 1.0.0
+version: 1.0.1
 ---
 
 # PowerSync Nir fork upstream maintenance
@@ -44,6 +44,22 @@ Before work, establish:
    legacy file as read-only input/backup and use the CLI's safe `migrate
    --legacy-state` command with a matching baseline; do not create fictional
    historical commit outcomes or let `maintainer_cycle.py` overwrite the ledger.
+
+## Skill source of truth and synchronisation
+
+The tracked `docs/private-fork/hermes-skill/powersync-private-updates/SKILL.md`
+on the approved GitHub fork is canonical. When discussing what the maintainer
+*currently* does, inspect the copy installed in its named server profile; a
+missing local profile says nothing about that server. Compare the tracked
+GitHub file, the server checkout's tracked file, and the profile's installed
+`skills/powersync-private-updates/SKILL.md` by content, not mtime alone.
+
+After an authorised policy change, reconcile useful rules into the tracked
+source, commit/publish it, install that version to the named profile with the
+repository installer, and verify exact content equality. A repository push
+alone does not update a profile-local skill; a profile-local `skill_manage`
+change does not update GitHub. Do not edit another profile without explicit
+authorisation.
 
 ## Required gates
 
@@ -101,7 +117,13 @@ permission, command-fencing and hosted-access code out.
 ## Workflow
 
 1. Record `git status --short`, private starting SHA, last reviewed upstream
-   SHA/tag, and target upstream SHA/tag.
+   SHA/tag, and target upstream SHA/tag. Fetch the approved `origin` before
+   preparing candidates. If its feature branch is ahead, verify those commits'
+   provenance and relation to the ledger before fast-forwarding a clean source.
+   If release `main` has separate published private commits, reconcile them in
+   a detached candidate, preserve their behavior, and rerun both gates before
+   advancing the feature branch and fast-forwarding `main`. Never overwrite
+   published private fixes with an older feature tip.
 2. Read `docs/private-fork/local-change-inventory.md` and
    `docs/private-fork/powersync-private-updates-reference.md`.
 3. Fetch and compare the explicit upstream range deterministically using the
@@ -115,17 +137,28 @@ permission, command-fencing and hosted-access code out.
    reason cannot be established, do not assume equivalence or overwrite it;
    stop at that ledger commit for review. The structural classifier is only a
    triage signal and cannot prove that an apparently no-overlap hunk is safe.
-4. Apply this relevance and interaction screen before the no-paywall classification:
+4. Apply outcome-first relevance and interaction triage before the no-paywall
+   classification. For each changed hunk, identify the actual issue it fixes
+   or enhancement it supplies, then ask whether that *outcome* benefits a
+   supported fork path, an approved optional capability, or a relevant shared
+   prerequisite. An identically named fork function is not required; a new
+   capability can be relevant. In particular:
    - Is it relevant to Amber, Sigenergy, solar/site flows, private shared EVs,
      an existing AI explanation provider, or another explicitly approved optional
      feature? Existing AI providers are in scope even if presently unselected.
      Otherwise record the specific unavailable vendor or feature as
      `irrelevant to configured setup` and reject without a candidate.
+   - If the fork already achieves the outcome, record equivalent private
+     coverage instead of copying code.
    - Does it plausibly interact with private two-EV or external-session code?
-     If not, port it minimally without a private quality audit or new tests.
-   - If it does interact, decide whether private behavior remains compatible.
-     If the choice is uncertain or trades private functionality against another
-     required outcome, stop and ask the user before implementation.
+     If not, port the relevant behavior minimally without a private quality
+     audit or new tests. If it does, adapt the outcome to private invariants,
+     excluding entitlement code, with a targeted interaction regression.
+   - If the choice is uncertain, trades private functionality against another
+     required outcome, or needs a new security decision, stop and ask the user
+     before implementation. A failed gate stops publication and needs a concrete
+     diagnosis. Do not reject a relevant fix merely because upstream implements
+     it differently.
    Then classify the remaining delta as one of:
    - **No overlap:** no private modules/direct tests touched.
    - **Mechanical overlap:** same file, separable hunks.
@@ -179,6 +212,11 @@ permission, command-fencing and hosted-access code out.
   the intended private ref; `record` defaults to
   `--private-ref feature/shared-logical-evs`, and an explicit `--private-ref`
   is required when a different intended branch is used.
+  At upstream merge branches, use the ledger CLI's `next` result rather than
+  first-parent log order or a simple `checkpoint..target` range: independent
+  side-branch commits must each be recorded once. The CLI enumerates from its
+  migration baseline and filters already-recorded SHAs; a simple range can
+  replay sibling commits after the checkpoint crosses branches.
   Its atomic write advances the checkpoint with the durable entry; it rejects
   `deferred`, missing mandatory details, unknown or wrong-branch private SHAs,
   and out-of-order work.
