@@ -224,11 +224,12 @@ _MANAGED_EV_HEADROOM_DIFF_SHA256 = (
 # Exact generic total-grid leveling adaptation of upstream b50a2cba. The
 # preceding 2c875c9b source is checked separately; no Tesla actuator follows.
 # Also includes only the two reviewed vendor-neutral acknowledgement log lines
-# from upstream 9595199b and the opt-in live solar correction from 6f944b49;
+# from upstream 9595199b, opt-in solar correction 6f944b49, and measured
+# solar provenance through export replans cc49c3d0;
 # this exact digest admits no other source change.
 _TOTAL_GRID_IMPORT_SOURCE = "11a227e4921164e207d19ee3244d0890bf77cd8c"
 _TOTAL_GRID_IMPORT_DIFF_SHA256 = (
-    "720d0931d121397d347fa72bed170a135626982f3756b229ef38cc90d39eb677"
+    "728003bfc97ff32c4028422226672ca2202ea242fd4d5f93191ed9edba9c5087"
 )
 
 # Exact, path-specific exception for the reviewed Cost Neutral reachable-
@@ -256,10 +257,11 @@ _NATIVE_SOLAR_CLIPPED_EXPORT_DIFF_SHA256 = (
 
 # Exact allowance for upstream 2ff8c9d2 and 52465064 on top of the fully
 # reviewed private optimizer source. Disable Idle projects the runtime action;
-# final solar credits constrain discretionary exports. No broader delta is admitted.
+# final solar credits constrain discretionary exports, and cc49c3d0 funds
+# active export from measured opening solar. No broader delta is admitted.
 _DISABLE_IDLE_DEADLINE_SOURCE = "25f388110c1159fbaf08d614e77af6ef4dc32f03"
 _DISABLE_IDLE_DEADLINE_DIFF_SHA256 = (
-    "03deef0461eed1cfb83eccc1a120f7c7d3cc341c2db69fce774c192ff30303fa"
+    "8fd4ca651f22488562539ee2da272603038693d0f508bcb0510835c34281bc39"
 )
 
 # Exact upstream 52465064 plan-schema delta. Legacy no-solar callers remain
