@@ -1,3 +1,9 @@
+<!-- release: v2.12.1572-nir.2 -->
+
+## v2.12.1572-nir.2 — fork-only scheduled HACS updates
+- Restrict the optional scheduled updater to the HACS update entity registered for `nirnachmani/powersync-nir`, checking both its GitHub repository ID and HACS-generated release URL, even when an old upstream entity remains or the fork entity is renamed. The GitHub fallback now checks the fork's releases, accepts only newer `-nir.<serial>` tags, and pins the validated tag in `update.install` so HACS cannot switch versions between check and action. Unknown/upstream-only tags fail closed; a newer fork release supersedes an older pending download before restart.
+- Update the maintainer policy and private-architecture inventory to trace a newly exposed setting through existing side-effecting code, including repository identity and install/physical-command boundaries. Manual HACS updates are unchanged. Source release only: no HA installation, restart, or device control was performed.
+
 <!-- release: v2.12.1572-nir.1 -->
 
 ## v2.12.1572-nir.1 — reviewed upstream through v2.12.1572

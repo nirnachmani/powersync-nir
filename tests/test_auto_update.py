@@ -24,6 +24,7 @@ _STUBBED_MODULES = (
     "homeassistant.helpers",
     "homeassistant.helpers.event",
     "homeassistant.helpers.dispatcher",
+    "homeassistant.helpers.entity_registry",
     "homeassistant.helpers.storage",
     "homeassistant.util",
     "homeassistant.util.dt",
@@ -80,6 +81,12 @@ _ha_dispatcher = sys.modules.setdefault(
     types.ModuleType("homeassistant.helpers.dispatcher"),
 )
 _ha_dispatcher.async_dispatcher_send = lambda *args, **kwargs: None
+
+_ha_entity_registry = sys.modules.setdefault(
+    "homeassistant.helpers.entity_registry",
+    types.ModuleType("homeassistant.helpers.entity_registry"),
+)
+setattr(_ha_entity_registry, "async_get", lambda hass: hass.entity_registry)
 
 _ha_storage = sys.modules.setdefault(
     "homeassistant.helpers.storage",
@@ -166,10 +173,27 @@ class _Services:
 
 
 class _Hass:
-    def __init__(self, states: list[_State]) -> None:
+    def __init__(self, states: list[_State], *, registry_entries: dict | None = None) -> None:
         self.states = _States(states)
         self.services = _Services()
         self.data = {}
+        # Existing fixtures represent the HACS fork entity unless overridden.
+        if registry_entries is None:
+            registry_entries = {
+                entity_id: types.SimpleNamespace(platform="hacs", unique_id="1377010839")
+                for entity_id in ("update.power_sync_update", "update.powersync_update")
+            }
+        self.entity_registry = types.SimpleNamespace(async_get=registry_entries.get)
+        for state in states:
+            entity = registry_entries.get(state.entity_id)
+            if (entity is not None and entity.platform == "hacs"
+                    and str(entity.unique_id) == "1377010839"
+                    and "release_url" not in state.attributes
+                    and state.attributes.get("latest_version")):
+                state.attributes["release_url"] = (
+                    "https://github.com/nirnachmani/powersync-nir/releases/"
+                    + str(state.attributes["latest_version"])
+                )
 
     def async_create_task(self, coro, *, name: str) -> None:
         asyncio.run(coro)
@@ -214,7 +238,8 @@ def test_find_power_sync_update_entities_requires_install_capability():
         _State(
             "update.power_sync_update",
             "on",
-            {"friendly_name": "PowerSync Update", "supported_features": 16},
+            {"friendly_name": "PowerSync Update", "supported_features": 16,
+             "latest_version": "v2.12.1572-nir.1"},
         ),
         _State(
             "update.tesla_amber_sync_update",
@@ -228,16 +253,174 @@ def test_find_power_sync_update_entities_requires_install_capability():
         ),
     ])
 
-    assert auto_update.find_power_sync_update_entities(hass) == [
-        "update.tesla_amber_sync_update",
-    ]
+    assert auto_update.find_power_sync_update_entities(hass) == []
     assert auto_update.find_power_sync_update_entities(
         hass,
         require_install=False,
-    ) == [
-        "update.power_sync_update",
-        "update.tesla_amber_sync_update",
-    ]
+    ) == ["update.power_sync_update"]
+
+
+def test_install_pins_the_fork_tag_even_if_hacs_latest_changes():
+    state = _State("update.power_sync_update", "on", {
+        "supported_features": 3,
+        "installed_version": "v2.12.1572-nir.1",
+        "latest_version": "v2.12.1572-nir.2",
+    })
+    hass = _Hass([state])
+    original_call = hass.services.async_call
+
+    async def changed_during_install(domain, service, data=None, *, blocking=False):
+        if domain == "update" and service == "install":
+            state.attributes["latest_version"] = "v2.12.1573-nir.1"
+        await original_call(domain, service, data, blocking=blocking)
+
+    hass.services.async_call = changed_during_install
+    result = asyncio.run(auto_update.async_install_power_sync_update(hass))
+    assert result == auto_update.AutoUpdateInstallResult(
+        entity_id=state.entity_id, action=auto_update.AUTO_UPDATE_ACTION_INSTALLED,
+    )
+    assert ("update", "install", {
+        "entity_id": state.entity_id, "version": "v2.12.1572-nir.2",
+    }, True) in hass.services.calls
+
+
+def test_transferred_repository_id_does_not_authorize_a_new_slug():
+    """The GitHub repository ID survives transfers; its HACS slug must not."""
+    state = _State("update.powersync_update", "on", {
+        "supported_features": 3,
+        "installed_version": "v2.12.1572-nir.1",
+        "latest_version": "v2.12.1572-nir.2",
+        "release_url": "https://github.com/another-owner/powersync-nir/releases/v2.12.1572-nir.2",
+    })
+    hass = _Hass([state])
+    assert auto_update.find_power_sync_update_entities(hass) == []
+
+
+def test_install_targets_only_the_registry_identity_of_the_fork():
+    """An old upstream HACS entity can coexist with the fork and appear first."""
+    upstream = _State("update.tesla_amber_sync_update", "on", {
+        "friendly_name": "PowerSync update",
+        "supported_features": 3,
+        "installed_version": "2.12.1572",
+        "latest_version": "2.12.1573",
+    })
+    fork = _State("update.renamed_fork", "on", {
+        "friendly_name": "My charger integration",
+        "supported_features": 3,
+        "installed_version": "v2.12.1572-nir.1",
+        "latest_version": "v2.12.1572-nir.2",
+    })
+    hass = _Hass([upstream, fork], registry_entries={
+        upstream.entity_id: types.SimpleNamespace(platform="hacs", unique_id="99999"),
+        fork.entity_id: types.SimpleNamespace(platform="hacs", unique_id="1377010839"),
+    })
+
+    assert auto_update.find_power_sync_update_entities(hass) == [fork.entity_id]
+    result = asyncio.run(auto_update.async_install_power_sync_update(hass))
+    assert result == auto_update.AutoUpdateInstallResult(
+        entity_id=fork.entity_id, action=auto_update.AUTO_UPDATE_ACTION_INSTALLED,
+    )
+    assert ("update", "install", {
+        "entity_id": fork.entity_id, "version": "v2.12.1572-nir.2",
+    }, True) in hass.services.calls
+    assert not any(
+        domain == "update" and data is not None and data.get("entity_id") == upstream.entity_id
+        for domain, _, data, _ in hass.services.calls
+    )
+
+
+def test_install_rejects_upstream_only_latest_tag_on_trusted_fork_entity():
+    state = _State("update.power_sync_update", "on", {
+        "supported_features": 3,
+        "installed_version": "v2.12.1572-nir.1",
+        "latest_version": "v2.12.1573",
+    })
+    hass = _Hass([state])
+    original_retries = auto_update.HACS_REFRESH_RETRIES
+    original_lookup = auto_update.async_get_latest_published_release
+    setattr(auto_update, "HACS_REFRESH_RETRIES", 1)
+    async def no_release(_hass):
+        return None
+    setattr(auto_update, "async_get_latest_published_release", no_release)
+    try:
+        result = asyncio.run(auto_update.async_install_power_sync_update(hass))
+    finally:
+        setattr(auto_update, "HACS_REFRESH_RETRIES", original_retries)
+        setattr(auto_update, "async_get_latest_published_release", original_lookup)
+    assert result is None
+    assert not any(domain == "update" and service == "install" for domain, service, _, _ in hass.services.calls)
+
+
+def test_fork_update_version_comparison_never_guesses_or_downgrades():
+    assert auto_update._version_is_newer("v2.12.1572-nir.2", "v2.12.1572-nir.1")
+    assert auto_update._version_is_newer("v2.12.1572-nir.1", "2.12.1572")
+    assert not auto_update._version_is_newer("v2.12.1571-nir.9", "v2.12.1572-nir.1")
+    assert not auto_update._version_is_newer("v2.12.1572-nir.1", "v2.12.1572-nir.1")
+    assert not auto_update._version_is_newer("v2.12.1573", "v2.12.1572-nir.1")
+    assert not auto_update._version_is_newer("unexpected", "v2.12.1572-nir.1")
+
+
+def test_missing_or_non_hacs_registry_identity_cannot_install():
+    state = _State("update.fork_renamed", "on", {
+        "friendly_name": "PowerSync",
+        "supported_features": 3,
+        "installed_version": "v2.12.1572-nir.1",
+        "latest_version": "v2.12.1572-nir.2",
+    })
+    original_retries = auto_update.HACS_REFRESH_RETRIES
+    setattr(auto_update, "HACS_REFRESH_RETRIES", 1)
+    try:
+        for entries in ({}, {state.entity_id: types.SimpleNamespace(
+            platform="power_sync", unique_id="1377010839",
+        )}):
+            hass = _Hass([state], registry_entries=entries)
+            assert auto_update.find_power_sync_update_entities(hass) == []
+            assert asyncio.run(auto_update.async_install_power_sync_update(hass)) is None
+            assert not any(service == "install" for _, service, _, _ in hass.services.calls)
+    finally:
+        setattr(auto_update, "HACS_REFRESH_RETRIES", original_retries)
+
+
+def test_published_release_lookup_uses_fork_and_rejects_upstream_tags():
+    requested_urls: list[str] = []
+    next_tag = ["v2.12.1572-nir.2"]
+
+    class _Response:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def json(self):
+            return {"tag_name": next_tag[0]}
+
+    class _Session:
+        def get(self, url, **_kwargs):
+            requested_urls.append(url)
+            return _Response()
+
+    module = types.ModuleType("homeassistant.helpers.aiohttp_client")
+    setattr(module, "async_get_clientsession", lambda hass: _Session())
+    previous = sys.modules.get(module.__name__, _MISSING)
+    sys.modules[module.__name__] = module
+    try:
+        assert asyncio.run(auto_update.async_get_latest_published_release(_Hass([]))) == (
+            auto_update.PublishedRelease("v2.12.1572-nir.2", "2.12.1572-nir.2")
+        )
+        next_tag[0] = "v2.12.1573"
+        assert asyncio.run(auto_update.async_get_latest_published_release(_Hass([]))) is None
+    finally:
+        if previous is _MISSING:
+            sys.modules.pop(module.__name__, None)
+        else:
+            assert isinstance(previous, types.ModuleType)
+            sys.modules[module.__name__] = previous
+    assert requested_urls == [
+        "https://api.github.com/repos/nirnachmani/powersync-nir/releases/latest"
+    ] * 2
 
 
 def test_install_does_not_mutate_hacs_repository_internals():
@@ -246,9 +429,9 @@ def test_install_does_not_mutate_hacs_repository_internals():
         "on",
         {
             "friendly_name": "PowerSync Update",
-            "supported_features": 1,
-            "installed_version": "2.12.272",
-            "latest_version": "2.12.273",
+            "supported_features": 3,
+            "installed_version": "2.12.272-nir.1",
+            "latest_version": "2.12.273-nir.1",
         },
     )
     hass = _Hass([state])
@@ -268,9 +451,27 @@ def test_install_does_not_mutate_hacs_repository_internals():
     assert (
         "update",
         "install",
-        {"entity_id": "update.power_sync_update"},
+        {"entity_id": "update.power_sync_update", "version": "2.12.273-nir.1"},
         True,
     ) in hass.services.calls
+
+
+def test_pending_restart_of_older_fork_release_installs_newer_before_restart():
+    state = _State("update.power_sync_update", "on", {
+        "supported_features": 3,
+        "installed_version": "v2.12.1572-nir.1",
+        "latest_version": "v2.12.1572-nir.2",
+        "release_summary": "Restart of Home Assistant required",
+    })
+    hass = _Hass([state])
+    assert asyncio.run(auto_update.async_install_power_sync_update(hass)) == (
+        auto_update.AutoUpdateInstallResult(
+            entity_id=state.entity_id, action=auto_update.AUTO_UPDATE_ACTION_INSTALLED,
+        )
+    )
+    assert ("update", "install", {
+        "entity_id": state.entity_id, "version": "v2.12.1572-nir.2",
+    }, True) in hass.services.calls
 
 
 def test_install_handles_hacs_pending_restart_without_reinstalling():
@@ -280,8 +481,8 @@ def test_install_handles_hacs_pending_restart_without_reinstalling():
         {
             "friendly_name": "PowerSync Update",
             "supported_features": 1,
-            "installed_version": "2.12.273",
-            "latest_version": "2.12.273",
+            "installed_version": "2.12.273-nir.1",
+            "latest_version": "2.12.273-nir.1",
             "release_summary": "Restart of Home Assistant required",
         },
     )
@@ -307,14 +508,14 @@ def test_install_uses_published_tag_when_hacs_metadata_stays_stale():
         {
             "friendly_name": "PowerSync update",
             "supported_features": 3,
-            "installed_version": "2.12.1238",
-            "latest_version": "2.12.1238",
+            "installed_version": "2.12.1238-nir.1",
+            "latest_version": "2.12.1238-nir.1",
         },
     )
     hass = _Hass([state])
 
     async def _published_release(_hass):
-        return auto_update.PublishedRelease("v2.12.1246", "2.12.1246")
+        return auto_update.PublishedRelease("v2.12.1246-nir.1", "2.12.1246-nir.1")
 
     original_release_lookup = auto_update.async_get_latest_published_release
     auto_update.async_get_latest_published_release = _published_release
@@ -339,7 +540,7 @@ def test_install_uses_published_tag_when_hacs_metadata_stays_stale():
             "install",
             {
                 "entity_id": "update.powersync_update",
-                "version": "v2.12.1246",
+                "version": "v2.12.1246-nir.1",
             },
             True,
         ),
@@ -353,14 +554,14 @@ def test_stale_hacs_metadata_fails_closed_without_specific_version_support():
         {
             "friendly_name": "PowerSync update",
             "supported_features": 1,
-            "installed_version": "2.12.1238",
-            "latest_version": "2.12.1238",
+            "installed_version": "2.12.1238-nir.1",
+            "latest_version": "2.12.1238-nir.1",
         },
     )
     hass = _Hass([state])
 
     async def _published_release(_hass):
-        return auto_update.PublishedRelease("v2.12.1246", "2.12.1246")
+        return auto_update.PublishedRelease("v2.12.1246-nir.1", "2.12.1246-nir.1")
 
     original_release_lookup = auto_update.async_get_latest_published_release
     original_retries = auto_update.HACS_REFRESH_RETRIES
@@ -382,6 +583,29 @@ def test_stale_hacs_metadata_fails_closed_without_specific_version_support():
     )
 
 
+def test_stale_release_never_writes_an_upstream_tag_even_if_version_claims_fork():
+    state = _State("update.powersync_update", "off", {
+        "supported_features": 3,
+        "installed_version": "v2.12.1572-nir.1",
+        "latest_version": "v2.12.1572-nir.1",
+    })
+    hass = _Hass([state])
+
+    async def inconsistent_release(_hass):
+        return auto_update.PublishedRelease("v2.12.1573", "2.12.1573-nir.1")
+
+    original_lookup = auto_update.async_get_latest_published_release
+    original_retries = auto_update.HACS_REFRESH_RETRIES
+    setattr(auto_update, "async_get_latest_published_release", inconsistent_release)
+    setattr(auto_update, "HACS_REFRESH_RETRIES", 1)
+    try:
+        assert asyncio.run(auto_update.async_install_power_sync_update(hass)) is None
+    finally:
+        setattr(auto_update, "async_get_latest_published_release", original_lookup)
+        setattr(auto_update, "HACS_REFRESH_RETRIES", original_retries)
+    assert not any(service == "install" for _, service, _, _ in hass.services.calls)
+
+
 def test_stale_hacs_metadata_does_not_install_a_non_newer_release():
     state = _State(
         "update.powersync_update",
@@ -389,14 +613,14 @@ def test_stale_hacs_metadata_does_not_install_a_non_newer_release():
         {
             "friendly_name": "PowerSync update",
             "supported_features": 3,
-            "installed_version": "2.12.1246",
-            "latest_version": "2.12.1246",
+            "installed_version": "2.12.1246-nir.1",
+            "latest_version": "2.12.1246-nir.1",
         },
     )
     hass = _Hass([state])
 
     async def _published_release(_hass):
-        return auto_update.PublishedRelease("v2.12.1246", "2.12.1246")
+        return auto_update.PublishedRelease("v2.12.1246-nir.1", "2.12.1246-nir.1")
 
     original_release_lookup = auto_update.async_get_latest_published_release
     original_retries = auto_update.HACS_REFRESH_RETRIES
@@ -422,8 +646,8 @@ def test_stale_hacs_metadata_fails_closed_when_release_lookup_is_unavailable():
         {
             "friendly_name": "PowerSync update",
             "supported_features": 3,
-            "installed_version": "2.12.1238",
-            "latest_version": "2.12.1238",
+            "installed_version": "2.12.1238-nir.1",
+            "latest_version": "2.12.1238-nir.1",
         },
     )
     hass = _Hass([state])
@@ -454,9 +678,10 @@ def test_install_retries_when_hacs_entity_appears_after_scheduler_starts():
         "on",
         {
             "friendly_name": "PowerSync Update",
-            "supported_features": 1,
-            "installed_version": "2.12.1231",
-            "latest_version": "2.12.1232",
+            "supported_features": 3,
+            "installed_version": "2.12.1231-nir.1",
+            "latest_version": "2.12.1232-nir.1",
+            "release_url": "https://github.com/nirnachmani/powersync-nir/releases/2.12.1232-nir.1",
         },
     )
 

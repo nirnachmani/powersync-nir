@@ -1,7 +1,7 @@
 ---
 name: powersync-private-updates
 description: "Use when maintaining the PowerSync Nir fork against upstream."
-version: 1.0.2
+version: 1.0.3
 ---
 
 # PowerSync Nir fork upstream maintenance
@@ -149,6 +149,17 @@ permission, command-fencing and hosted-access code out.
    reason cannot be established, do not assume equivalence or overwrite it;
    stop at that ledger commit for review. The structural classifier is only a
    triage signal and cannot prove that an apparently no-overlap hunk is safe.
+   When a port exposes or changes a setting/UI that activates an existing
+   side-effecting path, trace that path through its API/options, scheduler or
+   action, identity lookup, and final install/physical command—even when the
+   downstream file is unchanged upstream. Check the fork-specific boundary at
+   each seam, not upstream's general product design. In particular, scheduled
+   updates must target only the verified `nirnachmani/powersync-nir` HACS
+   repository (ID and current slug) and fork release tags; an old upstream HACS
+   entity or upstream release must fail closed. Pin the validated tag at the
+   `update.install` write seam rather than trusting HACS's mutable latest value,
+   and verify restart intent against a newer pending release. Add one focused
+   regression for a wrong target and the physical/install boundary.
 4. Apply outcome-first relevance and interaction triage before the no-paywall
    classification. For each changed hunk, identify the actual issue it fixes
    or enhancement it supplies, then ask whether that *outcome* benefits a

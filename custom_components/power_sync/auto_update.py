@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
+from urllib.parse import urlsplit
 
 from homeassistant.components.update import UpdateEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_ENTITY_ID
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
@@ -41,18 +44,17 @@ HACS_REFRESH_INTERVAL_S = 60
 # boots later in the day don't surprise users with a daytime restart.
 TRIGGER_WINDOW_HOURS = 4
 LAST_RUN_STORE_VERSION = 1
-POWER_SYNC_UPDATE_HINTS = (
-    "power_sync",
-    "powersync",
-    "power sync",
-    "tesla_amber_sync",
-    "tesla amber sync",
-)
+# GitHub's immutable repository ID, also used as the HACS entity's unique ID.
+# A renamed entity is fine; the HACS-generated release URL checks the current slug.
+FORK_HACS_REPOSITORY_ID = "1377010839"  # nirnachmani/powersync-nir
+FORK_GITHUB_REPOSITORY = "nirnachmani/powersync-nir"
 AUTO_UPDATE_ACTION_INSTALLED = "installed"
 AUTO_UPDATE_ACTION_PENDING_RESTART = "pending_restart"
 GITHUB_LATEST_RELEASE_URL = (
-    "https://api.github.com/repos/bolagnaise/PowerSync/releases/latest"
+    "https://api.github.com/repos/nirnachmani/powersync-nir/releases/latest"
 )
+_FORK_RELEASE_VERSION = re.compile(r"v?(\d+)\.(\d+)\.(\d+)-nir\.(\d+)\Z")
+_BASE_VERSION = re.compile(r"v?(\d+)\.(\d+)\.(\d+)\Z")
 
 
 @dataclass(frozen=True)
@@ -103,23 +105,6 @@ def _entry_option(entry: ConfigEntry, key: str, default: Any = None) -> Any:
     return entry.options.get(key, entry.data.get(key, default))
 
 
-def _state_haystack(state: Any) -> str:
-    """Build searchable text for an update entity state."""
-    attrs = state.attributes or {}
-    values = [
-        state.entity_id,
-        attrs.get("friendly_name", ""),
-        attrs.get("title", ""),
-        attrs.get("release_url", ""),
-        attrs.get("entity_picture", ""),
-    ]
-    return (
-        " ".join(str(value) for value in values if value)
-        .lower()
-        .replace("-", "_")
-    )
-
-
 def _supports_install(state: Any) -> bool:
     """Return True when an update entity supports update.install."""
     try:
@@ -127,6 +112,22 @@ def _supports_install(state: Any) -> bool:
     except (TypeError, ValueError):
         supported = 0
     return bool(supported & int(UpdateEntityFeature.INSTALL))
+
+
+def _has_fork_release_url(state: Any) -> bool:
+    """Check the public HACS update attribute derived from its current repo slug."""
+    attrs = state.attributes or {}
+    latest = str(attrs.get("latest_version") or "")
+    if _FORK_RELEASE_VERSION.fullmatch(latest) is None:
+        return False
+    url = urlsplit(str(attrs.get("release_url") or ""))
+    return (
+        url.scheme == "https"
+        and url.netloc == "github.com"
+        and url.path == f"/{FORK_GITHUB_REPOSITORY}/releases/{latest}"
+        and not url.query
+        and not url.fragment
+    )
 
 
 def _supports_specific_version(state: Any) -> bool:
@@ -140,36 +141,23 @@ def _supports_specific_version(state: Any) -> bool:
 
 
 def _version_is_newer(latest: Any, installed: Any) -> bool:
-    """Return True when latest appears newer than installed."""
-    if not latest or not installed:
+    """Compare only fork releases; never guess an ordering for unknown tags."""
+    candidate = _FORK_RELEASE_VERSION.fullmatch(str(latest or ""))
+    current = _FORK_RELEASE_VERSION.fullmatch(str(installed or ""))
+    base = _BASE_VERSION.fullmatch(str(installed or "")) if current is None else None
+    if candidate is None or (current is None and base is None):
         return False
-
-    latest_text = str(latest).strip().lstrip("v")
-    installed_text = str(installed).strip().lstrip("v")
-    if not latest_text or not installed_text or latest_text == installed_text:
-        return False
-
-    try:
-        from packaging.version import Version
-
-        return Version(latest_text) > Version(installed_text)
-    except Exception:
-        pass
-
-    try:
-        latest_parts = tuple(int(part) for part in latest_text.split("."))
-        installed_parts = tuple(int(part) for part in installed_text.split("."))
-    except ValueError:
-        return latest_text != installed_text
-
+    latest_parts = tuple(int(part) for part in candidate.groups())
+    if current is not None:
+        installed_parts = tuple(int(part) for part in current.groups())
+    else:
+        assert base is not None
+        installed_parts = (*tuple(int(part) for part in base.groups()), -1)
     return latest_parts > installed_parts
 
 
 def _state_has_pending_update(state: Any) -> bool:
     """Return True when an update state should be installed."""
-    if state.state == "on":
-        return True
-
     attrs = state.attributes or {}
     return _version_is_newer(
         attrs.get("latest_version"),
@@ -190,17 +178,26 @@ def find_power_sync_update_entities(
     require_install: bool = True,
     exclude_entity_id: str | None = None,
 ) -> list[str]:
-    """Find likely PowerSync HACS update entities."""
+    """Select only the HACS update entity for this exact GitHub fork."""
     matches: list[str] = []
+    registry = er.async_get(hass)
     for state in hass.states.async_all(UPDATE_DOMAIN):
         if exclude_entity_id and state.entity_id == exclude_entity_id:
             continue
-        haystack = _state_haystack(state)
-        if not any(hint in haystack for hint in POWER_SYNC_UPDATE_HINTS):
+        entity = registry.async_get(state.entity_id)
+        if (
+            entity is None
+            or entity.platform != "hacs"
+            or str(entity.unique_id) != FORK_HACS_REPOSITORY_ID
+            or not _has_fork_release_url(state)
+        ):
             continue
         if require_install and not _supports_install(state):
             continue
         matches.append(state.entity_id)
+    if len(matches) > 1:
+        _LOGGER.warning("PowerSync auto-update: ambiguous fork HACS update entities")
+        return []
     return matches
 
 
@@ -250,10 +247,10 @@ async def async_get_latest_published_release(
         )
         return None
 
-    version = tag.lstrip("v")
-    if not tag or not version:
-        _LOGGER.debug("PowerSync auto-update: published release has no usable tag")
+    if _FORK_RELEASE_VERSION.fullmatch(tag) is None:
+        _LOGGER.debug("PowerSync auto-update: published release is not a fork tag")
         return None
+    version = tag.lstrip("v")
     return PublishedRelease(tag=tag, version=version)
 
 
@@ -308,7 +305,13 @@ async def async_install_power_sync_update(
             if state is None:
                 continue
 
-            if _state_needs_restart(state):
+            if (
+                _state_needs_restart(state)
+                and _FORK_RELEASE_VERSION.fullmatch(
+                    str(state.attributes.get("installed_version") or "")
+                )
+                and not _state_has_pending_update(state)
+            ):
                 _LOGGER.info(
                     "PowerSync auto-update: %s is already pending a Home "
                     "Assistant restart",
@@ -319,19 +322,20 @@ async def async_install_power_sync_update(
                     action=AUTO_UPDATE_ACTION_PENDING_RESTART,
                 )
 
-            if _state_has_pending_update(state):
+            if _state_has_pending_update(state) and _supports_specific_version(state):
+                tag = str(state.attributes.get("latest_version") or "")
                 _LOGGER.info(
                     "PowerSync auto-update: installing via %s "
                     "(attempt %d, installed=%s, latest=%s)",
                     entity_id,
                     attempt,
                     state.attributes.get("installed_version"),
-                    state.attributes.get("latest_version"),
+                    tag,
                 )
                 await hass.services.async_call(
                     UPDATE_DOMAIN,
                     SERVICE_INSTALL,
-                    {ATTR_ENTITY_ID: entity_id},
+                    {ATTR_ENTITY_ID: entity_id, "version": tag},
                     blocking=True,
                 )
                 return AutoUpdateInstallResult(
@@ -353,6 +357,8 @@ async def async_install_power_sync_update(
                     installed_version = state.attributes.get("installed_version")
                     if (
                         not _supports_specific_version(state)
+                        or _FORK_RELEASE_VERSION.fullmatch(published_release.tag) is None
+                        or published_release.tag.lstrip("v") != published_release.version
                         or not _version_is_newer(
                             published_release.version, installed_version
                         )

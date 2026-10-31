@@ -16,6 +16,26 @@ current repository only; it is not a deployment or upstream-update procedure.
   relevant no-interaction port preserves its upstream regression without adding
   a private test.
 
+## HACS-only scheduled updates (fork identity)
+
+- The optional PowerSync auto-update scheduler in `auto_update.py` may install
+  and restart HA. It must select only a live HACS update entity whose entity
+  registry entry has platform `hacs` and the fork's GitHub repository ID
+  (`1377010839`, `nirnachmani/powersync-nir`) as its unique ID, and whose
+  HACS-generated release URL names that exact current repository slug. Do not
+  select by friendly name or entity ID: the original upstream HACS entry can
+  coexist. If either identity check is missing or ambiguous, fail closed.
+- Accept only a newer `v<major>.<minor>.<patch>-nir.<serial>` fork release from
+  the fork's GitHub API or the verified HACS entity, and pin that exact tag in
+  `update.install` (never rely on a mutable latest-version default). An unknown
+  or upstream-only tag, or unverifiable ordering, must fail closed rather than
+  install or restart. If a newer fork tag is available while an older download
+  is pending restart, install the newer tag before the restart. Leave manual
+  HACS updates and HACS repository internals to HACS.
+- When porting settings/dashboard UI for the scheduler, trace through the
+  options API, scheduled install, version source, and final HA restart seam;
+  ensure a new UI cannot expose an old upstream-only actuator unchanged.
+
 ## Shared physical loadpoint selection and binding
 
 - `custom_components/power_sync/automations/shared_loadpoint.py` defines the
