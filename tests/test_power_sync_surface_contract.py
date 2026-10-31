@@ -224,10 +224,11 @@ _MANAGED_EV_HEADROOM_DIFF_SHA256 = (
 # Exact generic total-grid leveling adaptation of upstream b50a2cba. The
 # preceding 2c875c9b source is checked separately; no Tesla actuator follows.
 # Also includes only the two reviewed vendor-neutral acknowledgement log lines
-# from upstream 9595199b; this exact digest admits no other source change.
+# from upstream 9595199b and the opt-in live solar correction from 6f944b49;
+# this exact digest admits no other source change.
 _TOTAL_GRID_IMPORT_SOURCE = "11a227e4921164e207d19ee3244d0890bf77cd8c"
 _TOTAL_GRID_IMPORT_DIFF_SHA256 = (
-    "9206e716b2ec1ec1d9ec128e628153b58f47f84c2d5480fc720e3a3b8ed4933b"
+    "720d0931d121397d347fa72bed170a135626982f3756b229ef38cc90d39eb677"
 )
 
 # Exact, path-specific exception for the reviewed Cost Neutral reachable-

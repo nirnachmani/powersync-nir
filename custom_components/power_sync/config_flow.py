@@ -509,6 +509,8 @@ from .const import (
     SIGENERGY_CHARGER_TYPES,
     SIGENERGY_CHARGER_EVAC,
     # Solcast Solar Forecast configuration
+    CONF_SOLAR_NOWCAST_ENABLED,
+    DEFAULT_SOLAR_NOWCAST_ENABLED,
     CONF_SOLAR_FORECAST_PROVIDER,
     DEFAULT_SOLAR_FORECAST_PROVIDER,
     SOLAR_FORECAST_PROVIDERS,
@@ -15497,6 +15499,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
 
             # Store weather and Solcast settings
             weather_options = {
+                CONF_SOLAR_NOWCAST_ENABLED: user_input.get(
+                    CONF_SOLAR_NOWCAST_ENABLED,
+                    self._get_option(CONF_SOLAR_NOWCAST_ENABLED, DEFAULT_SOLAR_NOWCAST_ENABLED),
+                ) is True,
                 CONF_WEATHER_LOCATION: user_input.get(CONF_WEATHER_LOCATION, ""),
                 CONF_OPENWEATHERMAP_API_KEY: user_input.get(
                     CONF_OPENWEATHERMAP_API_KEY, ""
@@ -15518,6 +15524,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             }
             self._remove_legacy_data_keys(
                 (
+                    CONF_SOLAR_NOWCAST_ENABLED,
                     CONF_SOLCAST_ENABLED,
                     CONF_SOLCAST_API_KEY,
                     CONF_SOLCAST_RESOURCE_ID,
@@ -15563,6 +15570,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         self._add_weather_entity_selector(schema_dict)
         schema_dict.update(
             {
+                vol.Optional(
+                    CONF_SOLAR_NOWCAST_ENABLED,
+                    default=self._get_option(
+                        CONF_SOLAR_NOWCAST_ENABLED, DEFAULT_SOLAR_NOWCAST_ENABLED,
+                    ),
+                ): BooleanSelector(),
                 vol.Optional(
                     CONF_SOLAR_FORECAST_PROVIDER,
                     default=self._get_option(

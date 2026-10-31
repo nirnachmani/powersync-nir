@@ -521,6 +521,8 @@ from .const import (
     # Solcast solar forecasting
     CONF_SOLAR_FORECAST_PROVIDER,
     DEFAULT_SOLAR_FORECAST_PROVIDER,
+    CONF_SOLAR_NOWCAST_ENABLED,
+    DEFAULT_SOLAR_NOWCAST_ENABLED,
     SOLAR_FORECAST_PROVIDER_VOLCAST,
     SOLAR_FORECAST_PROVIDERS,
     CONF_SOLCAST_ENABLED,
@@ -14294,6 +14296,7 @@ class CurrentWeatherView(HomeAssistantView):
 
 
 _SOLCAST_SETTINGS_KEYS = (
+    CONF_SOLAR_NOWCAST_ENABLED,
     CONF_SOLCAST_ENABLED,
     CONF_SOLCAST_API_KEY,
     CONF_SOLCAST_RESOURCE_ID,
@@ -14419,6 +14422,10 @@ class WeatherSolcastSettingsView(HomeAssistantView):
             "success": True,
             "weather_location": opts.get(CONF_WEATHER_LOCATION, ""),
             "openweathermap_api_key": opts.get(CONF_OPENWEATHERMAP_API_KEY, ""),
+            "solar_nowcast_enabled": opts.get(
+                CONF_SOLAR_NOWCAST_ENABLED, DEFAULT_SOLAR_NOWCAST_ENABLED,
+            ) is True,
+            "solar_nowcast_supported": True,
             "solar_forecast_provider": selected_provider,
             "solar_forecast_source": solcast_source,
             "solar_forecast_active": solar_forecast_active,
@@ -14466,6 +14473,14 @@ class WeatherSolcastSettingsView(HomeAssistantView):
                     data["solar_forecast_provider"]
                 )
                 new_data.pop(CONF_SOLAR_FORECAST_PROVIDER, None)
+            if CONF_SOLAR_NOWCAST_ENABLED in data:
+                if type(data[CONF_SOLAR_NOWCAST_ENABLED]) is not bool:
+                    return web.json_response({
+                        "success": False,
+                        "error": "solar_nowcast_enabled must be a boolean",
+                    }, status=400)
+                new_options[CONF_SOLAR_NOWCAST_ENABLED] = data[CONF_SOLAR_NOWCAST_ENABLED]
+                new_data.pop(CONF_SOLAR_NOWCAST_ENABLED, None)
             if "solcast_enabled" in data:
                 new_options[CONF_SOLCAST_ENABLED] = bool(data["solcast_enabled"])
                 new_data.pop(CONF_SOLCAST_ENABLED, None)
