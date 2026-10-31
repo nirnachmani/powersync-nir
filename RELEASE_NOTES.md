@@ -1,3 +1,9 @@
+<!-- release: v2.12.1517-nir.5 -->
+
+## v2.12.1517-nir.5 — clarify upstream-maintenance decision boundary
+- The maintainer skill now directs applicable inherited upstream feature updates to be ported as upstream intended, including settings and changed upgrade defaults. It no longer treats an upstream product decision as a reason to ask for approval or invent a fork-specific migration; user input is reserved for a concrete conflict with this fork's intentional changes that cannot be safely adapted.
+- Skill-policy and version-metadata release only. No PowerSync runtime behavior or HA configuration changed; there is no reason to install this version in HA for the maintainer-policy update.
+
 <!-- release: v2.12.1517-nir.4 -->
 
 ## v2.12.1517-nir.4 — align PowerSync maintainer policy

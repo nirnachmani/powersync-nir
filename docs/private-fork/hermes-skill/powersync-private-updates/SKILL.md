@@ -1,7 +1,7 @@
 ---
 name: powersync-private-updates
 description: "Use when maintaining the PowerSync Nir fork against upstream."
-version: 1.0.1
+version: 1.0.2
 ---
 
 # PowerSync Nir fork upstream maintenance
@@ -22,7 +22,18 @@ for the `nirnachmani/powersync-nir` fork.
 - Preserve the architecture in `docs/private-fork/local-change-inventory.md`.
 - Do not widen scope to Tesla, EVDC, OCPP, Zaptec, or other excluded backends.
 - Apply relevance triage before tests or a candidate: reject battery-vendor changes unless they target Sigenergy, and reject provider changes unless they target Amber. Keep a vendor-neutral optimiser/site/infrastructure change only when it can affect Sigenergy, Amber, solar/site power flows, or private shared-EV operation.
-- The updater's role is classification and private-fork compatibility, not upstream quality assurance. Rely on upstream developer tests for an unamended compatible update. Do not hunt for theoretical upstream bugs or re-test every upstream behavior; later upstream releases are the normal route for upstream bug fixes.
+- The updater's job is to carry applicable upstream behavior forward, not to
+  reassess upstream's product choices or perform upstream quality assurance.
+  When a supported feature was inherited unchanged, include upstream fixes,
+  enhancements, settings, new defaults, and upgrade behavior as upstream
+  implements them—even if the default changes previously active behavior.
+  Do not invent an upgrade migration or solicit the user's preference merely
+  to retain the previous upstream behavior. Ask only about a concrete conflict
+  with this fork's intentional changes that cannot be safely adapted (or a
+  genuinely unresolved fork-specific security boundary); exclude paywall
+  code outright. Rely on upstream developer tests for an unamended compatible
+  update; do not hunt for theoretical upstream bugs or re-test every upstream
+  behavior. Later upstream releases are the normal route for upstream fixes.
 - Do not weaken, delete, bypass, or misreport a failing validator or test.
 - Never expose secrets, tokens, device addresses, or captures in commits or
   reports.
@@ -109,9 +120,10 @@ as distinct from optimiser licensing. Treat follow-up ChatGPT registration,
 credential-storage, startup and explanation-API fixes, as well as relevant
 enhancements to existing AI explanation providers, as normal upstream candidates;
 include existing providers even if they are not currently selected, and never
-reject them for lacking a second blanket AI approval. Evaluate genuinely
-new OAuth scopes, storage boundaries, or API contracts on their actual merits
-and stop only for an unresolved security choice. Keep optimiser entitlement,
+reject them for lacking a second blanket AI approval. Follow upstream changes
+to provider authentication and API contracts when they do not conflict with
+this fork's intentional credential-handling boundaries; ask only if such a
+specific fork boundary cannot be preserved. Keep optimiser entitlement,
 permission, command-fencing and hosted-access code out.
 
 ## Workflow
@@ -150,15 +162,23 @@ permission, command-fencing and hosted-access code out.
      `irrelevant to configured setup` and reject without a candidate.
    - If the fork already achieves the outcome, record equivalent private
      coverage instead of copying code.
-   - Does it plausibly interact with private two-EV or external-session code?
-     If not, port the relevant behavior minimally without a private quality
-     audit or new tests. If it does, adapt the outcome to private invariants,
-     excluding entitlement code, with a targeted interaction regression.
-   - If the choice is uncertain, trades private functionality against another
-     required outcome, or needs a new security decision, stop and ask the user
-     before implementation. A failed gate stops publication and needs a concrete
-     diagnosis. Do not reject a relevant fix merely because upstream implements
-     it differently.
+   - If an upstream change touches code retained from upstream without a
+     fork-introduced behavioral change, port the applicable upstream behavior,
+     including upstream option defaults on upgrades. Do not stop to ask whether
+     the upstream default or feature design is desirable. A change affecting
+     existing installations is not itself a fork-specific conflict.
+   - Does it plausibly interact with private two-EV, external-session or other
+     documented fork-introduced behavior? If not, port the relevant behavior
+     minimally without a private quality audit or new tests. If it does, adapt
+     the upstream outcome to those private invariants, excluding entitlement
+     code, with a targeted interaction regression.
+   - Ask the user only if a specific intentional fork divergence (including
+     no-paywall or private credential boundaries) makes the upstream outcome
+     impossible to preserve through a safe amendment. State the exact fork
+     change and conflicting upstream hunk. A failed gate stops publication
+     for diagnosis; it is not a referendum on upstream's product decision.
+     Do not reject a relevant fix merely because upstream implements it
+     differently.
    Then classify the remaining delta as one of:
    - **No overlap:** no private modules/direct tests touched.
    - **Mechanical overlap:** same file, separable hunks.
@@ -275,9 +295,11 @@ and gates alongside it:
 |---|---|---|
 | `<tag or version> / <SHA>` | ported / amended / rejected / admin/no-port | One sentence; name the adaptation for amended work and the concrete reason for rejection. For `irrelevant to configured setup`, name the unavailable vendor or unused feature; for `admin/no-port`, name release/version/documentation bookkeeping. |
 
-For an uncertain overlap or a choice between private functionality and another
-required outcome, do not decide silently: state the alternatives in one or two
-sentences and ask the user for a preference.
+For a concrete conflict between a documented fork-specific change and the
+required upstream outcome that cannot be safely amended, do not decide
+silently: identify the conflicting fork hunk and upstream hunk, state the
+alternatives in one or two sentences, and ask the user. Do not ask whether to
+accept an upstream product choice on an inherited feature.
 
 Send this final report by email through the configured Resend MCP. Reuse the
 sender and recipient defaults from the server's `ha-update` skill reference;
