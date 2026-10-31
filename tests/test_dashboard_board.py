@@ -207,7 +207,7 @@ def _board_script(body: str) -> str:
         + r"""
   vm.createContext(context);
   const src = fs.readFileSync(process.argv[1], 'utf8').replace(/^export \{[^}]*\};?\s*$/m, '');
-  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsTodayCard, PsControlsCard, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, psApiCache };', context);
+  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsTodayCard, PsControlsCard, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, PsNowCard, psPlannedRunEnd, psApiCache };', context);
   const T = context.__t;
 """
         + body
@@ -434,3 +434,51 @@ def test_every_small_chart_has_working_pointer_and_keyboard_tooltips():
     assert out.pop('empty') is True
     for card, checks in out.items():
         assert all(checks.values()), (card, checks)
+
+
+def test_right_now_uses_continuous_planned_run_not_short_optimizer_step():
+    out = _run_board(r"""
+  const now = Date.now();
+  const step = 30 * 60000;
+  const t0 = Math.floor(now / step) * step;
+  const n = 12;
+  const ts = Array.from({ length: n }, (_, i) => new Date(t0 + i * step).toISOString());
+  const self = i => (i < 6 ? 1500 : 0);
+  const data = {
+    enabled: true, monitoring_mode: false,
+    current_action: 'self_consumption',
+    current_action_end_time: new Date(now + 5 * 60000).toISOString(),
+    next_action: 'self_consumption', next_action_time: new Date(now + 5 * 60000).toISOString(),
+    next_actions: [
+      { action: 'self_consumption', timestamp: new Date(now + 5 * 60000).toISOString() },
+      { action: 'charge', timestamp: new Date(t0 + 8 * step).toISOString() },
+    ],
+    schedule: {
+      timestamps: ts, soc: Array(n).fill(0.6),
+      charge_w: ts.map((_, i) => (i >= 8 ? 3000 : 0)),
+      discharge_w: ts.map((_, i) => self(i)), battery_consume_w: ts.map((_, i) => self(i)),
+      battery_export_w: Array(n).fill(0), ev_charging_w: Array(n).fill(0),
+      import_price: Array(n).fill(0.3), export_price: Array(n).fill(0.05),
+    },
+  };
+  T.psApiCache.set('power_sync/optimization', { at: Date.now(), data, promise: null });
+  const st = (state, attributes = {}) => ({ state: String(state), attributes, last_updated: 'x' });
+  const hass = {
+    states: { 'sensor.soc': st(72), 'sensor.batt': st(1.9, { unit_of_measurement: 'kW' }), 'sensor.mode': st('normal') },
+    locale: { time_format: '24' }, config: {}, callApi: async () => data,
+  };
+  const card = new T.PsNowCard();
+  card._hass = hass;
+  card._config = { entities: { soc: 'sensor.soc', battery: 'sensor.batt', mode: 'sensor.mode' } };
+  card._render();
+  const { rows, interval } = T.psSchedule(data);
+  const runEnd = T.psPlannedRunEnd(rows, interval, 'self', now);
+  console.log(JSON.stringify({ html: card.innerHTML, runEndHours: (runEnd - now) / 3600000 }));
+""")
+    html = out['html']
+    headline = html.split('<h1>')[1].split('</h1>')[0]
+    assert headline == 'The battery is powering the home.'
+    assert 'The plan keeps this going until' in html
+    assert 2.4 < out['runEndHours'] <= 3.0
+    assert 'Next it will power the home' not in html
+    assert 'Next it will charge at' in html
