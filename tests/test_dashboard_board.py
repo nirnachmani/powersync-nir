@@ -158,6 +158,8 @@ def test_board_mount_keeps_private_selected_ev_command_fence():
   const board = new Board();
   const panel = new Panel();
   const calls = [];
+  const opened = [];
+  panel.dispatchEvent = event => opened.push(event.detail.row.editor);
   panel._runCommand = async (key, path, payload) => calls.push({ key, path, payload });
   board._helpers = async () => ({ createCardElement: config => {
     if (config.type !== 'custom:power-sync-ev-panel') throw Error('wrong EV card');
@@ -174,9 +176,10 @@ def test_board_mount_keeps_private_selected_ev_command_fence():
       await panel._startPolicy();
     };
     await run('shared_ev_profile_a');
+    panel._openSolarSettings({});
     await run(null);
     await run('shared_ev_profile_b');
-    console.log(JSON.stringify({ mounted: board._bodies.ev === panel, calls }));
+    console.log(JSON.stringify({ mounted: board._bodies.ev === panel, opened, calls }));
   })().catch(err => { console.error(err); process.exit(1); });
 """
     )
@@ -186,6 +189,7 @@ def test_board_mount_keeps_private_selected_ev_command_fence():
     )
     out = json.loads(result.stdout.strip().splitlines()[-1])
     assert out["mounted"] is True
+    assert out["opened"] == ["solar"]
     assert [call["path"] for call in out["calls"]] == [
         "power_sync/ev/vehicles/shared_ev_profile_a/command",
         "power_sync/ev/vehicles/shared_ev_profile_b/command",
@@ -207,7 +211,7 @@ def _board_script(body: str) -> str:
         + r"""
   vm.createContext(context);
   const src = fs.readFileSync(process.argv[1], 'utf8').replace(/^export \{[^}]*\};?\s*$/m, '');
-  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsTodayCard, PsControlsCard, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, PsNowCard, psPlannedRunEnd, psApiCache };', context);
+  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsSettingsDialog, PS_SETTING_EDITORS, PsSettingsCard, PsTodayCard, PsNowCard, PsControlsCard, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, psApiCache, psPlannedRunEnd };', context);
   const T = context.__t;
 """
         + body
@@ -482,3 +486,120 @@ def test_right_now_uses_continuous_planned_run_not_short_optimizer_step():
     assert 2.4 < out['runEndHours'] <= 3.0
     assert 'Next it will power the home' not in html
     assert 'Next it will charge at' in html
+
+
+def test_settings_editor_patch_preserves_other_values_and_encodes_one_percent():
+    out = _run_board(r"""
+  const dialog = new T.PsSettingsDialog();
+  dialog._fields = ['charge_by_time_target_soc', 'charge_by_time_target_time'];
+  dialog._values = { charge_by_time_target_soc: 80, charge_by_time_target_time: '17:00', enabled: true };
+  const inputs = { charge_by_time_target_soc: { value: '1' }, charge_by_time_target_time: { value: '17:00' } };
+  dialog.querySelector = sel => inputs[sel.match(/name="(.*?)"/)[1]];
+  const charge = dialog._changes();
+  dialog._fields = ['max_grid_export_w', 'allow_grid_charge'];
+  dialog._values = { max_grid_export_w: 5000, allow_grid_charge: true };
+  inputs.max_grid_export_w = { value: '' };
+  inputs.allow_grid_charge = { checked: false };
+  console.log(JSON.stringify({ charge, grid: dialog._changes() }));
+""")
+    assert out["charge"] == {
+        "patch": {"charge_by_time_target_soc": 0.01},
+        "expected": {"charge_by_time_target_soc": 1},
+    }
+    assert out["grid"]["patch"] == {"max_grid_export_w": None, "allow_grid_charge": False}
+
+
+def test_settings_save_requires_successful_write_and_matching_readback():
+    out = _run_board(r"""
+  (async () => {
+    const results = {};
+    for (const mode of ['success', 'rejected', 'stale', 'offline']) {
+      const dialog = new T.PsSettingsDialog();
+      const calls = [], busy = [], errors = [];
+      let closed = false;
+      dialog._editor = T.PS_SETTING_EDITORS.charge_by_time;
+      dialog.isConnected = true;
+      dialog._dialog = { close: () => { closed = true; } };
+      dialog.querySelector = sel => sel === 'form' ? { reportValidity: () => true } : {};
+      dialog._changes = () => ({ patch: { charge_by_time_target_soc: 0.01 }, expected: { charge_by_time_target_soc: 1 } });
+      dialog._busy = value => { dialog._saving = value; busy.push(value); };
+      dialog._error = message => errors.push(message);
+      dialog._hass = { callApi: async (method, path, data) => {
+        calls.push({ method, path, data });
+        if (mode === 'offline') throw Error('Connection lost');
+        if (method === 'POST') return mode === 'rejected' ? { success: false, error: 'Access denied' } : { success: true };
+        return { success: true, config: { charge_by_time_target_soc: mode === 'stale' ? 80 : 1 } };
+      } };
+      await dialog._save();
+      results[mode] = { calls, busy, errors, closed };
+    }
+    console.log(JSON.stringify(results));
+  })().catch(err => { console.error(err); process.exit(1); });
+""")
+    assert out["success"]["closed"] is True
+    assert out["success"]["errors"] == []
+    assert [c["method"] for c in out["success"]["calls"]] == ["POST", "GET"]
+    assert out["success"]["calls"][0]["data"] == {"charge_by_time_target_soc": 0.01}
+    for mode in ("rejected", "stale", "offline"):
+        assert out[mode]["closed"] is False
+        assert out[mode]["errors"]
+        assert out[mode]["busy"] == [True, False]
+    assert len(out["rejected"]["calls"]) == 1
+
+
+def test_settings_toggle_keeps_entity_index_when_an_earlier_row_is_missing():
+    out = _run_board(r"""
+  const card = new T.PsSettingsCard();
+  card._config = { rows: [
+    { kind: 'switch', entity: 'switch.missing', label: 'Missing' },
+    { kind: 'switch', entity: 'switch.charge', label: 'Charge by time', editor: 'charge_by_time' },
+  ] };
+  card._hass = { states: { 'switch.charge': { state: 'on' } } };
+  card._render();
+  const calls = [];
+  card._call = (...args) => calls.push(args);
+  const btn = { dataset: { i: '1' }, getAttribute: () => 'true', setAttribute() {} };
+  card._onClick({ target: { closest: sel => sel === 'button[data-i]' ? btn : null } });
+  console.log(JSON.stringify({ html: card.innerHTML, calls }));
+""")
+    assert 'data-editor="1"' in out["html"]
+    assert 'aria-haspopup="dialog"' in out["html"]
+    assert out["calls"] == [["homeassistant", "turn_off", {"entity_id": "switch.charge"}]]
+
+
+def test_solar_configuration_stays_in_existing_ev_mode_without_changing_session_policy():
+    script = (
+        "const fs = require('fs'); const vm = require('vm');"
+        + BROWSER_STUBS
+        + "vm.createContext(context);"
+        + f"vm.runInContext(fs.readFileSync({json.dumps(str(STRATEGY_PATH))}, 'utf8'), context);"
+        + r"""
+  const Panel = vm.runInContext('PowerSyncEVPanel', context);
+  const panel = new Panel();
+  panel.getRootNode = () => ({ host: { localName: 'power-sync-board' } });
+  panel._data = { solarConfig: { enabled: false }, priceSettings: {}, scheduledSettings: {}, autoStatus: { settings: {} } };
+  const dashboard = panel._modeSectionsHtml();
+  let event;
+  panel.dispatchEvent = value => { event = value; };
+  const opener = {};
+  panel._openSolarSettings(opener);
+  const calls = [];
+  panel._selectedLoadpoint = () => ({ loadpoint_id: 'car' });
+  panel._runCommand = (...args) => calls.push(args);
+  panel._startPolicy();
+  panel.getRootNode = () => ({ host: { localName: 'classic-layout' } });
+  const classic = panel._modeSectionsHtml();
+  console.log(JSON.stringify({ dashboard, classic, event, calls }));
+"""
+    )
+    out = _run(script)
+    assert 'data-action="configure-solar"' in out["dashboard"]
+    assert 'data-setting="solar:enabled"' in out["dashboard"]
+    assert 'data-setting="solar:household_buffer_kw"' not in out["dashboard"]
+    assert 'data-setting="solar:household_buffer_kw"' in out["classic"]
+    assert out["event"]["type"] == "ps-settings-open"
+    assert out["event"]["detail"]["row"]["editor"] == "solar"
+    assert out["event"]["composed"] is True
+    assert len(out["calls"]) == 1
+    assert out["calls"][0][2]["command"] == "start_policy_charging"
+    assert out["calls"][0][2]["policy"] == "solar_only"
