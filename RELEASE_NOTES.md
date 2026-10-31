@@ -1,3 +1,10 @@
+<!-- release: v2.12.1572-nir.1 -->
+
+## v2.12.1572-nir.1 — reviewed upstream through v2.12.1572
+- The approved upstream live solar-forecast correction is now opt-in, including default-off on upgrade. Dashboard settings use themed dialogs and retain the private selected-logical-EV panel and command guard; solar-versus-grid charging windows now show their distinct site costs without importing the unused Zerohero premium-cap display.
+- Existing AI explanations gain an automatic interval option. Shared Sigenergy EVAC observations, unplugged price-level holds, and legacy departure clearing retain private physical ownership and logical-profile attribution. The optimizer retains measured solar through export replans and excludes cached EV demand when EV integration is disabled without deleting either logical vehicle's plan.
+- Upstream Tesla-only and optimiser-entitlement hunks were not imported. Private architecture, optimizer continuity, Android-app contract, and shared-loadpoint gates passed in the maintainer checkout. This is source publication only; Home Assistant installation/restart, storage edits, charger and inverter commands were not attempted.
+
 <!-- release: v2.12.1517-nir.5 -->
 
 ## v2.12.1517-nir.5 — clarify upstream-maintenance decision boundary
