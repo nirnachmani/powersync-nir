@@ -4,34 +4,24 @@ A dynamic Lovelace dashboard that automatically shows only the cards relevant to
 
 ## Features
 
-The strategy dynamically includes sections based on your configuration:
-- **Price Gauges** - Import price, export price, and battery level (if price sensors exist)
-- **Battery Control** - Force charge, force discharge, and restore buttons with duration selectors
-- **Optimizer Status** - Current action + next action with color-coded state and power display
-- **Power Flow Card** - Real-time energy flow visualization
-- **Price Charts** - Amber/Octopus prices and TOU schedule sent to battery
-- **LP Forecast Charts** - 48-hour solar, load, and price forecasts from the built-in optimizer
-- **Solar Curtailment Status** - DC curtailment (Tesla) and AC inverter status cards
-- **AC Inverter Controls** - Load following, shutdown, and restore buttons
-- **PV String Details** - PV1/PV2 power, voltage, and current, plus supported inverter extras
-- **Battery Health** - Overall and individual battery health gauges (up to 4 batteries)
-- **Energy Charts** - Solar, Battery, Grid, and Home load graphs
-- **Demand Charge** - Period status, peak demand, and cost tracking
-- **AEMO Spike Monitor** - AEMO price and spike detection status
-- **Flow Power** - Import/export prices, TWAP average, and network tariff
+The dashboard uses the PowerSync cloud app's look in your Home Assistant light or dark theme. Two full-width cards sit at the top:
 
-Only sections with existing entities appear — no more unavailable cards!
+- **Right now** - Battery activity, charge level, export floor, and live solar, home, battery and grid power
+- **Optimizer plan** - The last 12 hours measured and the next 24 hours planned, with prices, charge level, battery actions, car charging and upcoming charge/export windows
+
+Below them, one to three columns show only relevant cards: battery controls, energy flow, plan explanation, Amber tariff/prices, today's costs and energy, car charging, optimizer settings, forecasts, battery health, lifetime energy, solar curtailment, solar strings and additional battery integration details. The car charging card retains the selected logical A/B vehicle controls on a shared physical charger; unknown selection cannot issue a command.
+
+Select **Customize layout** to move or hide cards. The layout is saved in your browser separately for one, two and three columns; **Reset layout** restores the default. The board design falls back to the classic dashboard if its module cannot load.
 
 ## Requirements
 
-### Required HACS Integrations
+### HACS Frontend Integrations
 
-Install these from HACS (Frontend) before setting up the dashboard:
+Install from HACS (Frontend) when using the optional legacy card:
 
-1. **[button-card](https://github.com/custom-cards/button-card)** - For control chips and status cards
-2. **[card-mod](https://github.com/thomasloven/lovelace-card-mod)** - For compact gauge styling
-3. **[power-flow-card-plus](https://github.com/flixlix/power-flow-card-plus)** - For real-time energy flow visualization
-4. **[apexcharts-card](https://github.com/RomRider/apexcharts-card)** - For all price and energy charts
+1. **[button-card](https://github.com/custom-cards/button-card)** - For the Solar curtailment card
+
+The board's other charts, controls, and energy flow scene are built into PowerSync.
 
 ## Installation
 
@@ -81,10 +71,7 @@ The strategy auto-detects whether your entities use the `power_sync_` prefix (mo
 
 ### Cards showing "Custom element doesn't exist"
 
-A required HACS card isn't installed. Install the missing integration from HACS:
-- `custom:button-card` > Install button-card
-- `custom:apexcharts-card` > Install apexcharts-card
-- `custom:power-flow-card-plus` > Install power-flow-card-plus
+A legacy card needs a HACS frontend dependency. Install **button-card** for Solar curtailment, then refresh your browser. Check the board's **Missing frontend cards** card for detected dependencies.
 
 ### Dashboard is blank
 
@@ -96,7 +83,13 @@ A required HACS card isn't installed. Install the missing integration from HACS:
 
 Clear browser cache and hard refresh (Ctrl+Shift+R / Cmd+Shift+R).
 
+### Dashboard shows the old layout
+
+The board loads `power-sync-dashboard.js` next to the strategy. If it cannot load, the classic layout appears and a warning is logged in the browser console. Hard refresh and verify the file exists in `custom_components/power_sync/frontend/`.
+
 ### Battery control buttons not working
+
+Tap a control a second time to confirm. If it still does not respond:
 
 1. Ensure the PowerSync integration is installed and configured
 2. Verify select entities exist: `select.power_sync_force_charge_duration` and `select.power_sync_force_discharge_duration`

@@ -8249,6 +8249,28 @@ class PowerSyncStrategy {
       });
     }
 
+    // The board wraps the existing private EV panel, rather than replacing its
+    // selected-logical-profile command and fail-closed selector behavior.
+    if (await _loadPowerSyncBoard(lovelaceResources)) {
+      let registryRows = [];
+      try {
+        const registry = await hass.callWS({ type: 'config/entity_registry/list' });
+        if (Array.isArray(registry)) registryRows = registry;
+      } catch (_) { /* Entity IDs still resolve by their suggested names. */ }
+      return {
+        views: [{
+          title: 'Energy Dashboard',
+          path: 'energy',
+          icon: 'mdi:lightning-bolt',
+          type: 'panel',
+          cards: [{
+            type: 'custom:power-sync-board',
+            cards: _boardCards({ hass, e, hasE, hasEntityE, findSensor, registryRows, missing, optionalMissing }),
+          }],
+        }],
+      };
+    }
+
     // ── Build responsive layout ──
     const columns = [left, center, right].filter(col => col.length > 0);
     let cards;
@@ -8274,6 +8296,237 @@ class PowerSyncStrategy {
       }],
     };
   }
+}
+
+// ─── Board ───────────────────────────────────────────────────
+
+// Load the board module served next to this file, with the same cache-busting
+// version as the registered strategy resource. Returns false (classic layout)
+// when it cannot load, e.g. outside a browser.
+async function _loadPowerSyncBoard(lovelaceResources = []) {
+  if (typeof customElements === 'undefined') return false;
+  if (customElements.get('power-sync-board')) return true;
+  try {
+    const resource = lovelaceResources.find(r => String(r?.url || '').includes('power-sync-strategy.js'));
+    const query = resource ? String(resource.url).split('?')[1] : '';
+    await import(`/power_sync/frontend/power-sync-dashboard.js${query ? `?${query}` : ''}`);
+    return !!customElements.get('power-sync-board');
+  } catch (err) {
+    console.warn('PowerSync: the dashboard board could not load, using the classic layout', err);
+    return false;
+  }
+}
+
+// Turn a Lovelace entities-card config into native key-value rows.
+function _boardKvRows(card) {
+  const rows = [];
+  for (const item of card?.entities || []) {
+    if (typeof item === 'string') { rows.push({ entity: item }); continue; }
+    if (!item?.entity) continue;
+    if (item.type && item.type !== 'attribute') continue;
+    rows.push({ entity: item.entity, name: item.name, attribute: item.type === 'attribute' ? item.attribute : undefined });
+  }
+  return rows;
+}
+
+// One board entry. Entities cards become native key-value cards; anything
+// else keeps its existing card inside the new chrome.
+function _boardEntry(key, title, card, extra = {}) {
+  if (!card) return null;
+  if (card.type === 'entities') {
+    const rows = _boardKvRows(card);
+    if (!rows.length) return null;
+    return { key, title, native: 'ps-kv-card', config: { rows }, ...extra };
+  }
+  return { key, title, card, ...extra };
+}
+
+// The approved dashboard: which cards exist and how each is drawn. Card keys
+// match PS_DEFAULT_LAYOUT in power-sync-dashboard.js.
+function _boardCards(ctx) {
+  const {
+    hass, e, hasE, hasEntityE, findSensor, registryRows, missing, optionalMissing,
+  } = ctx;
+  const states = hass.states || {};
+  const ex = id => (id && states[id] ? id : null);
+  const se = name => ex(e(name));
+  // PowerSync entity by registry unique_id suffix, then the suggested ID.
+  const reg = (domain, suffix) => {
+    const row = (registryRows || []).find(r => r.platform === 'power_sync'
+      && r.entity_id?.startsWith(`${domain}.`) && !r.disabled_by
+      && (r.unique_id === `power_sync_${suffix}` || r.unique_id?.endsWith(`_${suffix}`)));
+    return ex(row?.entity_id) || ex(`${domain}.power_sync_${suffix}`);
+  };
+  const cards = [];
+  const add = entry => { if (entry) cards.push(entry); };
+
+  const hasOptimizer = hasE('optimization_status');
+  const hasBattery = hasE('battery_level') || hasE('battery_power');
+
+  if (hasEntityE('battery_level') || hasEntityE('solar_power') || hasEntityE('grid_power')) {
+    add({
+      key: 'now', title: 'Right now', size: 'wide', native: 'ps-now-card',
+      config: { entities: {
+        soc: se('battery_level'), battery: se('battery_power'), solar: se('solar_power'),
+        home: se('home_load'), grid: se('grid_power'),
+        importPrice: se('current_import_price'), exportPrice: se('current_export_price'),
+        backup: se('backup_time_remaining'), energyLeft: se('energy_left'), capacity: se('total_pack_energy'),
+        mode: se('battery_mode'), monitoring: reg('switch', 'monitoring_mode'),
+        optimizer: reg('switch', 'optimization_enabled'), dailySolar: se('daily_solar_energy'),
+      } },
+    });
+  }
+
+  if (hasOptimizer) {
+    add({
+      key: 'plan', title: 'Optimizer plan', size: 'wide', native: 'ps-plan-card', refresh: true,
+      meta: 'Last 12 hours measured, then the next 24 hours planned',
+      config: { entities: {
+        soc: se('battery_level'), battery: se('battery_power'), grid: se('grid_power'),
+        importPrice: se('current_import_price'), exportPrice: se('current_export_price'),
+      } },
+    });
+  }
+
+  if (hasBattery) {
+    add({ key: 'controls', title: 'Battery controls', native: 'ps-controls-card', config: { entities: {
+      mode: se('battery_mode'), chargeDuration: reg('select', 'force_charge_duration'),
+      forcePower: reg('number', 'force_power_kw'),
+      customDischarge: reg('number', 'force_discharge_custom_duration'),
+      dischargeDuration: reg('select', 'force_discharge_duration'),
+      monitoring: reg('switch', 'monitoring_mode'),
+    } } });
+  }
+
+  if (hasEntityE('solar_power')) {
+    add({ key: 'scene', title: 'Energy flow', meta: 'Live', card: _teslaStyleFlow(e, hass, findSensor) });
+  }
+
+  if (hasOptimizer) {
+    add({ key: 'ai', title: 'Plan explanation', card: _aiPlanExplanation(), ownHeader: true });
+  }
+
+  if (hasE('tariff_schedule')) {
+    const attrs = states[e('tariff_schedule')]?.attributes || {};
+    const plan = [attrs.utility, attrs.plan_name].filter(Boolean).join(' ');
+    add({
+      key: 'tariff', title: 'Tariff today', meta: plan || undefined, native: 'ps-tariff-card',
+      config: { entities: { tariff: e('tariff_schedule') } },
+    });
+  }
+
+  if (hasE('daily_solar_energy') || hasEntityE('daily_import_cost') || hasE('daily_grid_import')) {
+    add({
+      key: 'today', title: 'Today so far', native: 'ps-today-card',
+      config: { entities: {
+        importCost: se('daily_import_cost'), exportEarnings: se('daily_export_earnings'),
+        avgCost: se('daily_avg_cost_per_kwh'), mtdAvgCost: se('mtd_avg_cost_per_kwh'),
+        netCost: se('daily_net_cost'), load: se('daily_load'),
+        batteryCharge: se('daily_battery_charge'), batteryDischarge: se('daily_battery_discharge'),
+        gridImport: se('daily_grid_import'), gridExport: se('daily_grid_export'), solar: se('daily_solar_energy'),
+      },
+      extraRows: [
+        { entity: se('amber_usage_today_cost'), name: 'Amber metered cost (partial)' },
+      ].filter(r => r.entity) },
+    });
+  }
+
+  add({ key: 'ev', title: 'Car charging', card: _evPanel(), ownHeader: true });
+
+  if (hasOptimizer) {
+    add({
+      key: 'optset', title: 'Optimizer settings', native: 'ps-settings-card',
+      config: { rows: [
+        { kind: 'switch', entity: reg('switch', 'optimization_enabled'), label: 'Smart Optimization', help: 'Plans the battery around prices and forecasts' },
+        { kind: 'switch', entity: reg('switch', 'monitoring_mode'), label: 'Monitoring mode', help: 'Plans and reports only, without sending commands' },
+        { kind: 'switch', entity: reg('switch', 'optimization_auto_apply_reserve'), label: 'Apply recommended reserve', help: 'Sets the export floor from the forecast' },
+        { kind: 'switch', entity: reg('switch', 'cost_neutral'), label: 'Cost neutral', help: 'Aims to cover the daily bill with exports' },
+        { kind: 'switch', entity: reg('switch', 'profit_max_mode'), label: 'Profit max', help: 'Exports whenever it earns more than it costs' },
+        { kind: 'switch', entity: reg('switch', 'charge_by_time'), label: 'Charge by time', help: 'Reaches a target charge by a set time' },
+        { kind: 'switch', entity: reg('switch', 'optimization_disable_idle'), label: 'Disable idle', help: 'Uses the battery instead of holding it' },
+        { kind: 'switch', entity: reg('switch', 'optimization_spread_export'), label: 'Spread export', help: 'Exports across more intervals at lower power' },
+        { kind: 'switch', entity: reg('switch', 'optimization_spread_import'), label: 'Spread import', help: 'Charges across more intervals at lower power' },
+        { kind: 'switch', entity: reg('switch', 'amber_forecast_confidence'), label: 'Amber forecast confidence', help: 'Plans around Amber price uncertainty' },
+        { kind: 'switch', entity: reg('switch', 'away_mode'), label: 'Away mode', help: 'Plans for a lower home load while you are away' },
+        { kind: 'switch', entity: reg('switch', 'solar_surplus_ev_charging'), label: 'Solar surplus car charging', help: 'Charges the car only from spare solar' },
+      ].filter(r => r.entity) },
+    });
+  }
+
+  if (hasE('current_import_price')) {
+    add({
+      key: 'prices', title: 'Prices today', native: 'ps-prices-card',
+      config: { entities: { importPrice: e('current_import_price'), exportPrice: se('current_export_price') } },
+    });
+  }
+
+  if (hasEntityE('home_load') || hasEntityE('solar_power')) {
+    add({
+      key: 'energy', title: 'Energy since midnight', meta: 'kW', native: 'ps-energy-card',
+      config: { entities: { home: se('home_load'), battery: se('battery_power'), grid: se('grid_power'), solar: se('solar_power') } },
+    });
+  }
+
+  if (hasE('load_forecast_today_remaining') || hasE('load_forecast_tomorrow') || hasOptimizer) {
+    add({
+      key: 'forecast', title: 'Load forecast', native: 'ps-load-forecast-card',
+      config: { entities: {
+        todayRemaining: se('load_forecast_today_remaining'), tomorrow: se('load_forecast_tomorrow'),
+        away: reg('switch', 'away_mode'),
+      } },
+    });
+  }
+
+  if (hasOptimizer) {
+    add({ key: 'bp48', title: 'Planned battery power', meta: 'Next 48 hours, kW', native: 'ps-battery-plan-card', config: {} });
+    add({
+      key: 'sl48', title: 'Solar and load forecast', meta: 'Next 48 hours, kW', native: 'ps-solar-load-card',
+      config: { entities: { solar: se('solar_power') } },
+    });
+  }
+
+  if (hasE('battery_health')) {
+    add({ key: 'health', title: 'Battery health', card: _batteryHealth(e, hass), ownHeader: true });
+  }
+
+  {
+    const rows = [
+      ['lifetime_solar_energy', 'Solar generated'], ['lifetime_home_consumption', 'Home used'],
+      ['lifetime_grid_import', 'Grid imported'], ['lifetime_grid_export', 'Grid exported'],
+      ['lifetime_battery_charged', 'Battery charged'], ['lifetime_battery_discharged', 'Battery discharged'],
+    ].filter(([n]) => hasE(n)).map(([n, name]) => ({ entity: e(n), name }));
+    if (rows.length) add({ key: 'lifetime', title: 'Lifetime energy', native: 'ps-kv-card', config: { rows } });
+  }
+
+  const hasDC = hasE('solar_curtailment');
+  if (hasDC) add({ key: 'curtail', title: 'Solar curtailment', card: _curtailmentStatus(e, true, false) });
+  add(_boardEntry('pv', 'Solar strings', _pvStringSensors(e, hass, findSensor)));
+
+  // Extra physical battery integration details, one card per category.
+  if (hasE('battery_integration_details')) {
+    const attrs = states[e('battery_integration_details')]?.attributes || {};
+    const groups = attrs.groups || {};
+    const canonical = new Set(Object.values(attrs.canonical_entities || {}));
+    const labels = {
+      battery: 'Battery details', solar: 'Solar strings and MPPT', grid: 'Grid and phases',
+      load: 'Home and loads', inverter: 'Inverter and backup', energy: 'Energy totals',
+      diagnostics: 'Temperature, health and status', charger: 'Chargers', other: 'More system details',
+    };
+    for (const category of Object.keys(labels)) {
+      const ids = Array.isArray(groups[category]) ? groups[category] : [];
+      const rows = ids.filter(id => !canonical.has(id) && states[id]).map(entity => ({ entity }));
+      if (rows.length) add({ key: `details-${category}`, title: labels[category], native: 'ps-kv-card', config: { rows } });
+    }
+  }
+
+  if (missing.length || optionalMissing.length) {
+    add({
+      key: 'hacs', title: 'Missing frontend cards', native: 'ps-missing-cards',
+      config: { missing: missing.map(c => ({ name: c.name, hacs: c.hacs })), optional: optionalMissing.map(c => ({ name: c.name, hacs: c.hacs })) },
+    });
+  }
+
+  return cards;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────
