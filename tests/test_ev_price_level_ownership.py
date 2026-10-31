@@ -2760,6 +2760,57 @@ def test_price_level_shared_evac_denial_is_logged(monkeypatch):
     }
 
 
+@pytest.mark.parametrize("selection,observation,pending,expected", [
+    ("tank", "disconnected", False, False),
+    ("tank", "stale", False, True),
+    ("tank", "connected", False, True),
+    ("tank", "disconnected", True, True),
+    ("tesla", "disconnected", False, True),
+])
+def test_shared_evac_unplug_releases_only_origin_price_hold(
+    monkeypatch, selection, observation, pending, expected,
+):
+    """A/B battery holds require fresh physical EVAC idle proof and origin identity."""
+    hass = _FakeHass(
+        price_settings={"preserve_home_battery": True},
+        states={"sensor.connected_vehicle": selection},
+    )
+    entry = _FakeConfigEntry()
+    entry.options = {
+        "sigenergy_charger_enabled": True, "sigenergy_charger_type": "evac",
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Tesla",
+        "shared_loadpoint_profile_b_state": "tesla",
+    }
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _no_vehicles)
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    executor.get_charging_decision = AsyncMock(return_value=(False, "Vehicle not plugged in", ""))
+    executor._stop_charging = AsyncMock(return_value=False)
+    state = executor._get_or_create_vehicle_state(
+        "shared_ev_profile_a" if selection == "tank" else "shared_ev_profile_b"
+    )
+    state.is_charging = True
+    state.stop_pending = pending
+    runtime = hass.data["power_sync"]["entry-1"]
+    runtime["scheduled_ev_preserve_state"] = {
+        "active": True, "source": "price_level_charging",
+        "active_profile_id": "shared_ev_profile_a",
+    }
+    runtime["observed_sigenergy_charger_state"] = SimpleNamespace(
+        charger_type="evac", status="a1_a2",
+        is_connected=observation == "connected", is_charging=False,
+        is_discharging=False, power_kw=0.0,
+    )
+    runtime["observed_sigenergy_charger_state_at"] = (
+        datetime.now(timezone.utc) - timedelta(minutes=10 if observation == "stale" else 0)
+    )
+    asyncio.run(executor.evaluate_all_vehicles(45))
+    assert runtime["scheduled_ev_preserve_state"]["active"] is expected
+    assert state.is_charging is True
+
+
 def _shared_smart_schedule_executor(monkeypatch, *, options, charger_type, decision):
     """Build one ready Smart Schedule executor for a final-decision assertion."""
     now = datetime(2026, 5, 27, 12, tzinfo=timezone.utc)
