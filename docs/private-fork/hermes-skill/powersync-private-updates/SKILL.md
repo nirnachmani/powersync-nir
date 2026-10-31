@@ -1,7 +1,7 @@
 ---
 name: powersync-private-updates
 description: "Use when maintaining the PowerSync Nir fork against upstream."
-version: 1.0.3
+version: 1.0.4
 ---
 
 # PowerSync Nir fork upstream maintenance
@@ -160,12 +160,16 @@ permission, command-fencing and hosted-access code out.
    `update.install` write seam rather than trusting HACS's mutable latest value,
    and verify restart intent against a newer pending release. Add one focused
    regression for a wrong target and the physical/install boundary.
-4. Apply outcome-first relevance and interaction triage before the no-paywall
-   classification. For each changed hunk, identify the actual issue it fixes
-   or enhancement it supplies, then ask whether that *outcome* benefits a
-   supported fork path, an approved optional capability, or a relevant shared
-   prerequisite. An identically named fork function is not required; a new
-   capability can be relevant. In particular:
+4. Apply outcome-first relevance and interaction triage **before preparing a
+   candidate or delegating an adaptation**. For each changed hunk, identify
+   what upstream actually enables, including its validation, backend gates and
+   tests; then ask whether that *outcome* benefits a supported fork path, an
+   approved optional capability, or a relevant shared prerequisite. A shared
+   function, vendor-neutral subject or earlier related port does not extend a
+   vendor-gated outcome to Generic/EVAC. If the outcome is unavailable here,
+   reject it without inventing a supported-backend implementation or asking
+   the user to choose one. An identically named fork function is not required
+   for a genuinely applicable new capability. In particular:
    - Is it relevant to Amber, Sigenergy, solar/site flows, private shared EVs,
      an existing AI explanation provider, or another explicitly approved optional
      feature? Existing AI providers are in scope even if presently unselected.
@@ -210,9 +214,11 @@ permission, command-fencing and hosted-access code out.
    locally only in the registered candidate, runs every required gate, and
    commits only there after they pass. It must never publish, deploy, or control
    infrastructure.
-7. For every overlap classification, make the smallest compatible amendment
-   with one targeted interaction regression; stop only for a real unresolved
-   private-behaviour/security choice, never merely because a file overlaps.
+7. Only after an upstream outcome passes relevance triage, make the smallest
+   compatible amendment for an overlapping hunk with one targeted interaction
+   regression. A file overlap alone is not applicability; stop only when the
+   applicable outcome conflicts with a concrete private-behaviour/security
+   invariant that cannot be safely amended.
 8. For redundant changes, record the upstream SHA and equivalence rationale;
    retain the private implementation.
 9. For incompatible changes or failed gates, retain the candidate untouched and
@@ -227,12 +233,15 @@ permission, command-fencing and hosted-access code out.
   cycle gate; do not turn it into an upstream quality review.
 - Amended private-overlap hunk: add only the smallest interaction regression
   required to prove the amendment. Use a semantic review only where the
-  amendment changes private behavior. Do not reject an important upstream EV
-  or external-session fix merely because upstream's identity model differs:
-  adapt it through the private logical-profile selector, canonical physical
-  loadpoint, lease, session, and reconciler seams when that preserves the
-  intended bug-fix outcome. Ask the user only if those requirements conflict
-  or the correct private outcome is genuinely uncertain.
+  amendment changes private behavior. First establish that the upstream EV or
+  external-session fix actually affects a supported path; vendor-specific
+  identity checks and tests are not a mandate to add that behavior to another
+  backend. For an applicable fix, do not reject it merely because upstream's
+  identity model differs: adapt it through the private logical-profile
+  selector, canonical physical loadpoint, lease, session, and reconciler seams
+  when that preserves the intended bug-fix outcome. Ask the user only if that
+  applicable outcome conflicts with private invariants or its private outcome
+  is genuinely uncertain.
 - Process upstream commits strictly oldest to newest. Every commit must reach a
   terminal outcome before advancing the processing checkpoint: `ported`,
   `amended`, `rejected`, or `admin/no-port`. Use
