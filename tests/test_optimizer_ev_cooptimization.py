@@ -761,7 +761,7 @@ def test_a_stored_departure_time_still_reaches_the_solver(
     holder["executor"] = _ev_executor(target_time)
 
     plans = method(
-        types.SimpleNamespace(config_entry=_ENTRY), _solve_timestamps()
+        types.SimpleNamespace(config_entry=_ENTRY, _ev_integration_enabled=True), _solve_timestamps()
     )
 
     assert plans is not None, warnings
@@ -777,7 +777,7 @@ def test_a_naive_deadline_bounds_the_window_like_an_aware_one(
     build_ev_charge_plan,
 ):
     method, holder, _ = build_ev_charge_plan
-    coordinator = types.SimpleNamespace(config_entry=_ENTRY)
+    coordinator = types.SimpleNamespace(config_entry=_ENTRY, _ev_integration_enabled=True)
     timestamps = _solve_timestamps()
 
     holder["executor"] = _ev_executor("2026-08-20T15:00:00")
@@ -795,7 +795,7 @@ def test_a_deadline_already_past_is_still_skipped(build_ev_charge_plan):
     holder["executor"] = _ev_executor("2026-08-20T05:00:00")
 
     assert (
-        method(types.SimpleNamespace(config_entry=_ENTRY), _solve_timestamps())
+        method(types.SimpleNamespace(config_entry=_ENTRY, _ev_integration_enabled=True), _solve_timestamps())
         == []
     )
 
@@ -830,7 +830,7 @@ def test_shared_loadpoint_optimizer_accepts_only_the_selected_logical_plan(
     )
 
     plans = method(
-        types.SimpleNamespace(config_entry=_ENTRY, hass=types.SimpleNamespace()),
+        types.SimpleNamespace(config_entry=_ENTRY, hass=types.SimpleNamespace(), _ev_integration_enabled=True),
         _solve_timestamps(),
     )
 
@@ -838,6 +838,37 @@ def test_shared_loadpoint_optimizer_accepts_only_the_selected_logical_plan(
     assert len(plans) == 1
     assert plans[0].vehicle_id == selected_profile
     assert plans[0].energy_needed_kwh == pytest.approx(13.75)
+
+
+def test_disabling_ev_integration_preserves_selected_private_plan(build_ev_charge_plan):
+    """The LP toggle excludes B's demand without erasing either logical plan."""
+    method, holder, warnings = build_ev_charge_plan
+    plan_a = types.SimpleNamespace(target_time=None, energy_needed_kwh=9.0)
+    plan_b = types.SimpleNamespace(target_time=None, energy_needed_kwh=13.75)
+    settings = types.SimpleNamespace(
+        enabled=True, max_charge_amps=46, voltage=240, phases=1, min_charge_amps=6,
+    )
+    holder["selected_profile"] = "shared_ev_profile_b"
+    holder["executor"] = types.SimpleNamespace(
+        config_entry=_ENTRY,
+        _state={
+            "shared_ev_profile_a": types.SimpleNamespace(current_plan=plan_a),
+            "shared_ev_profile_b": types.SimpleNamespace(current_plan=plan_b),
+        },
+        _settings={"shared_ev_profile_a": settings, "shared_ev_profile_b": settings},
+    )
+    coordinator = types.SimpleNamespace(
+        config_entry=_ENTRY, hass=types.SimpleNamespace(), _ev_integration_enabled=True,
+    )
+    timestamps = _solve_timestamps()
+    assert [p.vehicle_id for p in method(coordinator, timestamps)] == ["shared_ev_profile_b"]
+    coordinator._ev_integration_enabled = False
+    assert method(coordinator, timestamps) is None
+    assert holder["executor"]._state["shared_ev_profile_a"].current_plan is plan_a
+    assert holder["executor"]._state["shared_ev_profile_b"].current_plan is plan_b
+    coordinator._ev_integration_enabled = True
+    assert [p.vehicle_id for p in method(coordinator, timestamps)] == ["shared_ev_profile_b"]
+    assert warnings == []
 
 
 @pytest.mark.parametrize("unresolved_selector", (None, "unmapped"))
@@ -870,7 +901,7 @@ def test_shared_loadpoint_optimizer_has_no_demand_without_a_resolved_selector(
     )
 
     plans = method(
-        types.SimpleNamespace(config_entry=_ENTRY, hass=types.SimpleNamespace()),
+        types.SimpleNamespace(config_entry=_ENTRY, hass=types.SimpleNamespace(), _ev_integration_enabled=True),
         _solve_timestamps(),
     )
 
@@ -924,7 +955,7 @@ def test_optimizer_plan_uses_smart_schedule_windows_and_policy(
         _settings={"veh-1": settings},
     )
 
-    coordinator = types.SimpleNamespace(config_entry=_ENTRY)
+    coordinator = types.SimpleNamespace(config_entry=_ENTRY, _ev_integration_enabled=True)
     plan = method(coordinator, _solve_timestamps())[0]
 
     assert warnings == []
@@ -1012,7 +1043,7 @@ def test_optimizer_rejects_a_stale_grid_window_above_current_price_cap(
         _settings={"veh-1": settings},
     )
 
-    coordinator = types.SimpleNamespace(config_entry=_ENTRY)
+    coordinator = types.SimpleNamespace(config_entry=_ENTRY, _ev_integration_enabled=True)
     plans = method(coordinator, _solve_timestamps())
 
     assert plans == []
@@ -1063,7 +1094,7 @@ def test_unavailable_vehicle_keeps_future_demand_but_zeros_current_slot(
     )
 
     plan = method(
-        types.SimpleNamespace(config_entry=_ENTRY), _solve_timestamps()
+        types.SimpleNamespace(config_entry=_ENTRY, _ev_integration_enabled=True), _solve_timestamps()
     )[0]
 
     assert warnings == []

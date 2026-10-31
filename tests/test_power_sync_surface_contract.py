@@ -232,6 +232,14 @@ _TOTAL_GRID_IMPORT_DIFF_SHA256 = (
     "728003bfc97ff32c4028422226672ca2202ea242fd4d5f93191ed9edba9c5087"
 )
 
+# Exact upstream 9c3eef13 EV-integration toggle guard applied before the
+# private selected-logical-profile filter. Preserve the previous coordinator
+# digest independently and admit only this reviewed four-line source delta.
+_EV_PLAN_TOGGLE_SOURCE = "f3099045aa04907f38f726ee12e59afe3965a59b"
+_EV_PLAN_TOGGLE_DIFF_SHA256 = (
+    "47b7cb350e25757a1c93e83b3ce0ad1f5851beff9e6bcad7cd427ccc14ed35bb"
+)
+
 # Exact, path-specific exception for the reviewed Cost Neutral reachable-
 # deadline fix. The normal optimizer baseline contract stays intact: only the
 # complete b20bffb2 source delta is admitted.
@@ -334,6 +342,16 @@ def _total_grid_import_diff_is_allowlisted(actual: str) -> bool:
         lineterm="",
     ))
     return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _TOTAL_GRID_IMPORT_DIFF_SHA256
+
+
+def _ev_plan_toggle_diff_is_allowlisted(actual: str) -> bool:
+    expected = _git_show(_EV_PLAN_TOGGLE_SOURCE, COORDINATOR)
+    diff = "\n".join(difflib.unified_diff(
+        expected.splitlines(), actual.splitlines(),
+        fromfile="private_f3099045", tofile="ev_plan_toggle_candidate",
+        lineterm="",
+    ))
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _EV_PLAN_TOGGLE_DIFF_SHA256
 
 
 def _cost_neutral_reachable_deadline_diff_is_allowlisted(
@@ -483,7 +501,10 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
             assert _managed_ev_headroom_diff_is_allowlisted(
                 _git_show(_TOTAL_GRID_IMPORT_SOURCE, COORDINATOR)
             )
-            assert _total_grid_import_diff_is_allowlisted(actual)
+            assert _total_grid_import_diff_is_allowlisted(
+                _git_show(_EV_PLAN_TOGGLE_SOURCE, COORDINATOR)
+            )
+            assert _ev_plan_toggle_diff_is_allowlisted(actual)
         elif relative_path == BATTERY_OPTIMIZER:
             # Preserve proof that e3c17217 itself contains only the earlier,
             # reviewed solar-refill and reachable-deadline changes before
@@ -534,9 +555,15 @@ def test_negative_import_solar_allowlist_rejects_a_nearby_policy_mutation():
     assert not _managed_ev_headroom_diff_is_allowlisted(
         headroom.replace("- load_w - ev_w + solar_w", "- load_w + solar_w", 1)
     )
-    assert _total_grid_import_diff_is_allowlisted(actual)
+    assert _total_grid_import_diff_is_allowlisted(
+        _git_show(_EV_PLAN_TOGGLE_SOURCE, COORDINATOR)
+    )
+    assert _ev_plan_toggle_diff_is_allowlisted(actual)
+    assert not _ev_plan_toggle_diff_is_allowlisted(
+        actual.replace('getattr(self, "_ev_integration_enabled", False)', 'True', 1)
+    )
     assert not _total_grid_import_diff_is_allowlisted(
-        actual.replace("middle - base", "middle", 1)
+        _git_show(_EV_PLAN_TOGGLE_SOURCE, COORDINATOR).replace("middle - base", "middle", 1)
     )
     assert not _negative_import_solar_diff_is_allowlisted(
         prior.replace("from ..const import (\n    DOMAIN,", "from ..const import (", 1)
