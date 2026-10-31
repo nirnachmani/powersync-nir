@@ -1,3 +1,9 @@
+<!-- release: v2.12.1572-nir.3 -->
+
+## v2.12.1572-nir.3 — recheck fork HACS identity after refresh
+- Revalidate the HACS repository ID, current fork release URL, and tag after the awaited HACS entity refresh and again after the GitHub fallback lookup. If the repository changes during either wait, do not call `update.install` or restart HA. This completes the fork-only scheduled update boundary introduced in v2.12.1572-nir.2; no manual HACS behaviour is changed.
+- Source release only; no HA installation, restart, or physical control was performed.
+
 <!-- release: v2.12.1572-nir.2 -->
 
 ## v2.12.1572-nir.2 — fork-only scheduled HACS updates

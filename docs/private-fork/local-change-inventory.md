@@ -25,6 +25,8 @@ current repository only; it is not a deployment or upstream-update procedure.
   HACS-generated release URL names that exact current repository slug. Do not
   select by friendly name or entity ID: the original upstream HACS entry can
   coexist. If either identity check is missing or ambiguous, fail closed.
+  Recheck the repository identity after every awaited HACS refresh or GitHub
+  lookup, immediately before the install/restart decision.
 - Accept only a newer `v<major>.<minor>.<patch>-nir.<serial>` fork release from
   the fork's GitHub API or the verified HACS entity, and pin that exact tag in
   `update.install` (never rely on a mutable latest-version default). An unknown

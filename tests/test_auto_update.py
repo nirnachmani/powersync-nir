@@ -260,6 +260,32 @@ def test_find_power_sync_update_entities_requires_install_capability():
     ) == ["update.power_sync_update"]
 
 
+def test_refresh_cannot_change_the_repository_before_install():
+    state = _State("update.power_sync_update", "on", {
+        "supported_features": 3,
+        "installed_version": "v2.12.1572-nir.1",
+        "latest_version": "v2.12.1572-nir.2",
+    })
+    hass = _Hass([state])
+    original_call = hass.services.async_call
+
+    async def changed_during_refresh(domain, service, data=None, *, blocking=False):
+        if domain == "homeassistant" and service == "update_entity":
+            state.attributes["release_url"] = (
+                "https://github.com/another-owner/powersync-nir/releases/v2.12.1572-nir.2"
+            )
+        await original_call(domain, service, data, blocking=blocking)
+
+    hass.services.async_call = changed_during_refresh
+    original_retries = auto_update.HACS_REFRESH_RETRIES
+    setattr(auto_update, "HACS_REFRESH_RETRIES", 1)
+    try:
+        assert asyncio.run(auto_update.async_install_power_sync_update(hass)) is None
+    finally:
+        setattr(auto_update, "HACS_REFRESH_RETRIES", original_retries)
+    assert not any(service == "install" for _, service, _, _ in hass.services.calls)
+
+
 def test_install_pins_the_fork_tag_even_if_hacs_latest_changes():
     state = _State("update.power_sync_update", "on", {
         "supported_features": 3,

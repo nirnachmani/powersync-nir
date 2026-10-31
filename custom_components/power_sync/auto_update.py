@@ -130,6 +130,17 @@ def _has_fork_release_url(state: Any) -> bool:
     )
 
 
+def _is_verified_fork_entity(hass: HomeAssistant, state: Any) -> bool:
+    """Check both HACS registry ownership and its current repository URL."""
+    entity = er.async_get(hass).async_get(state.entity_id)
+    return bool(
+        entity is not None
+        and entity.platform == "hacs"
+        and str(entity.unique_id) == FORK_HACS_REPOSITORY_ID
+        and _has_fork_release_url(state)
+    )
+
+
 def _supports_specific_version(state: Any) -> bool:
     """Return True when an update entity accepts an explicit release tag."""
     try:
@@ -180,17 +191,10 @@ def find_power_sync_update_entities(
 ) -> list[str]:
     """Select only the HACS update entity for this exact GitHub fork."""
     matches: list[str] = []
-    registry = er.async_get(hass)
     for state in hass.states.async_all(UPDATE_DOMAIN):
         if exclude_entity_id and state.entity_id == exclude_entity_id:
             continue
-        entity = registry.async_get(state.entity_id)
-        if (
-            entity is None
-            or entity.platform != "hacs"
-            or str(entity.unique_id) != FORK_HACS_REPOSITORY_ID
-            or not _has_fork_release_url(state)
-        ):
+        if not _is_verified_fork_entity(hass, state):
             continue
         if require_install and not _supports_install(state):
             continue
@@ -302,7 +306,7 @@ async def async_install_power_sync_update(
         stale_entities: list[Any] = []
         for entity_id in entity_ids:
             state = hass.states.get(entity_id)
-            if state is None:
+            if state is None or not _is_verified_fork_entity(hass, state):
                 continue
 
             if (
@@ -354,6 +358,9 @@ async def async_install_power_sync_update(
             published_release = await async_get_latest_published_release(hass)
             if published_release is not None:
                 for state in stale_entities:
+                    state = hass.states.get(state.entity_id)
+                    if state is None or not _is_verified_fork_entity(hass, state):
+                        continue
                     installed_version = state.attributes.get("installed_version")
                     if (
                         not _supports_specific_version(state)
