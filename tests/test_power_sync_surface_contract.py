@@ -240,6 +240,14 @@ _EV_PLAN_TOGGLE_DIFF_SHA256 = (
     "47b7cb350e25757a1c93e83b3ce0ad1f5851beff9e6bcad7cd427ccc14ed35bb"
 )
 
+# Reviewed 4cb9124e telemetry-only provenance reconciliation and passive
+# shutdown persistence, adapted without the adjacent licensing recovery path.
+# Preserve the preceding no-paywall source exactly before admitting this delta.
+_PROVENANCE_LIFECYCLE_SOURCE = "b1bcf8ce3d7873bb07d9b9b98f9ab321caa0f669"
+_PROVENANCE_LIFECYCLE_DIFF_SHA256 = (
+    "a0caf3b3e504162a5ca10cbdd0bf1cb70e556847817c313138b9a2e6c6b76249"
+)
+
 # Exact, path-specific exception for the reviewed Cost Neutral reachable-
 # deadline fix. The normal optimizer baseline contract stays intact: only the
 # complete b20bffb2 source delta is admitted.
@@ -352,6 +360,16 @@ def _ev_plan_toggle_diff_is_allowlisted(actual: str) -> bool:
         lineterm="",
     ))
     return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _EV_PLAN_TOGGLE_DIFF_SHA256
+
+
+def _provenance_lifecycle_diff_is_allowlisted(actual: str) -> bool:
+    expected = _git_show(_PROVENANCE_LIFECYCLE_SOURCE, COORDINATOR)
+    diff = "\n".join(difflib.unified_diff(
+        expected.splitlines(), actual.splitlines(),
+        fromfile="private_b1bcf8ce", tofile="provenance_lifecycle_candidate",
+        lineterm="",
+    ))
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _PROVENANCE_LIFECYCLE_DIFF_SHA256
 
 
 def _cost_neutral_reachable_deadline_diff_is_allowlisted(
@@ -504,7 +522,10 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
             assert _total_grid_import_diff_is_allowlisted(
                 _git_show(_EV_PLAN_TOGGLE_SOURCE, COORDINATOR)
             )
-            assert _ev_plan_toggle_diff_is_allowlisted(actual)
+            assert _ev_plan_toggle_diff_is_allowlisted(
+                _git_show(_PROVENANCE_LIFECYCLE_SOURCE, COORDINATOR)
+            )
+            assert _provenance_lifecycle_diff_is_allowlisted(actual)
         elif relative_path == BATTERY_OPTIMIZER:
             # Preserve proof that e3c17217 itself contains only the earlier,
             # reviewed solar-refill and reachable-deadline changes before
@@ -558,8 +579,11 @@ def test_negative_import_solar_allowlist_rejects_a_nearby_policy_mutation():
     assert _total_grid_import_diff_is_allowlisted(
         _git_show(_EV_PLAN_TOGGLE_SOURCE, COORDINATOR)
     )
-    assert _ev_plan_toggle_diff_is_allowlisted(actual)
-    assert not _ev_plan_toggle_diff_is_allowlisted(
+    assert _ev_plan_toggle_diff_is_allowlisted(
+        _git_show(_PROVENANCE_LIFECYCLE_SOURCE, COORDINATOR)
+    )
+    assert _provenance_lifecycle_diff_is_allowlisted(actual)
+    assert not _provenance_lifecycle_diff_is_allowlisted(
         actual.replace('getattr(self, "_ev_integration_enabled", False)', 'True', 1)
     )
     assert not _total_grid_import_diff_is_allowlisted(
