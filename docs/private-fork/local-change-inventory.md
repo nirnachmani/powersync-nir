@@ -99,6 +99,16 @@ current repository only; it is not a deployment or upstream-update procedure.
 - Changing options must not silently clear per-EV capacity when a form field is
   absent. The explicit clear control deletes only that EV's manual override.
   Do not resurrect the retired global Generic capacity in logical mode.
+- Each logical EV's `max_grid_price_cents` belongs to its own existing
+  `auto_schedule_settings` record (default 25 c/kWh). Options → EV Charging
+  edits that same Smart Schedule store as the authenticated app/API, not a
+  duplicate config-entry option or a charger-wide limit. A/B ceilings remain
+  independent even while B is disabled; unrelated Options saves preserve them,
+  and reload/restart must restore them from the store. A lowered ceiling must
+  constrain execution even while an older plan is cached. The ceiling applies
+  to Smart Schedule grid windows, not Solar Surplus, Scheduled or Price-Level
+  Charging. Review upstream changes to this Options/API/store seam as semantic
+  overlap; preserve the focused A/B round-trip and reload regression.
 - Any upstream change to these paths is a **semantic private overlap**, even if
   the same file also contains upstream code. Review the changed hunk against
   current fork behavior and its callers; preserve this identity/ownership split

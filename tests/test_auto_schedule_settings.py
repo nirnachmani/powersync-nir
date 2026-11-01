@@ -1378,6 +1378,52 @@ def test_generic_charger_load_provisions_disabled_runtime_schedule_candidate(mon
     assert store.saved == []
 
 
+def test_shared_price_caps_persist_independently_and_reload(monkeypatch):
+    """Options must edit the API's store without changing other EV settings."""
+    from copy import deepcopy
+
+    class Store:
+        def __init__(self):
+            self._data = {"auto_schedule_settings": {
+                "shared_ev_profile_a": {"vehicle_id": "shared_ev_profile_a", "enabled": True,
+                                        "target_soc": 52, "max_grid_price_cents": 25.0},
+                "shared_ev_profile_b": {"vehicle_id": "shared_ev_profile_b", "enabled": False,
+                                        "target_soc": 80, "max_grid_price_cents": 40.0},
+                "generic_ev": {"vehicle_id": "generic_ev", "max_grid_price_cents": 7.0},
+            }, "cached_vehicle_soc": {"shared_ev_profile_a": {"soc": 30}}}
+            self.saves = 0
+
+        async def async_load(self):
+            return deepcopy(self._data)
+
+        async def async_save(self, data):
+            self._data = deepcopy(data)
+            self.saves += 1
+
+    store = Store()
+    asyncio.run(ev_planner.save_shared_auto_schedule_price_caps(
+        store, {"shared_ev_profile_a": 30.0}))
+    assert store.saves == 1
+    saved = store._data["auto_schedule_settings"]
+    assert saved["shared_ev_profile_a"]["max_grid_price_cents"] == 30.0
+    assert saved["shared_ev_profile_a"]["target_soc"] == 52
+    assert saved["shared_ev_profile_b"]["max_grid_price_cents"] == 40.0
+    assert saved["generic_ev"]["max_grid_price_cents"] == 7.0
+    assert store._data["cached_vehicle_soc"] == {"shared_ev_profile_a": {"soc": 30}}
+
+    async def no_fleet_vehicles(*args, **kwargs):
+        return []
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", no_fleet_vehicles)
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor.hass = types.SimpleNamespace(data={})
+    executor.config_entry = types.SimpleNamespace(data={}, options={}, entry_id="entry-1")
+    executor._settings = {}
+    executor._state = {}
+    asyncio.run(executor.load_settings(store))
+    assert executor._settings["shared_ev_profile_a"].max_grid_price_cents == 30.0
+    assert executor._settings["shared_ev_profile_b"].max_grid_price_cents == 40.0
+
+
 def test_configured_generic_backend_overrides_stale_ocpp_synthetic_type():
     settings = ev_planner.AutoScheduleSettings(
         vehicle_id="generic_ev",

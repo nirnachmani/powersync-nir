@@ -1,3 +1,10 @@
+<!-- release: v2.12.1581-nir.2 -->
+
+## v2.12.1581-nir.2 — per-EV Smart Schedule grid-price ceiling in Options
+- PowerSync Options → EV Charging now displays separate maximum Smart Schedule grid-import prices for logical EV A and B, prefilled from each EV's saved Smart Schedule settings (25 c/kWh if unset). Changing one does not enable that EV or alter its sibling's settings.
+- Options and the existing app/API edit the same per-EV schedule record; the saved ceiling is restored after reload/restart. A newly lowered ceiling also governs execution while an older plan is cached. Saving errors are shown rather than falsely reporting a complete save.
+- Source publication only: no Home Assistant installation, restart, or charger command was performed.
+
 <!-- release: v2.12.1581-nir.1 -->
 
 ## v2.12.1581-nir.1 — reviewed upstream through v2.12.1581

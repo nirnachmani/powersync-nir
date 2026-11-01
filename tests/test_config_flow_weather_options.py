@@ -563,6 +563,115 @@ def test_shared_capacity_options_edit_vehicle_records_not_duplicate_options():
     assert "current_shared_profile_b_capacity" in form
 
 
+def test_shared_price_cap_form_prefills_from_existing_schedule_store():
+    method = _options_flow_method("_shared_schedule_price_cap")
+    namespace = {"Any": object}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(CONFIG_FLOW_PATH), "exec"), namespace)
+    store = SimpleNamespace(_data={"auto_schedule_settings": {
+        "shared_ev_profile_a": {"max_grid_price_cents": 19.5},
+    }})
+    flow = SimpleNamespace(_get_shared_schedule_store=lambda: store)
+    assert namespace["_shared_schedule_price_cap"](flow, "shared_ev_profile_a") == 19.5
+    assert namespace["_shared_schedule_price_cap"](flow, "shared_ev_profile_b") == 25.0
+
+    form = ast.get_source_segment(CONFIG_FLOW_PATH.read_text(), _options_flow_method("async_step_ev_charging"))
+    save_options = ast.get_source_segment(CONFIG_FLOW_PATH.read_text(), _options_flow_method("_save_ev_options"))
+    for key in ("CONF_SHARED_PROFILE_A_PRICE_CAP_FORM", "CONF_SHARED_PROFILE_B_PRICE_CAP_FORM"):
+        assert key in form
+        assert key not in save_options
+    assert "current_shared_profile_a_price_cap" in form
+    assert "current_shared_profile_b_price_cap" in form
+    for path in (STRINGS_PATH, TRANSLATIONS_PATH):
+        options = json.loads(path.read_text())["options"]
+        fields = options["step"]["ev_charging"]
+        assert "shared_profile_settings_save_failed" in options["error"]
+        for profile in ("a", "b"):
+            key = f"shared_loadpoint_profile_{profile}_max_grid_price_cents"
+            assert "Smart Schedule" in fields["data"][key]
+            assert "c/kWh" in fields["data_description"][key]
+
+
+def test_shared_price_cap_form_reports_storage_failure():
+    form = ast.get_source_segment(CONFIG_FLOW_PATH.read_text(), _options_flow_method("async_step_ev_charging"))
+    assert form is not None
+    assert "except (RuntimeError, ValueError, OSError)" in form
+    assert 'errors["base"] = "shared_profile_settings_save_failed"' in form
+
+
+def test_options_flow_price_cap_save_updates_store_and_runtime_without_entry_options():
+    from test_ev_vehicle_status import _power_sync_module
+    _power_sync_module()
+    method = _options_flow_method("_save_ev_options_and_capacities")
+    namespace = {"__package__": "power_sync", "Any": object, "FlowResult": object,
+                 "DOMAIN": "power_sync",
+                 "CONF_SHARED_PROFILE_A_CAPACITY_FORM": "shared_loadpoint_profile_a_capacity_kwh",
+                 "CONF_SHARED_PROFILE_B_CAPACITY_FORM": "shared_loadpoint_profile_b_capacity_kwh",
+                 "CONF_SHARED_PROFILE_A_CAPACITY_CLEAR_FORM": "shared_loadpoint_profile_a_capacity_clear",
+                 "CONF_SHARED_PROFILE_B_CAPACITY_CLEAR_FORM": "shared_loadpoint_profile_b_capacity_clear",
+                 "CONF_SHARED_PROFILE_A_PRICE_CAP_FORM": "shared_loadpoint_profile_a_max_grid_price_cents",
+                 "CONF_SHARED_PROFILE_B_PRICE_CAP_FORM": "shared_loadpoint_profile_b_max_grid_price_cents"}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(CONFIG_FLOW_PATH), "exec"), namespace)
+
+    class Store:
+        def __init__(self):
+            self._data = {"auto_schedule_settings": {
+                "shared_ev_profile_a": {"vehicle_id": "shared_ev_profile_a", "enabled": True,
+                                        "target_soc": 52, "max_grid_price_cents": 25.0},
+                "shared_ev_profile_b": {"vehicle_id": "shared_ev_profile_b", "enabled": False,
+                                        "max_grid_price_cents": 40.0},
+            }}
+            self.saves = 0
+        async def async_load(self):
+            return self._data
+        async def async_save(self, data):
+            self._data = data
+            self.saves += 1
+
+    class Executor:
+        def __init__(self):
+            self.values = {}
+            self.replanned = []
+        def update_settings(self, profile_id, updates):
+            self.values[profile_id] = updates["max_grid_price_cents"]
+            return SimpleNamespace()
+        def get_state(self, profile_id):
+            return SimpleNamespace()
+        async def _regenerate_plan(self, profile_id, settings, state):
+            self.replanned.append(profile_id)
+
+    store, executor = Store(), Executor()
+    flow = SimpleNamespace(
+        _get_shared_schedule_store=lambda: store,
+        _get_shared_capacity_store=lambda: None,
+        hass=SimpleNamespace(data={"power_sync": {"entry-1": {"auto_schedule_executor": executor}}}),
+        config_entry=SimpleNamespace(entry_id="entry-1"),
+        _save_ev_options=lambda data: {"options": data},
+    )
+    submitted = {"generic_charger_enabled": True,
+                 "shared_loadpoint_connected_vehicle_entity": "sensor.connected_ev",
+                 "shared_loadpoint_profile_a_name": "Tank",
+                 "shared_loadpoint_profile_a_state": "tank",
+                 "shared_loadpoint_profile_b_name": "Future EV",
+                 "shared_loadpoint_profile_b_state": "future",
+                 "shared_loadpoint_profile_a_max_grid_price_cents": 30.0}
+    result = asyncio.run(namespace["_save_ev_options_and_capacities"](flow, submitted))
+    assert store.saves == 1
+    assert store._data["auto_schedule_settings"]["shared_ev_profile_a"]["max_grid_price_cents"] == 30.0
+    assert store._data["auto_schedule_settings"]["shared_ev_profile_b"]["max_grid_price_cents"] == 40.0
+    assert executor.values == {"shared_ev_profile_a": 30.0}
+    assert executor.replanned == ["shared_ev_profile_a"]
+    assert "shared_loadpoint_profile_a_max_grid_price_cents" not in result["options"]
+
+    # A missing second store must not leave the first store partly updated.
+    import pytest
+    with pytest.raises(RuntimeError, match="vehicle storage"):
+        asyncio.run(namespace["_save_ev_options_and_capacities"](
+            flow, {**submitted, "shared_loadpoint_profile_a_max_grid_price_cents": 35.0,
+                   "shared_loadpoint_profile_a_capacity_kwh": 37.1}))
+    assert store._data["auto_schedule_settings"]["shared_ev_profile_a"]["max_grid_price_cents"] == 30.0
+    assert executor.values == {"shared_ev_profile_a": 30.0}
+
+
 def test_options_flow_capacity_save_round_trips_through_shared_vehicle_store():
     from test_ev_vehicle_status import _power_sync_module
     _power_sync_module()
@@ -574,7 +683,9 @@ def test_options_flow_capacity_save_round_trips_through_shared_vehicle_store():
                  "CONF_SHARED_PROFILE_A_CAPACITY_FORM": "shared_loadpoint_profile_a_capacity_kwh",
                  "CONF_SHARED_PROFILE_B_CAPACITY_FORM": "shared_loadpoint_profile_b_capacity_kwh",
                  "CONF_SHARED_PROFILE_A_CAPACITY_CLEAR_FORM": "shared_loadpoint_profile_a_capacity_clear",
-                 "CONF_SHARED_PROFILE_B_CAPACITY_CLEAR_FORM": "shared_loadpoint_profile_b_capacity_clear"}
+                 "CONF_SHARED_PROFILE_B_CAPACITY_CLEAR_FORM": "shared_loadpoint_profile_b_capacity_clear",
+                 "CONF_SHARED_PROFILE_A_PRICE_CAP_FORM": "shared_loadpoint_profile_a_max_grid_price_cents",
+                 "CONF_SHARED_PROFILE_B_PRICE_CAP_FORM": "shared_loadpoint_profile_b_max_grid_price_cents"}
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(CONFIG_FLOW_PATH), "exec"), namespace)
 
     class Store:
@@ -617,7 +728,9 @@ def test_options_capacity_omission_preserves_existing_vehicle_capacity():
                  "CONF_SHARED_PROFILE_A_CAPACITY_FORM": "shared_loadpoint_profile_a_capacity_kwh",
                  "CONF_SHARED_PROFILE_B_CAPACITY_FORM": "shared_loadpoint_profile_b_capacity_kwh",
                  "CONF_SHARED_PROFILE_A_CAPACITY_CLEAR_FORM": "shared_loadpoint_profile_a_capacity_clear",
-                 "CONF_SHARED_PROFILE_B_CAPACITY_CLEAR_FORM": "shared_loadpoint_profile_b_capacity_clear"}
+                 "CONF_SHARED_PROFILE_B_CAPACITY_CLEAR_FORM": "shared_loadpoint_profile_b_capacity_clear",
+                 "CONF_SHARED_PROFILE_A_PRICE_CAP_FORM": "shared_loadpoint_profile_a_max_grid_price_cents",
+                 "CONF_SHARED_PROFILE_B_PRICE_CAP_FORM": "shared_loadpoint_profile_b_max_grid_price_cents"}
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(CONFIG_FLOW_PATH), "exec"), namespace)
     class Store:
         _data = {"vehicle_charging_configs": [

@@ -280,6 +280,38 @@ def test_auto_schedule_runtime_uses_plan_departure_policy_across_midnight(
     assert "Grid price" not in state.last_decision_reason
 
 
+def test_smart_schedule_lowered_price_cap_blocks_stale_plan_grid_start(monkeypatch):
+    """An old plan must not override a newly saved, stricter user ceiling."""
+    now = datetime(2026, 10, 5, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+
+    class Planner:
+        def _is_grid_charging_blocked_at(self, when):
+            return False
+        async def should_charge_now(self, **kwargs):
+            return True, "planned grid window", "grid_offpeak"
+
+    executor = ev_planner.AutoScheduleExecutor(_FakeHass(), _FakeConfigEntry(), Planner())
+    executor._get_vehicle_soc = AsyncMock(return_value=45)
+    executor._start_charging = AsyncMock(return_value=True)
+    settings = ev_planner.AutoScheduleSettings(
+        enabled=True, vehicle_id=VIN, target_soc=80, max_grid_price_cents=20.0,
+    )
+    state = executor.get_state(VIN)
+    state.current_plan = ev_planner.ChargingPlan(
+        vehicle_id=VIN, current_soc=45, target_soc=80, target_time=None,
+        energy_needed_kwh=10.0, priority="cost_optimized", max_grid_price_cents=25.0,
+        windows=[],
+    )
+    state.last_plan_update = now.replace(tzinfo=None)
+    live = {"battery_soc": 100, "solar_power": 0, "load_power": 1000, "grid_power": 1000}
+    asyncio.run(executor._evaluate_vehicle(VIN, settings, live, current_price_cents=24.0))
+    executor._start_charging.assert_not_awaited()
+    assert "max 20c" in state.last_decision_reason
+
+
 def test_price_log_value_formats_unknown_without_cents_suffix():
     assert ev_planner._format_price_log_value(None) == "unknown"
     assert ev_planner._format_price_log_value(12) == "12.0c"

@@ -4643,6 +4643,34 @@ class AutoScheduleSettings:
         )
 
 
+async def save_shared_auto_schedule_price_caps(store, updates: dict[str, float]) -> None:
+    """Persist logical EV price ceilings in the existing Smart Schedule store."""
+    from .shared_loadpoint import PROFILE_A_ID, PROFILE_B_ID
+
+    if not updates:
+        return
+    validated = {}
+    for profile_id, value in updates.items():
+        if profile_id not in (PROFILE_A_ID, PROFILE_B_ID) or isinstance(value, bool):
+            raise ValueError("Invalid logical EV price ceiling")
+        try:
+            price = float(value)
+        except (TypeError, ValueError) as err:
+            raise ValueError("Invalid logical EV price ceiling") from err
+        if not math.isfinite(price):
+            raise ValueError("Invalid logical EV price ceiling")
+        validated[profile_id] = price
+
+    stored = await store.async_load() or {}
+    schedules = dict(stored.get("auto_schedule_settings", {}))
+    for profile_id, price in validated.items():
+        existing = schedules.get(profile_id)
+        if existing is None:
+            existing = AutoScheduleSettings(vehicle_id=profile_id).to_dict()
+        schedules[profile_id] = {**existing, "max_grid_price_cents": price}
+    await store.async_save({**stored, "auto_schedule_settings": schedules})
+
+
 @dataclass
 class AutoScheduleState:
     """Current state of auto-schedule execution for a vehicle."""
@@ -6515,12 +6543,10 @@ class AutoScheduleExecutor:
         policy_weekday = _plan_policy_weekday(state.current_plan, weekday)
         effective_priority = settings.get_effective_priority(policy_weekday)
         effective_limit_grid = settings.get_effective_limit_grid_import(weekday)
-        plan_max_price = getattr(state.current_plan, "max_grid_price_cents", None)
-        effective_max_price = (
-            plan_max_price
-            if plan_max_price is not None
-            else settings.get_effective_max_grid_price(policy_weekday)
-        )
+        # A user can lower the ceiling while a previous plan remains cached
+        # (for example if a replan fails). Enforce the live setting at the
+        # command boundary rather than the old plan's price snapshot.
+        effective_max_price = settings.get_effective_max_grid_price(policy_weekday)
         effective_home_min = settings.get_effective_min_battery_to_start(weekday)
         effective_consume_level = settings.get_effective_consume_battery_level(weekday)
         effective_stop_at_floor = settings.get_effective_stop_at_battery_floor(weekday)

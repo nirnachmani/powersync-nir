@@ -707,6 +707,8 @@ CONF_SHARED_PROFILE_A_CAPACITY_FORM = "shared_loadpoint_profile_a_capacity_kwh"
 CONF_SHARED_PROFILE_B_CAPACITY_FORM = "shared_loadpoint_profile_b_capacity_kwh"
 CONF_SHARED_PROFILE_A_CAPACITY_CLEAR_FORM = "shared_loadpoint_profile_a_capacity_clear"
 CONF_SHARED_PROFILE_B_CAPACITY_CLEAR_FORM = "shared_loadpoint_profile_b_capacity_clear"
+CONF_SHARED_PROFILE_A_PRICE_CAP_FORM = "shared_loadpoint_profile_a_max_grid_price_cents"
+CONF_SHARED_PROFILE_B_PRICE_CAP_FORM = "shared_loadpoint_profile_b_max_grid_price_cents"
 
 
 def _flow_power_form_selection(
@@ -8393,14 +8395,35 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 return row.get("battery_capacity_kwh")
         return None
 
+    def _get_shared_schedule_store(self) -> Any:
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
+        return entry_data.get("store") if isinstance(entry_data, dict) else None
+
+    def _shared_schedule_price_cap(self, profile_id: str) -> float:
+        store = self._get_shared_schedule_store()
+        schedules = getattr(store, "_data", {}) or {}
+        return schedules.get("auto_schedule_settings", {}).get(
+            profile_id, {}
+        ).get("max_grid_price_cents", 25.0)
+
     async def _save_ev_options_and_capacities(self, ev_input: dict[str, Any]) -> FlowResult:
-        """Persist UI-only capacity in per-EV storage before committing options."""
+        """Persist form-only per-EV settings before committing entry options."""
         from .automations.shared_loadpoint import (
             PROFILE_A_ID, PROFILE_B_ID, SharedLoadpointBinding,
             save_shared_profile_capacities,
         )
+        from .automations.ev_charging_planner import save_shared_auto_schedule_price_caps
 
+        price_fields = (
+            (PROFILE_A_ID, CONF_SHARED_PROFILE_A_PRICE_CAP_FORM),
+            (PROFILE_B_ID, CONF_SHARED_PROFILE_B_PRICE_CAP_FORM),
+        )
+        price_updates = {}
         if SharedLoadpointBinding.from_options(ev_input) is not None:
+            price_updates = {
+                profile_id: ev_input[key]
+                for profile_id, key in price_fields if key in ev_input
+            }
             updates = {}
             for profile_id, capacity_key, clear_key in (
                 (PROFILE_A_ID, CONF_SHARED_PROFILE_A_CAPACITY_FORM, CONF_SHARED_PROFILE_A_CAPACITY_CLEAR_FORM),
@@ -8410,12 +8433,38 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     updates[profile_id] = None
                 elif capacity_key in ev_input:
                     updates[profile_id] = ev_input[capacity_key]
-            store = self._get_shared_capacity_store()
-            if store is None:
-                if updates:
+            capacity_store = self._get_shared_capacity_store()
+            if updates:
+                if capacity_store is None:
                     raise RuntimeError("Logical EV vehicle storage is unavailable")
-            elif updates:
-                await save_shared_profile_capacities(store, updates)
+                from .automations.ev_vehicle_capacity import validate_ev_battery_capacity
+                for capacity in updates.values():
+                    if capacity is not None:
+                        validate_ev_battery_capacity(capacity)
+            if price_updates:
+                store = self._get_shared_schedule_store()
+                if store is None:
+                    raise RuntimeError("Smart Schedule storage is unavailable")
+                await save_shared_auto_schedule_price_caps(store, price_updates)
+                entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
+                executor = entry_data.get("auto_schedule_executor")
+                if executor is not None:
+                    for profile_id, value in price_updates.items():
+                        settings = executor.update_settings(
+                            profile_id, {"max_grid_price_cents": float(value)}
+                        )
+                        try:
+                            await executor._regenerate_plan(
+                                profile_id, settings, executor.get_state(profile_id)
+                            )
+                        except Exception as err:
+                            _LOGGER.warning("Could not replan %s after price-cap edit: %s", profile_id, err)
+            if updates:
+                await save_shared_profile_capacities(capacity_store, updates)
+        if any(key in ev_input for _, key in price_fields):
+            ev_input = {key: value for key, value in ev_input.items()
+                        if key not in (CONF_SHARED_PROFILE_A_PRICE_CAP_FORM,
+                                       CONF_SHARED_PROFILE_B_PRICE_CAP_FORM)}
         return self._save_ev_options(ev_input)
 
     def _get_option(self, key: str, default: Any = None) -> Any:
@@ -16052,9 +16101,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
 
                 try:
                     return await self._save_ev_options_and_capacities(user_input)
-                except (RuntimeError, ValueError) as err:
-                    _LOGGER.error("Logical EV capacity options were not saved: %s", err)
-                    errors["base"] = "shared_profile_capacity_save_failed"
+                except (RuntimeError, ValueError, OSError) as err:
+                    _LOGGER.error("Logical EV settings were not saved: %s", err)
+                    errors["base"] = "shared_profile_settings_save_failed"
 
         # Build schema for EV and OCPP options
         current_ev_enabled = self._get_option(CONF_EV_CHARGING_ENABLED, False)
@@ -16094,6 +16143,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         from .automations.shared_loadpoint import PROFILE_A_ID, PROFILE_B_ID
         current_shared_profile_a_capacity = self._shared_profile_capacity(PROFILE_A_ID)
         current_shared_profile_b_capacity = self._shared_profile_capacity(PROFILE_B_ID)
+        current_shared_profile_a_price_cap = self._shared_schedule_price_cap(PROFILE_A_ID)
+        current_shared_profile_b_price_cap = self._shared_schedule_price_cap(PROFILE_B_ID)
         shared_binding_configured = bool(
             self._get_option(CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY)
             and self._get_option(CONF_SHARED_LOADPOINT_PROFILE_A_NAME)
@@ -16251,6 +16302,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             )),
             vol.Optional(CONF_SHARED_PROFILE_A_CAPACITY_CLEAR_FORM, default=False): BooleanSelector(),
             vol.Optional(
+                CONF_SHARED_PROFILE_A_PRICE_CAP_FORM,
+                description={"suggested_value": current_shared_profile_a_price_cap},
+            ): NumberSelector(NumberSelectorConfig(
+                min=-1000, step=0.1, mode=NumberSelectorMode.BOX,
+                unit_of_measurement="c/kWh",
+            )),
+            vol.Optional(
                 CONF_SHARED_LOADPOINT_PROFILE_B_NAME,
                 default=self._get_option(CONF_SHARED_LOADPOINT_PROFILE_B_NAME, ""),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
@@ -16277,6 +16335,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 mode=NumberSelectorMode.BOX, unit_of_measurement="kWh",
             )),
             vol.Optional(CONF_SHARED_PROFILE_B_CAPACITY_CLEAR_FORM, default=False): BooleanSelector(),
+            vol.Optional(
+                CONF_SHARED_PROFILE_B_PRICE_CAP_FORM,
+                description={"suggested_value": current_shared_profile_b_price_cap},
+            ): NumberSelector(NumberSelectorConfig(
+                min=-1000, step=0.1, mode=NumberSelectorMode.BOX,
+                unit_of_measurement="c/kWh",
+            )),
             # Sigenergy EVAC/EVDC charger direct Modbus control
             vol.Optional(
                 CONF_SIGENERGY_CHARGER_ENABLED,
@@ -16339,6 +16404,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             schema_dict = {
                 marker: selector for marker, selector in schema_dict.items()
                 if marker.schema != CONF_GENERIC_CHARGER_BATTERY_CAPACITY_KWH
+            }
+        else:
+            schema_dict = {
+                marker: selector for marker, selector in schema_dict.items()
+                if marker.schema not in (
+                    CONF_SHARED_PROFILE_A_PRICE_CAP_FORM,
+                    CONF_SHARED_PROFILE_B_PRICE_CAP_FORM,
+                )
             }
 
         return self.async_show_form(
