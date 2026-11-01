@@ -1,3 +1,11 @@
+<!-- release: v2.12.1581-nir.1 -->
+
+## v2.12.1581-nir.1 — reviewed upstream through v2.12.1581
+- The generated energy-flow card can read canonical EV loadpoint status. A shared Generic/Sigenergy EVAC charger appears as the selected logical vehicle only, without duplicate physical rows or a guessed vehicle when selection is unknown; stale or unavailable API data falls back to configured entities.
+- Battery mode and dashboard labels identify the recorded command source instead of claiming every active force command was manual. The no-paywall optimiser reconciles stored battery provenance only from measured, ready SoC telemetry and attempts cost and provenance saves even when shutdown cleanup fails.
+- Manual Sigenergy force charge/discharge supports validated custom minutes or a finish time in Home Assistant's timezone. Invalid timing is rejected before export ownership, timer or hardware changes. Tesla-only EV/recovery and optimiser-entitlement paths remain excluded.
+- Architecture, optimiser-continuity, Android contract, shared-loadpoint and focused private gates passed. Source release only: no Home Assistant installation, restart or physical commands were attempted.
+
 <!-- release: v2.12.1572-nir.3 -->
 
 ## v2.12.1572-nir.3 — recheck fork HACS identity after refresh
