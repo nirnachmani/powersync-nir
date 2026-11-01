@@ -55,10 +55,10 @@ def test_custom_value_is_persisted_separately_from_presets():
         resolve("Custom", {"force_discharge_custom_duration": "NaN"})
 
 
-def _service_runtime():
+def _service_runtime(mode="discharge"):
     path = ROOT / "custom_components/power_sync/__init__.py"
     tree = ast.parse(path.read_text())
-    handler = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "handle_force_discharge")
+    handler = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == f"handle_force_{mode}")
 
     class RemoveImports(ast.NodeTransformer):
         def visit_ImportFrom(self, node):
@@ -77,6 +77,10 @@ def _service_runtime():
             pass
 
         async def force_discharge(self, **kwargs):
+            events.append(("command", kwargs))
+            return True
+
+        async def force_charge(self, **kwargs):
             events.append(("command", kwargs))
             return True
 
@@ -100,27 +104,32 @@ def _service_runtime():
         if state.get("cancel_expiry_timer"):
             state.pop("cancel_expiry_timer")()
 
-    namespace = {n.id: n.id for n in ast.walk(handler) if isinstance(n, ast.Name) and n.id.startswith(("CONF_", "BATTERY_SYSTEM_"))}
+    namespace: dict[str, Any] = {n.id: n.id for n in ast.walk(handler) if isinstance(n, ast.Name) and n.id.startswith(("CONF_", "BATTERY_SYSTEM_"))}
     hass = SimpleNamespace(data={"power_sync": {"battery": {}}}, services=SimpleNamespace(async_call=service_call))
     namespace.update({
         "Any": Any, "ServiceCall": object, "HomeAssistantError": ValueError,
         "DOMAIN": "power_sync", "DEFAULT_DISCHARGE_DURATION": 30,
         "DISCHARGE_DURATIONS": _const_duration_values(),
-        "selected_discharge_duration": _helpers()["selected_discharge_duration"],
+        "resolve_manual_force_duration": _helpers()["resolve_manual_force_duration"],
         "SigenergyController": Controller, "hass": hass, "entry": entry,
         "_control_call_source": lambda call: call.data.get("source", "user"),
         "_resolve_force_command_power_w": lambda *args: 1000,
         "_coerce_force_power_w": int, "_monitoring_mode_should_block_control": lambda call: False,
+        "_demand_grid_charging_protection_active": lambda: False,
         "active_battery_system": "sigenergy", "local_battery_dispatch_configured": lambda _: False,
-        "hold_soc_state": {}, "self_consumption_state": {}, "force_charge_state": {},
+        "hold_soc_state": {}, "self_consumption_state": {}, "force_charge_state": {"active": False},
         "force_discharge_state": state, "_try_local_powerwall_force": local_force,
         "_get_tesla_site_configs": lambda *args: [], "_cancel_all_force_timers": cancel_all,
         "_command_generation": generation, "_tesla_reserve_generation": [0],
-        "dt_util": SimpleNamespace(utcnow=lambda: now), "timedelta": timedelta,
+        "dt_util": SimpleNamespace(utcnow=lambda: now, now=lambda: now), "timedelta": timedelta,
         "_LOGGER": logging.getLogger(__name__), "persist_force_mode_state": persist,
         "async_dispatcher_send": lambda *args: events.append(("status", args[-1])),
         "async_track_point_in_utc_time": timer, "SERVICE_RESTORE_NORMAL": "restore_normal",
     })
+    if mode == "charge":
+        namespace.update(force_charge_state=state, force_discharge_state={"active": False},
+                         _local_powerwall_runtime={}, time=SimpleNamespace(time=lambda: now.timestamp()),
+                         _try_native_max_charge=local_force)
     exec(compile(ast.fix_missing_locations(ast.Module(body=[handler], type_ignores=[])), str(path), "exec"), namespace)
     return namespace, now, events, timers, snapshots
 
@@ -157,13 +166,14 @@ def test_invalid_or_monitoring_duration_has_no_command_or_timer_effect():
     assert not events and not timers and not snapshots
 
 
-def test_private_sigenergy_scope_rejects_extended_duration_before_side_effects():
+@pytest.mark.parametrize("mode", ["charge", "discharge"])
+def test_private_sigenergy_scope_rejects_extended_duration_before_side_effects(mode):
     """Private restriction: extended manual control must not reach other vendors."""
-    ns, _, events, timers, snapshots = _service_runtime()
+    ns, _, events, timers, snapshots = _service_runtime(mode)
     ns["entry"].data.clear()
     call = SimpleNamespace(data={"duration": "Custom"}, context=SimpleNamespace(user_id="user", parent_id=None))
     with pytest.raises(ValueError, match="Sigenergy station"):
-        asyncio.run(ns["handle_force_discharge"](call))
+        asyncio.run(ns[f"handle_force_{mode}"](call))
     assert not events and not timers and not snapshots
 
 def test_duration_entities_preserve_saved_choices_and_custom_number_after_reload():
@@ -219,3 +229,87 @@ def test_duration_entities_preserve_saved_choices_and_custom_number_after_reload
     with pytest.raises(ValueError):
         asyncio.run(number.async_set_native_value(float("nan")))
     assert reloaded.native_value == 421
+
+@pytest.mark.parametrize("value", ["7", 1, 421, 1440])
+def test_manual_charge_accepts_exact_custom_minutes(value):
+    resolve = _helpers()["resolve_manual_force_duration"]
+    assert resolve({"duration": value}, {}, "Australia/Brisbane") == int(value)
+
+
+@pytest.mark.parametrize("data", [{"duration": 7, "until": "18:30"}, {"until": "24:00"},
+                                  {"until": "9:00"}, {"until": ""}, {"until": None}])
+def test_manual_until_rejects_ambiguous_or_invalid_input(data):
+    with pytest.raises(ValueError):
+        _helpers()["resolve_manual_force_duration"](data, {}, "Australia/Brisbane")
+
+
+@pytest.mark.parametrize("zone,now,until,expected", [
+    ("Australia/Brisbane", "2026-10-31T08:00:20+00:00", "18:30", 30),
+    ("Australia/Brisbane", "2026-10-31T13:50:00+00:00", "00:10", 20),
+    ("Australia/Brisbane", "2026-10-31T08:30:00+00:00", "18:30", 1440),
+    ("America/New_York", "2026-11-01T05:45:00+00:00", "01:30", 45),
+    ("America/New_York", "2026-03-08T06:00:00+00:00", "03:30", 90),
+    ("America/New_York", "2026-03-08T07:00:00+00:00", "02:30", 1410),
+])
+def test_until_uses_ha_timezone_next_valid_occurrence_and_elapsed_minutes(zone, now, until, expected):
+    assert _helpers()["resolve_manual_force_duration"](
+        {"until": until}, {}, zone, now=datetime.fromisoformat(now),
+    ) == expected
+
+
+def test_until_rejects_next_occurrence_beyond_24_elapsed_hours():
+    with pytest.raises(ValueError, match="1440"):
+        _helpers()["resolve_manual_force_duration"](
+            {"until": "00:00"}, {}, "America/New_York",
+            now=datetime.fromisoformat("2026-11-01T04:00:00+00:00"),
+        )
+
+
+def test_manual_charge_service_does_not_substitute_30_minutes():
+    ns, now, events, timers, snapshots = _service_runtime("charge")
+    call = SimpleNamespace(data={"duration": "7"}, context=SimpleNamespace(user_id="user", parent_id=None))
+    asyncio.run(ns["handle_force_charge"](call))
+    assert snapshots[-1]["expires_at"] == now + timedelta(minutes=7)
+    assert timers[-1][1] == now + timedelta(minutes=7)
+
+
+@pytest.mark.parametrize("mode", ["charge", "discharge"])
+@pytest.mark.parametrize("data", [{"duration": 0}, {"duration": 1.5}, {"duration": True},
+                                  {"duration": "NaN"}, {"duration": 1441},
+                                  {"duration": 7, "until": "18:30"}, {"until": "25:00"}])
+def test_invalid_manual_timing_has_no_state_timer_or_command_effect(mode, data):
+    ns, _, events, timers, snapshots = _service_runtime(mode)
+    ns["hass"].config = SimpleNamespace(time_zone="Australia/Brisbane")
+    call = SimpleNamespace(data=data, context=SimpleNamespace(user_id="user", parent_id=None))
+    with pytest.raises(ValueError):
+        asyncio.run(ns[f"handle_force_{mode}"](call))
+    assert not events and not timers and not snapshots
+    assert ns[f"force_{mode}_state"] == {"active": False}
+
+
+@pytest.mark.parametrize("mode", ["charge", "discharge"])
+def test_until_is_resolved_in_service_before_scheduling_restore(mode):
+    ns, now, events, timers, snapshots = _service_runtime(mode)
+    ns["hass"].config = SimpleNamespace(time_zone="Australia/Brisbane")
+    call = SimpleNamespace(data={"until": "10:02"}, context=SimpleNamespace(user_id="user", parent_id=None))
+    asyncio.run(ns[f"handle_force_{mode}"](call))
+    assert timers[-1][1] == now + timedelta(minutes=7)
+    assert snapshots[-1]["expires_at"] == timers[-1][1]
+
+
+def test_invalid_sigenergy_discharge_timing_keeps_export_owner_and_existing_timer():
+    """No new command may steal 40038 ownership or cancel a live force timer."""
+    ns, _, events, timers, snapshots = _service_runtime()
+    owner = ns["hass"].data["power_sync"]["battery"]
+    owner["sigenergy_export_limit_owner"] = "dc_zero"
+    state = ns["force_discharge_state"]
+    cancel = lambda: events.append(("cancel", None))
+    state.update(active=True, cancel_expiry_timer=cancel, duration=30)
+    ns["hass"].config = SimpleNamespace(time_zone="Australia/Brisbane")
+    call = SimpleNamespace(data={"duration": 7, "until": "18:30"},
+                           context=SimpleNamespace(user_id="user", parent_id=None))
+    with pytest.raises(ValueError, match="Choose duration or until"):
+        asyncio.run(ns["handle_force_discharge"](call))
+    assert owner["sigenergy_export_limit_owner"] == "dc_zero"
+    assert state["cancel_expiry_timer"] is cancel and state["duration"] == 30
+    assert not events and not timers and not snapshots

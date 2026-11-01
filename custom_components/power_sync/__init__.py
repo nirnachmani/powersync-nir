@@ -33152,13 +33152,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def handle_force_discharge(call: ServiceCall) -> dict[str, Any] | None:
         """Force discharge mode - switches to autonomous with high export tariff."""
 
-        # Adapted from upstream 3297a01d: preflight before state or hardware.
+        # Adapted from upstream 3297a01d/d3a276c8: preflight before state,
+        # Sigenergy export ownership, timer cancellation or physical writes.
         source = _control_call_source(call)
         if source != "optimizer":
-            from .force_discharge_duration import selected_discharge_duration
+            from .force_discharge_duration import resolve_manual_force_duration
             try:
-                manual_duration = selected_discharge_duration(
-                    call.data.get("duration", DEFAULT_DISCHARGE_DURATION), entry.options,
+                manual_duration = resolve_manual_force_duration(
+                    call.data, entry.options,
+                    getattr(getattr(hass, "config", None), "time_zone", None),
+                    now=dt_util.utcnow(),
                 )
                 if (manual_duration not in DISCHARGE_DURATIONS
                         and not entry.data.get(CONF_SIGENERGY_STATION_ID)):
@@ -35106,6 +35109,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def handle_force_charge(call: ServiceCall) -> dict[str, Any] | None:
         """Force charge mode - switches to autonomous with free import tariff."""
 
+        # Resolve manual timing before ownership/state, timers or hardware.
+        source = _control_call_source(call)
+        if source != "optimizer":
+            from .force_discharge_duration import resolve_manual_force_duration
+            try:
+                manual_duration = resolve_manual_force_duration(
+                    call.data, entry.options,
+                    getattr(getattr(hass, "config", None), "time_zone", None),
+                    now=dt_util.utcnow(),
+                )
+                if (manual_duration not in DISCHARGE_DURATIONS
+                        and not entry.data.get(CONF_SIGENERGY_STATION_ID)):
+                    raise ValueError("Extended manual charge requires a Sigenergy station")
+            except ValueError as err:
+                raise HomeAssistantError(str(err)) from err
+
         # Warn if calibration suspected (don't block — user manual command)
         _fc_entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         if _fc_entry_data.get("calibration_suspected"):
@@ -35117,19 +35136,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         raw_duration = call.data.get("duration", DEFAULT_DISCHARGE_DURATION)
         _LOGGER.debug(f"Force charge raw duration from call.data: {raw_duration!r} (type: {type(raw_duration).__name__})")
-        source = _control_call_source(call)
         command_power_w = _resolve_force_command_power_w(
             "charge",
             call.data.get("power_w", 0),
         )
 
-        # Convert to int if string (from HA service selector or button-card)
-        try:
-            duration = int(raw_duration)
-        except (ValueError, TypeError):
-            _LOGGER.warning(f"Could not convert duration {raw_duration!r} to int, using default {DEFAULT_DISCHARGE_DURATION}")
-            duration = DEFAULT_DISCHARGE_DURATION
+        # Keep optimizer coercion unchanged; manual requests passed preflight.
         if source == "optimizer":
+            try:
+                duration = int(raw_duration)
+            except (ValueError, TypeError):
+                _LOGGER.warning(f"Could not convert duration {raw_duration!r} to int, using default {DEFAULT_DISCHARGE_DURATION}")
+                duration = DEFAULT_DISCHARGE_DURATION
             if not (1 <= duration <= 1440):
                 _LOGGER.warning(
                     "Optimizer force charge duration %s out of range, using default %d",
@@ -35137,9 +35155,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     DEFAULT_DISCHARGE_DURATION,
                 )
                 duration = DEFAULT_DISCHARGE_DURATION
-        elif duration not in DISCHARGE_DURATIONS:
-            _LOGGER.warning(f"Duration {duration} not in allowed values {DISCHARGE_DURATIONS}, using default {DEFAULT_DISCHARGE_DURATION}")
-            duration = DEFAULT_DISCHARGE_DURATION
+        else:
+            duration = manual_duration
 
         if _monitoring_mode_should_block_control(call):
             _LOGGER.info(
