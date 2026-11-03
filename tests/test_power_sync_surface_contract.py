@@ -33,6 +33,12 @@ _AMBER_FORECAST_CONFIDENCE_SHA256 = (
     "17b159de46f810f27d74c24078f88bc5642edf82f39a1bb680b0d35145f414a3"
 )
 
+# Exact upstream ad8b870e bounded HA Store writer; not an optimizer control module.
+_BOUNDED_ACCOUNTING_STORE_MODULE = OPTIMIZATION / "coalescing_store.py"
+_BOUNDED_ACCOUNTING_STORE_SHA256 = (
+    "792662bdf59bc0e6971c99cb2b203fd5ec25b40c44e1d959e04b7251733e9c39"
+)
+
 
 def _expected_battery_optimizer_source() -> str:
     """Return the immutable baseline plus this reviewed solar-only hunk."""
@@ -248,6 +254,13 @@ _PROVENANCE_LIFECYCLE_DIFF_SHA256 = (
     "a0caf3b3e504162a5ca10cbdd0bf1cb70e556847817c313138b9a2e6c6b76249"
 )
 
+# Exact coordinator delta from upstream ad8b870e: four delayed stores and import.
+# Preserve the preceding no-paywall source check as a separate assertion.
+_BOUNDED_ACCOUNTING_STORE_SOURCE = "5af1b092036a2cd0630128d7035ee8019245e155"
+_BOUNDED_ACCOUNTING_STORE_DIFF_SHA256 = (
+    "b6eec943580454010b21627a2e419db0717c32f31ef4c871b919276f19c359a2"
+)
+
 # Exact, path-specific exception for the reviewed Cost Neutral reachable-
 # deadline fix. The normal optimizer baseline contract stays intact: only the
 # complete b20bffb2 source delta is admitted.
@@ -372,6 +385,16 @@ def _provenance_lifecycle_diff_is_allowlisted(actual: str) -> bool:
     return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _PROVENANCE_LIFECYCLE_DIFF_SHA256
 
 
+def _bounded_accounting_store_diff_is_allowlisted(actual: str) -> bool:
+    expected = _git_show(_BOUNDED_ACCOUNTING_STORE_SOURCE, COORDINATOR)
+    diff = "\n".join(difflib.unified_diff(
+        expected.splitlines(), actual.splitlines(),
+        fromfile="private_5af1b092", tofile="bounded_store_candidate",
+        lineterm="",
+    ))
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _BOUNDED_ACCOUNTING_STORE_DIFF_SHA256
+
+
 def _cost_neutral_reachable_deadline_diff_is_allowlisted(
     expected: str, actual: str
 ) -> bool:
@@ -486,18 +509,23 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
         ).splitlines()
         if Path(relative_name) not in EXPLANATION_ONLY_MODULES
         and Path(relative_name) != _AMBER_FORECAST_CONFIDENCE_MODULE
+        and Path(relative_name) != _BOUNDED_ACCOUNTING_STORE_MODULE
     )
     restored_files = sorted(
         path.relative_to(ROOT).as_posix()
         for path in (ROOT / OPTIMIZATION).rglob("*.py")
         if path.relative_to(ROOT) not in EXPLANATION_ONLY_MODULES
         and path.relative_to(ROOT) != _AMBER_FORECAST_CONFIDENCE_MODULE
+        and path.relative_to(ROOT) != _BOUNDED_ACCOUNTING_STORE_MODULE
     )
 
     assert restored_files == baseline_files
     assert hashlib.sha256(
         (ROOT / _AMBER_FORECAST_CONFIDENCE_MODULE).read_bytes()
     ).hexdigest() == _AMBER_FORECAST_CONFIDENCE_SHA256
+    assert hashlib.sha256(
+        (ROOT / _BOUNDED_ACCOUNTING_STORE_MODULE).read_bytes()
+    ).hexdigest() == _BOUNDED_ACCOUNTING_STORE_SHA256
     for relative_name in baseline_files:
         relative_path = Path(relative_name)
         actual = (ROOT / relative_path).read_text(encoding="utf-8").replace(
@@ -525,7 +553,10 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
             assert _ev_plan_toggle_diff_is_allowlisted(
                 _git_show(_PROVENANCE_LIFECYCLE_SOURCE, COORDINATOR)
             )
-            assert _provenance_lifecycle_diff_is_allowlisted(actual)
+            assert _provenance_lifecycle_diff_is_allowlisted(
+                _git_show(_BOUNDED_ACCOUNTING_STORE_SOURCE, COORDINATOR)
+            )
+            assert _bounded_accounting_store_diff_is_allowlisted(actual)
         elif relative_path == BATTERY_OPTIMIZER:
             # Preserve proof that e3c17217 itself contains only the earlier,
             # reviewed solar-refill and reachable-deadline changes before
@@ -582,9 +613,15 @@ def test_negative_import_solar_allowlist_rejects_a_nearby_policy_mutation():
     assert _ev_plan_toggle_diff_is_allowlisted(
         _git_show(_PROVENANCE_LIFECYCLE_SOURCE, COORDINATOR)
     )
-    assert _provenance_lifecycle_diff_is_allowlisted(actual)
-    assert not _provenance_lifecycle_diff_is_allowlisted(
+    assert _provenance_lifecycle_diff_is_allowlisted(
+        _git_show(_BOUNDED_ACCOUNTING_STORE_SOURCE, COORDINATOR)
+    )
+    assert _bounded_accounting_store_diff_is_allowlisted(actual)
+    assert not _bounded_accounting_store_diff_is_allowlisted(
         actual.replace('getattr(self, "_ev_integration_enabled", False)', 'True', 1)
+    )
+    assert not _bounded_accounting_store_diff_is_allowlisted(
+        actual.replace('self._cost_store = CoalescingStore(', 'self._cost_store = Store(', 1)
     )
     assert not _total_grid_import_diff_is_allowlisted(
         _git_show(_EV_PLAN_TOGGLE_SOURCE, COORDINATOR).replace("middle - base", "middle", 1)
