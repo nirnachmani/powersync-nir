@@ -287,6 +287,14 @@ _SOLAR_QUOTA_ESTIMATOR_DIFF_SHA256 = (
     "1be6f5406ecdf42b7dca291f08c93b36ffa7a96f84023743c0e0ae4afb8320f2"
 )
 
+# Upstream e524451b: keep measured battery provenance pending through stale-SoC
+# optimizer runs, retaining the fork's solar-export debit. Anchor this exact
+# reviewed delta to the preceding private coordinator, not the upstream source.
+_PENDING_SOC_SOURCE = "3c8dc3e23362c22d70e4a0ec2a30b3542564c847"
+_PENDING_SOC_DIFF_SHA256 = (
+    "fee74206fff6a8eb6d075e5c16fa97fdbb94c7b3f775e0f5e0d1e0cdf2acb2a7"
+)
+
 # Exact, path-specific exception for the reviewed Cost Neutral reachable-
 # deadline fix. The normal optimizer baseline contract stays intact: only the
 # complete b20bffb2 source delta is admitted.
@@ -462,6 +470,16 @@ def _solar_quota_diff_is_allowlisted(path: Path, actual: str) -> bool:
         else _SOLAR_QUOTA_ESTIMATOR_DIFF_SHA256
     )
     return hashlib.sha256(diff.encode("utf-8")).hexdigest() == digest
+
+
+def _pending_soc_diff_is_allowlisted(actual: str) -> bool:
+    expected = _git_show(_PENDING_SOC_SOURCE, COORDINATOR)
+    diff = "\n".join(difflib.unified_diff(
+        expected.splitlines(), actual.splitlines(),
+        fromfile="private_3c8dc3e2", tofile="pending_soc_candidate",
+        lineterm="",
+    ))
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _PENDING_SOC_DIFF_SHA256
 
 
 def _cost_neutral_reachable_deadline_diff_is_allowlisted(
@@ -645,7 +663,10 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
             assert _solar_fallback_diff_is_allowlisted(
                 _git_show(_SOLAR_QUOTA_SOURCE, COORDINATOR)
             )
-            assert _solar_quota_diff_is_allowlisted(COORDINATOR, actual)
+            assert _solar_quota_diff_is_allowlisted(
+                COORDINATOR, _git_show(_PENDING_SOC_SOURCE, COORDINATOR)
+            )
+            assert _pending_soc_diff_is_allowlisted(actual)
         elif relative_path == BATTERY_OPTIMIZER:
             # Preserve proof that e3c17217 itself contains only the earlier,
             # reviewed solar-refill and reachable-deadline changes before
@@ -719,7 +740,17 @@ def test_negative_import_solar_allowlist_rejects_a_nearby_policy_mutation():
     assert _solar_fallback_diff_is_allowlisted(
         _git_show(_SOLAR_QUOTA_SOURCE, COORDINATOR)
     )
-    assert _solar_quota_diff_is_allowlisted(COORDINATOR, actual)
+    assert _solar_quota_diff_is_allowlisted(
+        COORDINATOR, _git_show(_PENDING_SOC_SOURCE, COORDINATOR)
+    )
+    assert _pending_soc_diff_is_allowlisted(actual)
+    assert not _pending_soc_diff_is_allowlisted(
+        actual.replace('reason in ("measured_interval", "optimizer_run")',
+                       'reason == "measured_interval"', 1)
+    )
+    assert not _pending_soc_diff_is_allowlisted(
+        actual.replace('or solar_export > 1e-9', '', 1)
+    )
     assert not _solar_fallback_diff_is_allowlisted(
         _git_show(_SOLAR_QUOTA_SOURCE, COORDINATOR).replace(
             'getattr(self, "_ev_integration_enabled", False)', 'True', 1
@@ -751,7 +782,11 @@ def test_solar_quota_allowlists_reject_nearby_unreviewed_changes():
         (COORDINATOR, 'reason == "solcast_quota_exhausted"', 'reason != "solcast_quota_exhausted"'),
         (LOAD_ESTIMATOR, 'return any(quotas)', 'return all(quotas)'),
     ):
-        actual = (ROOT / path).read_text(encoding="utf-8").replace("\r\n", "\n")
+        actual = (
+            _git_show(_PENDING_SOC_SOURCE, COORDINATOR)
+            if path == COORDINATOR
+            else (ROOT / path).read_text(encoding="utf-8").replace("\r\n", "\n")
+        )
         assert _solar_quota_diff_is_allowlisted(path, actual)
         assert source in actual
         assert not _solar_quota_diff_is_allowlisted(path, actual.replace(source, mutation, 1))
