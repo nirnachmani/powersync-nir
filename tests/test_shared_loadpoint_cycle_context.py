@@ -174,6 +174,36 @@ def test_cycle_context_publishes_fresh_evac_observation_provenance():
     assert context["evidence"] == "fresh_evac_state"
 
 
+@pytest.mark.parametrize("loadpoint", ["generic_ev", "sigenergy_charger"])
+def test_new_shared_start_rearms_stop_warning_without_claiming_idle(monkeypatch, loadpoint):
+    """A/B share a physical warning; a later session may alert again, not clear it."""
+    from power_sync import action_events
+
+    hass = _Hass(_Store())
+    hass.bus = SimpleNamespace(async_fire=Mock())
+    notices = Mock()
+    monkeypatch.setattr(action_events, "_notification", notices)
+    entry = _Entry()
+
+    def command(name, success=True):
+        return {"command": name, "success": success, "source": "powersync",
+                "at": datetime.now(UTC).isoformat(), "reason": "charger unavailable"}
+
+    action_events.publish_ev_command(hass, entry, loadpoint, command("stop", False))
+    action_events.publish_ev_command(hass, entry, loadpoint, command("start", False))
+    action_events.publish_ev_command(hass, entry, loadpoint, command("stop", False))
+    assert [call.args[0] for call in hass.bus.async_fire.call_args_list].count(
+        action_events.EVENT_EV_STOP_FAILED
+    ) == 1
+    action_events.publish_ev_command(hass, entry, loadpoint, command("start", True))
+    assert notices.call_count == 1  # No physical idle proof yet.
+    action_events.publish_ev_command(hass, entry, loadpoint, command("stop", False))
+    assert [call.args[0] for call in hass.bus.async_fire.call_args_list].count(
+        action_events.EVENT_EV_STOP_FAILED
+    ) == 2
+    assert notices.call_count == 2
+
+
 @pytest.mark.parametrize("backend,loadpoint", [
     ("generic", "generic_ev"), ("evac", "sigenergy_charger"),
 ])
