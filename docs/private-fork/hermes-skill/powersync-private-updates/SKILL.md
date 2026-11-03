@@ -1,7 +1,7 @@
 ---
 name: powersync-private-updates
 description: "Use when maintaining the PowerSync Nir fork against upstream."
-version: 1.0.4
+version: 1.0.5
 ---
 
 # PowerSync Nir fork upstream maintenance
@@ -266,6 +266,26 @@ permission, command-fencing and hosted-access code out.
   `origin/upstream/main` ref also exists and can silently select stale history.
   Use `summary` as the end-of-cycle cron JSON payload. This naturally brings
   any prerequisite in before a later dependent fix.
+- **Completion gate: never end on a backlog.** Pin the fetched upstream target
+  for this cycle and continue calling ledger `next` and recording each terminal
+  outcome until `next` reports no remaining commits through that target. The
+  number of commits, a convenient version boundary, three completed ports, or
+  a desire to send a progress email is **not** a blocker or stopping point.
+  Do not voluntarily wrap up while turns/time remain. Do not run final gates,
+  write an end-of-cycle report, or publish until the target is exhausted.
+  After final gates, recheck the ledger summary/`next`; a successful test run
+  does not convert unfinished work into a finished cycle.
+- Stop early **only** for a specific unresolved fork conflict, failed safety
+  gate, missing required external input, or an actual enforced runtime/resource
+  limit. Record the exact stopping commit and evidence. For a real runtime
+  limit, save the durable checkpoint and next SHA, identify the limit, and
+  arrange immediate continuation after the current claim releases rather than
+  waiting for the next regular schedule; if no safe handoff can be arranged,
+  report an operational interruption requiring continuation, not a fork
+  conflict or a request for a product decision. Never mark `complete: true`,
+  `release_published: true`, or claim the cycle finished while `next` is
+  non-null. A cron execution marked `completed/ok` only means the agent
+  returned, not that the maintenance objective was met.
 - Broad testing is reserved for final release handoff or a clear regression
   discovered during an amendment. Never multiply review or broad test runs for
   irrelevant, theoretical, or unavailable-vendor scenarios.
@@ -303,6 +323,25 @@ Commit/candidate: <SHA or retained worktree>
 Deployment: <not attempted / separately authorised result>
 Blockers / follow-up: <none or factual items>
 ```
+
+## Review a stopped or incomplete run
+
+1. Read the latest cron execution/output and saved maintenance report in the
+   **named server profile**, not just the email; separate scheduler outcome
+   from the report's `complete` and `release_published` fields.
+2. Read the session `end_reason` and actual call/turn count against the
+   configured cap. Do not infer timeout from a large backlog or `ok` from a
+   normally returned session; if the trace gives no reason for stopping, say
+   so instead of inventing one.
+3. Run the ledger CLI's `next` against `refs/remotes/upstream/main`, compare
+   its checkpoint/remaining count with the reported target, and inspect local
+   versus remote feature/main heads plus worktree status. Distinguish local
+   tested commits from pushed changes, a GitHub release, and HA deployment.
+4. Name a **blocker** only for a specific conflict, failing gate, missing input,
+   or confirmed runtime limit. Unreviewed commits are pending work: identify
+   the next SHA and describe whether it was actually examined. Explain this in
+   plain language before the per-commit table so the email does not imply an
+   ordinary backlog needs a human decision.
 
 ## End-of-cycle update report
 
