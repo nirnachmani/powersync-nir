@@ -6390,6 +6390,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._battery_provenance_grid_kwh *= ratio
             self._battery_provenance_unknown_kwh *= ratio
             self._battery_provenance_grid_cost *= ratio
+        # Battery power may refresh before SoC. Keep measured origin and
+        # solar-export debit until a changed SoC or gap supplies fresh proof.
+        previous_soc = _nonnegative_finite_number(
+            getattr(self, "_battery_provenance_last_soc", None)
+        )
+        current_soc_value = _nonnegative_finite_number(current_soc)
+        unchanged_soc = (
+            previous_soc is not None
+            and current_soc_value is not None
+            and abs(previous_soc - min(1.0, current_soc_value)) <= 1e-6
+            and (solar_charge > 1e-9 or grid_charge > 1e-9 or discharge > 1e-9)
+        )
+        if unchanged_soc and not telemetry_gap:
+            self._battery_provenance_reconciliation = (
+                "deferred_unchanged_soc:measured_interval"
+            )
+            self._schedule_battery_provenance_save()
+            return
         self._reconcile_battery_provenance(
             current_soc, capacity_wh, reason="measured_interval"
         )

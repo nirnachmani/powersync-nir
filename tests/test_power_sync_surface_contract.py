@@ -261,6 +261,13 @@ _BOUNDED_ACCOUNTING_STORE_DIFF_SHA256 = (
     "b6eec943580454010b21627a2e419db0717c32f31ef4c871b919276f19c359a2"
 )
 
+# Exact upstream 73981018 stale-SoC deferral, preserving the fork's measured
+# solar-export debit and all preceding no-paywall coordinator checks.
+_STALE_SOC_DEFERRAL_SOURCE = "306dc3606397c3bde66476bc80095f48e101f68e"
+_STALE_SOC_DEFERRAL_DIFF_SHA256 = (
+    "55d5e99469ce14044315219e1f43fdd815e8d3415db42be9dd7a7032f1500604"
+)
+
 # Exact, path-specific exception for the reviewed Cost Neutral reachable-
 # deadline fix. The normal optimizer baseline contract stays intact: only the
 # complete b20bffb2 source delta is admitted.
@@ -393,6 +400,16 @@ def _bounded_accounting_store_diff_is_allowlisted(actual: str) -> bool:
         lineterm="",
     ))
     return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _BOUNDED_ACCOUNTING_STORE_DIFF_SHA256
+
+
+def _stale_soc_deferral_diff_is_allowlisted(actual: str) -> bool:
+    expected = _git_show(_STALE_SOC_DEFERRAL_SOURCE, COORDINATOR)
+    diff = "\n".join(difflib.unified_diff(
+        expected.splitlines(), actual.splitlines(),
+        fromfile="private_306dc360", tofile="stale_soc_candidate",
+        lineterm="",
+    ))
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _STALE_SOC_DEFERRAL_DIFF_SHA256
 
 
 def _cost_neutral_reachable_deadline_diff_is_allowlisted(
@@ -556,7 +573,10 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
             assert _provenance_lifecycle_diff_is_allowlisted(
                 _git_show(_BOUNDED_ACCOUNTING_STORE_SOURCE, COORDINATOR)
             )
-            assert _bounded_accounting_store_diff_is_allowlisted(actual)
+            assert _bounded_accounting_store_diff_is_allowlisted(
+                _git_show(_STALE_SOC_DEFERRAL_SOURCE, COORDINATOR)
+            )
+            assert _stale_soc_deferral_diff_is_allowlisted(actual)
         elif relative_path == BATTERY_OPTIMIZER:
             # Preserve proof that e3c17217 itself contains only the earlier,
             # reviewed solar-refill and reachable-deadline changes before
@@ -616,11 +636,14 @@ def test_negative_import_solar_allowlist_rejects_a_nearby_policy_mutation():
     assert _provenance_lifecycle_diff_is_allowlisted(
         _git_show(_BOUNDED_ACCOUNTING_STORE_SOURCE, COORDINATOR)
     )
-    assert _bounded_accounting_store_diff_is_allowlisted(actual)
-    assert not _bounded_accounting_store_diff_is_allowlisted(
+    assert _bounded_accounting_store_diff_is_allowlisted(
+        _git_show(_STALE_SOC_DEFERRAL_SOURCE, COORDINATOR)
+    )
+    assert _stale_soc_deferral_diff_is_allowlisted(actual)
+    assert not _stale_soc_deferral_diff_is_allowlisted(
         actual.replace('getattr(self, "_ev_integration_enabled", False)', 'True', 1)
     )
-    assert not _bounded_accounting_store_diff_is_allowlisted(
+    assert not _stale_soc_deferral_diff_is_allowlisted(
         actual.replace('self._cost_store = CoalescingStore(', 'self._cost_store = Store(', 1)
     )
     assert not _total_grid_import_diff_is_allowlisted(
