@@ -1678,7 +1678,7 @@ function psBatteryControl(modeState) {
 class PsNowCard extends PsCardBase {
   _signature() {
     const data = psApiPeek('power_sync/optimization');
-    return `${super._signature()}#${data?.last_optimization || ''}|${data?.current_action || ''}|${data?.next_action_time || ''}`;
+    return `${super._signature()}#${data?.last_optimization || ''}|${data?.current_action || ''}|${data?.planned_current_action || ''}|${data?.next_action_time || ''}`;
   }
 
   _render() {
@@ -1715,9 +1715,12 @@ class PsNowCard extends PsCardBase {
     }
 
     // Headline
-    const actKey = psActionKey(data?.effective_current_action || data?.current_action);
+    // Monitoring does not execute the plan: describe measured battery flow,
+    // and use the planned action only for conditional forecast wording.
+    const actKey = monitoring ? '' : psActionKey(data?.effective_current_action || data?.current_action);
+    const plannedKey = monitoring ? psActionKey(data?.planned_current_action || data?.current_action) : actKey;
     const { interval } = psSchedule(data);
-    const runEnd = psPlannedRunEnd(rows, interval, actKey, now);
+    const runEnd = monitoring ? null : psPlannedRunEnd(rows, interval, actKey, now);
     // Self-consumption allows solar charging as well as supplying the home.
     // Describe the measured flow rather than treating this control as discharge.
     const selfHeadline = !Number.isFinite(battery) ? 'Self-consumption is enabled.'
@@ -1741,9 +1744,10 @@ class PsNowCard extends PsCardBase {
     if (!PS_MODE_TEXT[mode] && runEnd && runEnd - now >= 20 * 60_000) {
       parts.push(`The plan keeps ${actKey === 'self' ? 'self-consumption' : 'this going'} until <span class="num">${psEsc(psWhen(hass, runEnd))}</span>.`);
     }
-    const nextChange = psNextChange(data, actKey, now);
+    if (!PS_MODE_TEXT[mode] && monitoring && plannedKey) parts.push(`The plan would ${PS_ACT[plannedKey][0].toLowerCase()} now.`);
+    const nextChange = psNextChange(data, plannedKey, now);
     if (nextChange) {
-      parts.push(`Next it will ${PS_ACT[nextChange.key][0].toLowerCase()} at <span class="num">${psEsc(psWhen(hass, nextChange.t))}</span>.`);
+      parts.push(`Next it ${monitoring ? 'would' : 'will'} ${PS_ACT[nextChange.key][0].toLowerCase()} at <span class="num">${psEsc(psWhen(hass, nextChange.t))}</span>.`);
     }
     const day = rows.filter(r => r.t >= now && r.t <= now + 24 * 3_600_000 && Number.isFinite(r.soc));
     let low = null;
