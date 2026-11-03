@@ -268,6 +268,13 @@ _STALE_SOC_DEFERRAL_DIFF_SHA256 = (
     "55d5e99469ce14044315219e1f43fdd815e8d3415db42be9dd7a7032f1500604"
 )
 
+# Upstream 1941e867: expose forecast inputs for the chart only on greedy
+# fallback; preserve the exact reviewed no-paywall optimizer source beneath it.
+_SOLAR_FALLBACK_SOURCE = "4ce4b3c14ea563e87c1de8cec31e3e459b916f40"
+_SOLAR_FALLBACK_DIFF_SHA256 = (
+    "f899eef7b42b051f5b8572864fde4293bb59ad211be0414bb2fa6ac811203b6f"
+)
+
 # Exact, path-specific exception for the reviewed Cost Neutral reachable-
 # deadline fix. The normal optimizer baseline contract stays intact: only the
 # complete b20bffb2 source delta is admitted.
@@ -410,6 +417,16 @@ def _stale_soc_deferral_diff_is_allowlisted(actual: str) -> bool:
         lineterm="",
     ))
     return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _STALE_SOC_DEFERRAL_DIFF_SHA256
+
+
+def _solar_fallback_diff_is_allowlisted(actual: str) -> bool:
+    expected = _git_show(_SOLAR_FALLBACK_SOURCE, COORDINATOR)
+    diff = "\n".join(difflib.unified_diff(
+        expected.splitlines(), actual.splitlines(),
+        fromfile="private_4ce4b3c1", tofile="solar_fallback_candidate",
+        lineterm="",
+    ))
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _SOLAR_FALLBACK_DIFF_SHA256
 
 
 def _cost_neutral_reachable_deadline_diff_is_allowlisted(
@@ -576,7 +593,10 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
             assert _bounded_accounting_store_diff_is_allowlisted(
                 _git_show(_STALE_SOC_DEFERRAL_SOURCE, COORDINATOR)
             )
-            assert _stale_soc_deferral_diff_is_allowlisted(actual)
+            assert _stale_soc_deferral_diff_is_allowlisted(
+                _git_show(_SOLAR_FALLBACK_SOURCE, COORDINATOR)
+            )
+            assert _solar_fallback_diff_is_allowlisted(actual)
         elif relative_path == BATTERY_OPTIMIZER:
             # Preserve proof that e3c17217 itself contains only the earlier,
             # reviewed solar-refill and reachable-deadline changes before
@@ -639,11 +659,14 @@ def test_negative_import_solar_allowlist_rejects_a_nearby_policy_mutation():
     assert _bounded_accounting_store_diff_is_allowlisted(
         _git_show(_STALE_SOC_DEFERRAL_SOURCE, COORDINATOR)
     )
-    assert _stale_soc_deferral_diff_is_allowlisted(actual)
-    assert not _stale_soc_deferral_diff_is_allowlisted(
+    assert _stale_soc_deferral_diff_is_allowlisted(
+        _git_show(_SOLAR_FALLBACK_SOURCE, COORDINATOR)
+    )
+    assert _solar_fallback_diff_is_allowlisted(actual)
+    assert not _solar_fallback_diff_is_allowlisted(
         actual.replace('getattr(self, "_ev_integration_enabled", False)', 'True', 1)
     )
-    assert not _stale_soc_deferral_diff_is_allowlisted(
+    assert not _solar_fallback_diff_is_allowlisted(
         actual.replace('self._cost_store = CoalescingStore(', 'self._cost_store = Store(', 1)
     )
     assert not _total_grid_import_diff_is_allowlisted(
