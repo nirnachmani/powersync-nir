@@ -484,10 +484,46 @@ def test_right_now_uses_continuous_planned_run_not_short_optimizer_step():
     html = out['html']
     headline = html.split('<h1>')[1].split('</h1>')[0]
     assert headline == 'The battery is powering the home.'
-    assert 'The plan keeps this going until' in html
+    assert 'The plan keeps self-consumption until' in html
     assert 2.4 < out['runEndHours'] <= 3.0
     assert 'Next it will power the home' not in html
     assert 'Next it will charge at' in html
+
+
+def test_self_consumption_heading_follows_measured_battery_flow():
+    """Self-consumption permits solar charging; it does not prove discharge."""
+    out = _run_board(r"""
+  const samples = [];
+  const st = (state, attributes = {}) => ({state: String(state), attributes});
+  for (const mode of ['normal', 'self_consumption']) {
+    for (const unit of ['W', 'kW']) {
+    for (const power of [-10000, -100, 0, 100, 1900, 'unavailable']) {
+      const card = new T.PsNowCard();
+      card._config = {entities: {battery: 'sensor.battery', mode: 'sensor.mode', solar: 'sensor.solar', home: 'sensor.home', grid: 'sensor.grid'}};
+      card._hass = {states: {
+        'sensor.battery': st(typeof power === 'number' && unit === 'kW' ? power / 1000 : power, {unit_of_measurement: unit}),
+        'sensor.mode': st(mode),
+        'sensor.solar': st(11.5, {unit_of_measurement: 'kW'}),
+        'sensor.home': st(0.4, {unit_of_measurement: 'kW'}),
+        'sensor.grid': st(-1.1, {unit_of_measurement: 'kW'}),
+      }, locale: {}, config: {}};
+      card._api = () => ({enabled: true, current_action: 'self_consumption'});
+      card._render();
+      samples.push({mode, power, unit, headline: card.innerHTML.split('<h1>')[1].split('</h1>')[0]});
+    }
+    }
+  }
+  console.log(JSON.stringify({samples}));
+""")
+    for sample in out["samples"]:
+        power = sample["power"]
+        expected = (
+            "Self-consumption is enabled." if power == "unavailable" else
+            "The battery is charging." if power < -100 else
+            "The battery is powering the home." if power > 100 else
+            "The battery is idle."
+        )
+        assert sample["headline"] == expected, sample
 
 
 def test_settings_editor_patch_preserves_other_values_and_encodes_one_percent():
