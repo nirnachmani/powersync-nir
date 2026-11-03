@@ -567,15 +567,23 @@ def test_shared_price_cap_form_prefills_from_existing_schedule_store():
     method = _options_flow_method("_shared_schedule_price_cap")
     namespace = {"Any": object}
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(CONFIG_FLOW_PATH), "exec"), namespace)
-    store = SimpleNamespace(_data={"auto_schedule_settings": {
-        "shared_ev_profile_a": {"max_grid_price_cents": 19.5},
-    }})
-    flow = SimpleNamespace(_get_shared_schedule_store=lambda: store)
-    assert namespace["_shared_schedule_price_cap"](flow, "shared_ev_profile_a") == 19.5
-    assert namespace["_shared_schedule_price_cap"](flow, "shared_ev_profile_b") == 25.0
+
+    class Store:
+        # HA Store._data is transient write bookkeeping, not loaded contents.
+        _data = None
+        async def async_load(self):
+            return {"auto_schedule_settings": {
+                "shared_ev_profile_a": {"max_grid_price_cents": 32.0},
+            }}
+
+    flow = SimpleNamespace(_get_shared_schedule_store=lambda: Store())
+    assert asyncio.run(namespace["_shared_schedule_price_cap"](flow, "shared_ev_profile_a")) == 32.0
+    assert asyncio.run(namespace["_shared_schedule_price_cap"](flow, "shared_ev_profile_b")) == 25.0
 
     form = ast.get_source_segment(CONFIG_FLOW_PATH.read_text(), _options_flow_method("async_step_ev_charging"))
     save_options = ast.get_source_segment(CONFIG_FLOW_PATH.read_text(), _options_flow_method("_save_ev_options"))
+    assert "await self._shared_schedule_price_cap(PROFILE_A_ID)" in form
+    assert "await self._shared_schedule_price_cap(PROFILE_B_ID)" in form
     for key in ("CONF_SHARED_PROFILE_A_PRICE_CAP_FORM", "CONF_SHARED_PROFILE_B_PRICE_CAP_FORM"):
         assert key in form
         assert key not in save_options

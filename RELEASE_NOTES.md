@@ -1,3 +1,9 @@
+<!-- release: v2.12.1581-nir.3 -->
+
+## v2.12.1581-nir.3 — show saved Smart Schedule price ceilings correctly
+- EV Charging Options now reads logical EV A/B grid-price ceilings from Home Assistant's loaded schedule store. The previous form inspected HA Store's transient write buffer, so it displayed the 25 c/kWh default even when a custom ceiling (such as 32 c/kWh) had been saved. A price-only save need not reload the integration because it changes the schedule store rather than config-entry options.
+- Existing saved prices, app/API settings and charging policy are unchanged. Source publication only: no Home Assistant installation, restart or physical charger command was performed.
+
 <!-- release: v2.12.1581-nir.2 -->
 
 ## v2.12.1581-nir.2 — per-EV Smart Schedule grid-price ceiling in Options

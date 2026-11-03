@@ -104,7 +104,9 @@ current repository only; it is not a deployment or upstream-update procedure.
   edits that same Smart Schedule store as the authenticated app/API, not a
   duplicate config-entry option or a charger-wide limit. A/B ceilings remain
   independent even while B is disabled; unrelated Options saves preserve them,
-  and reload/restart must restore them from the store. A lowered ceiling must
+  and reload/restart must restore them from the store. Options prefill must
+  `await store.async_load()`, not inspect HA Store's transient `_data` write
+  buffer (which is `None` after a completed write). A lowered ceiling must
   constrain execution even while an older plan is cached. The ceiling applies
   to Smart Schedule grid windows, not Solar Surplus, Scheduled or Price-Level
   Charging. Review upstream changes to this Options/API/store seam as semantic

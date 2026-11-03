@@ -8399,10 +8399,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
         return entry_data.get("store") if isinstance(entry_data, dict) else None
 
-    def _shared_schedule_price_cap(self, profile_id: str) -> float:
+    async def _shared_schedule_price_cap(self, profile_id: str) -> float:
         store = self._get_shared_schedule_store()
-        schedules = getattr(store, "_data", {}) or {}
-        return schedules.get("auto_schedule_settings", {}).get(
+        # HA Store._data is transient write bookkeeping, not the loaded data.
+        stored = await store.async_load() if store is not None else None
+        return (stored or {}).get("auto_schedule_settings", {}).get(
             profile_id, {}
         ).get("max_grid_price_cents", 25.0)
 
@@ -16143,8 +16144,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         from .automations.shared_loadpoint import PROFILE_A_ID, PROFILE_B_ID
         current_shared_profile_a_capacity = self._shared_profile_capacity(PROFILE_A_ID)
         current_shared_profile_b_capacity = self._shared_profile_capacity(PROFILE_B_ID)
-        current_shared_profile_a_price_cap = self._shared_schedule_price_cap(PROFILE_A_ID)
-        current_shared_profile_b_price_cap = self._shared_schedule_price_cap(PROFILE_B_ID)
+        current_shared_profile_a_price_cap = await self._shared_schedule_price_cap(PROFILE_A_ID)
+        current_shared_profile_b_price_cap = await self._shared_schedule_price_cap(PROFILE_B_ID)
         shared_binding_configured = bool(
             self._get_option(CONF_SHARED_LOADPOINT_CONNECTED_VEHICLE_ENTITY)
             and self._get_option(CONF_SHARED_LOADPOINT_PROFILE_A_NAME)
