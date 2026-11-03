@@ -1,3 +1,11 @@
+<!-- release: v2.12.1616-nir.1 -->
+
+## v2.12.1616-nir.1 — reviewed upstream through v2.12.1616
+- Solar forecasts remain visible during fallback planning; Solcast quota exhaustion uses Open-Meteo when available and recovers after the daily reset. The no-paywall optimizer credits actually stored solar toward later protected exports and retains measured provenance through unchanged-SoC solves.
+- The dashboard highlights active flows, fits midnight labels, displays the full 48-hour battery plan, and distinguishes measured battery flow from a conditional plan in monitoring mode.
+- Failed Generic/Sigenergy shared-EV stop requests publish HA events and persistent warnings keyed by the canonical physical loadpoint. A fresh, newer idle observation clears the warning; a later accepted start rearms a new failure episode without asserting that the prior stop was confirmed. Private selector, lease, session, and Android routes remain guarded.
+- Tesla, GloBird, AGL, GoodWe, and optimizer-entitlement-only outcomes were excluded. Architecture, optimizer-continuity, Android-contract, and focused private compatibility gates passed. This is source publication only: no Home Assistant installation, restart, or physical control was performed.
+
 <!-- release: v2.12.1581-nir.3 -->
 
 ## v2.12.1581-nir.3 — show saved Smart Schedule price ceilings correctly
