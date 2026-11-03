@@ -119,6 +119,63 @@ def _generic_params() -> dict:
     }
 
 
+@pytest.mark.parametrize("charger_type,loadpoint", [
+    ("generic", "generic_ev"), ("sigenergy", "sigenergy_charger"),
+])
+def test_shared_dynamic_window_failed_stop_does_not_announce_success(
+    monkeypatch, charger_type, loadpoint,
+):
+    hass = _Hass()
+    entry = _Entry()
+    params = {
+        "charger_type": charger_type,
+        "dynamic_mode": "battery_target",
+        "owner_mode": "scheduled",
+        "active_logical_vehicle_id": "shared_ev_profile_a",
+        "stop_outside_window": True,
+        "time_window_start": "00:00",
+        "time_window_end": "01:00",
+    }
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state[entry.entry_id] = {
+        loadpoint: {"active": True, "params": params},
+    }
+    stop = AsyncMock(return_value=False)
+    push = AsyncMock()
+    monkeypatch.setattr(actions, "_release_dynamic_tesla_if_away", AsyncMock(return_value=False))
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", AsyncMock(return_value=False))
+    monkeypatch.setattr(actions, "_is_inside_time_window", lambda *_args: False)
+    monkeypatch.setattr(actions, "_action_stop_ev_charging_dynamic", stop)
+    monkeypatch.setattr(actions, "_send_expo_push", push)
+
+    asyncio.run(actions._dynamic_ev_update(hass, entry, entry.entry_id, loadpoint))
+
+    assert stop.await_args.args[:2] == (hass, entry)
+    assert stop.await_args.args[2]["vehicle_id"] == loadpoint
+    assert stop.await_args.args[2]["stop_reason"] == "time window ended"
+    push.assert_not_awaited()
+    hass.services.async_call.assert_not_awaited()
+
+
+def test_obsolete_shared_window_stop_cannot_authorize_a_failure_record():
+    hass = _Hass(selector_state="tesla")  # A's timer fires after B was selected.
+    entry = _Entry()
+    prior = ownership.record_ev_command(
+        hass, entry, "generic_ev", command="start", success=True,
+    )
+    report = {}
+    stopped = asyncio.run(actions._action_stop_ev_charging(
+        hass, entry, {
+            **_generic_params(), "vehicle_id": "shared_ev_profile_a",
+            "_window_stop_report": report,
+        },
+    ))
+    assert stopped is False
+    assert report == {}
+    assert ownership.get_ev_last_commands(hass, entry)["generic_ev"] is prior
+    hass.services.async_call.assert_not_awaited()
+
+
 def test_solar_switch_writer_stops_only_selected_shared_profile(monkeypatch):
     """The new config writer must retain the private physical/logical stop seam."""
     dispatcher = types.ModuleType("homeassistant.helpers.dispatcher")

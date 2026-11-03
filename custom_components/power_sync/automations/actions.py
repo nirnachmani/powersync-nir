@@ -5494,7 +5494,10 @@ async def _action_start_ev_charging(
                     )
                     return
                 _LOGGER.info(f"⏰ Time window ended, stopping EV charging")
-                stop_success = await _action_stop_ev_charging(hass, config_entry, params)
+                stop_report: dict[str, Any] = {}
+                stop_success = await _action_stop_ev_charging(
+                    hass, config_entry, {**params, "_window_stop_report": stop_report}
+                )
                 if stop_success and not params.get("skip_ownership"):
                     await clear_tracked_ev_charging_session(
                         hass,
@@ -5502,8 +5505,23 @@ async def _action_start_ev_charging(
                         _ev_action_loadpoint_id(params),
                         reason="time window ended",
                     )
-                # Send notification that charging stopped
-                await _send_expo_push(hass, "EV Charging", "Stopped - time window ended")
+                if stop_success:
+                    await _send_expo_push(hass, "EV Charging", "Stopped - time window ended")
+                elif stop_report.get("authorized"):
+                    # This finite stop bypasses the dynamic command recorder.
+                    # Never replace a shared physical command record if an
+                    # obsolete A/B callback failed its selector/lease guard.
+                    from .ev_ownership import record_ev_command
+
+                    record_ev_command(
+                        hass, config_entry, _ev_action_loadpoint_id(params),
+                        command="stop", success=False,
+                        reason="time window ended; physical stop not confirmed",
+                    )
+                    _LOGGER.warning(
+                        "EV charging stop not confirmed at time-window end for %s",
+                        _ev_action_loadpoint_id(params),
+                    )
                 # Clean up the scheduled stop entry
                 current_stop = _ev_scheduled_stop.get(entry_id)
                 if (
@@ -5593,6 +5611,10 @@ async def _action_stop_ev_charging(
             return False
 
     # Cancel any scheduled stop
+    if charger_type in ("generic", "sigenergy"):
+        stop_report = params.get("_window_stop_report")
+        if isinstance(stop_report, dict):
+            stop_report["authorized"] = True
     if not force_tesla_stop_request and entry_id in _ev_scheduled_stop:
         cancel_func = _ev_scheduled_stop[entry_id].get("cancel")
         if cancel_func:
@@ -13162,17 +13184,20 @@ async def _dynamic_ev_update(
                     if vehicle_id == DEFAULT_VEHICLE_ID and params.get("vehicle_vin")
                     else vehicle_id
                 )
-                await _action_stop_ev_charging_dynamic(
+                physical_stop_report: dict[str, Any] = {}
+                stop_success = await _action_stop_ev_charging_dynamic(
                     hass,
                     config_entry,
                     {
                         "vehicle_id": target_vehicle_id,
                         "vehicle_vin": target_vehicle_id,
                         "stop_charging": True,
+                        "stop_reason": "time window ended",
+                        "_physical_stop_report": physical_stop_report,
                     },
                 )
-                # Send notification that charging stopped
-                await _send_expo_push(hass, "EV Charging", "Stopped - time window ended")
+                if stop_success and physical_stop_report.get("physical_stop_vehicle_ids"):
+                    await _send_expo_push(hass, "EV Charging", "Stopped - time window ended")
                 return
 
     group_sessions = _smart_schedule_battery_target_states(entry_id)

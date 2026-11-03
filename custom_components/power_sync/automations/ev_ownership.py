@@ -837,6 +837,11 @@ def record_ev_command(
         lease["updated_at"] = now
 
     _schedule_runtime_save(hass, config_entry)
+    # Publish the stored result; this does not authorize another physical write
+    # or change a shared ownership lease.
+    from ..action_events import publish_ev_command
+
+    publish_ev_command(hass, config_entry, vid, last_command)
     return last_command
 
 

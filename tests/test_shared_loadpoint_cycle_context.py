@@ -9,6 +9,9 @@ import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -169,6 +172,94 @@ def test_cycle_context_publishes_fresh_evac_observation_provenance():
     assert context["origin"] == "external"
     assert context["observed_at"] == NOW
     assert context["evidence"] == "fresh_evac_state"
+
+
+@pytest.mark.parametrize("backend,loadpoint", [
+    ("generic", "generic_ev"), ("evac", "sigenergy_charger"),
+])
+def test_shared_failed_stop_warns_once_and_only_newer_physical_idle_settles(
+    backend, loadpoint,
+):
+    """A/B share a warning key, but observations never release A's physical lease."""
+    from power_sync.automations import ev_ownership
+
+    entry = _Entry()
+    if backend == "evac":
+        entry.options = {
+            **entry.options, "generic_charger_enabled": False,
+            "sigenergy_charger_enabled": True, "sigenergy_charger_type": "evac",
+        }
+    store = _Store()
+    hass = _Hass(store, selector="tank")
+    bus = Mock()
+    hass.bus = SimpleNamespace(async_fire=bus)
+    lease = ev_ownership.claim_ev_ownership(
+        hass, entry, loadpoint, owner_mode="scheduled",
+        extra={"active_profile_id": "shared_ev_profile_a"},
+    )
+    failed = ev_ownership.record_ev_command(
+        hass, entry, loadpoint, command="stop", success=False,
+        reason="time window ended; physical stop not confirmed",
+    )
+    # A successful actuator acknowledgement alone is not physical proof.
+    ev_ownership.record_ev_command(
+        hass, entry, loadpoint, command="stop", success=True,
+        reason="retry accepted",
+    )
+    current = ev_ownership.get_ev_last_commands(hass, entry)[loadpoint]
+    current["at"] = (datetime.now(UTC) - timedelta(seconds=2)).isoformat()
+    assert failed is not current
+    runtime = hass.data["power_sync"][entry.entry_id]
+    assert list(runtime["ev_stop_alerts"]) == [loadpoint]
+    assert len([c for c in bus.call_args_list
+                if c.args[0] == "power_sync_ev_stop_failed"]) == 1
+
+    # B's selector now observes the same hardware. Unknown selection and an
+    # idle sample older than the retry must not settle its warning.
+    hass.states = _Hass(store, selector="unmapped", power="0").states
+    assert asyncio.run(module.reconcile_selected_shared_loadpoint_cycle(hass, entry)) is None
+    old = datetime.fromisoformat(current["at"]) - timedelta(seconds=1)
+    hass.states = _Hass(store, selector="tesla", power="0", observed_at=old).states
+
+    evac_power = [0.0]
+
+    class _IdleEvac:
+        charger_type = "evac"
+        is_connected = True
+        is_charging = False
+
+        @property
+        def power_kw(self):
+            return evac_power[0]
+
+    async def read_idle():
+        return _IdleEvac()
+
+    kwargs = {"read_evac_state": read_idle} if backend == "evac" else {}
+    asyncio.run(module.reconcile_selected_shared_loadpoint_cycle(hass, entry, now=old, **kwargs))
+    assert list(runtime["ev_stop_alerts"]) == [loadpoint]
+    assert "settled_at" not in current
+
+    fresh = datetime.now(UTC) - timedelta(milliseconds=100)
+    hass.states = _Hass(store, selector="tesla", power="0", observed_at=fresh).states
+    if backend == "evac":
+        evac_power[0] = 7.2
+        asyncio.run(module.reconcile_selected_shared_loadpoint_cycle(hass, entry, now=fresh, **kwargs))
+        assert list(runtime["ev_stop_alerts"]) == [loadpoint]
+        assert "settled_at" not in current
+        evac_power[0] = 0.0
+    asyncio.run(module.reconcile_selected_shared_loadpoint_cycle(hass, entry, now=fresh, **kwargs))
+    assert runtime["ev_stop_alerts"] == {}
+    assert current["success"] is True
+    assert current["settled_at"] == fresh.isoformat()
+    assert ev_ownership.get_ev_ownership(hass, entry, loadpoint)[1] is lease
+    assert lease["active_profile_id"] == "shared_ev_profile_a"
+    observations = [c.args[1] for c in bus.call_args_list
+                    if c.args[0] == "power_sync_ev_command"
+                    and c.args[1]["physical_confirmation"]]
+    assert len(observations) == 1
+    assert observations[0]["vehicle_id"] == loadpoint
+    assert observations[0]["observed_at"] == fresh.isoformat()
 
 
 def test_unselected_or_incomplete_binding_publishes_no_cycle_context():

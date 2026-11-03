@@ -477,6 +477,7 @@ async def reconcile_selected_shared_loadpoint_cycle(
         selected_params["charger_power_entity"] = options.get(
             "generic_charger_power_entity"
         )
+    evac_idle_power_confirmed = False
     if loadpoint_id == "generic_ev":
         state = reconcile_generic_session_from_hass(
             hass,
@@ -491,11 +492,25 @@ async def reconcile_selected_shared_loadpoint_cycle(
         if read_evac_state is None:
             state = ReconciliationState()
         else:
+            async def read_evac_for_stop_observation() -> Any | None:
+                nonlocal evac_idle_power_confirmed
+                raw = await read_evac_state()
+                if (
+                    str(getattr(raw, "charger_type", "")).lower() == "evac"
+                    and getattr(raw, "is_charging", None) is False
+                ):
+                    try:
+                        power_kw = float(getattr(raw, "power_kw"))
+                        evac_idle_power_confirmed = 0 <= power_kw <= GENERIC_ACTIVE_POWER_EPSILON_KW
+                    except (TypeError, ValueError):
+                        pass
+                return raw
+
             state = await reconcile_evac_session_from_reader(
                 hass,
                 config_entry,
                 loadpoint_id,
-                read_state=read_evac_state,
+                read_state=read_evac_for_stop_observation,
                 previous=load_reconciliation_state(hass, config_entry, loadpoint_id),
                 active_profile_id=active_profile_id,
                 now=now,
@@ -504,6 +519,28 @@ async def reconcile_selected_shared_loadpoint_cycle(
         return None
 
     await persist_reconciliation_state(hass, config_entry, loadpoint_id, state)
+    # A fresh physical idle read may settle the latest recorded PowerSync stop
+    # warning, even if selection has since moved from A to B. Keep this strictly
+    # observational: do not call confirm_powersync_ev_stop (it releases leases)
+    # or infer a stop from stale/unknown/charging telemetry.
+    observed_time = _as_utc(state.observed_at) if isinstance(state.observed_at, datetime) else None
+    if (
+        state.physical_active is False
+        and state.evidence in ("fresh_power", "fresh_evac_state")
+        and (loadpoint_id == "generic_ev" or evac_idle_power_confirmed)
+        and observed_time is not None
+        and 0 <= (datetime.now(timezone.utc) - observed_time).total_seconds() <= DEFAULT_FRESHNESS_SECONDS
+    ):
+        from .ev_ownership import get_ev_last_commands, _schedule_runtime_save
+        from ..action_events import observe_ev_stop
+
+        command = get_ev_last_commands(hass, config_entry).get(loadpoint_id)
+        if isinstance(command, dict):
+            was_settled = command.get("settled_at")
+            observe_ev_stop(hass, config_entry, loadpoint_id, command,
+                            _as_utc(state.observed_at), charging=False)
+            if not was_settled and command.get("settled_at"):
+                _schedule_runtime_save(hass, config_entry)
     context = {
         "binding_id": loadpoint_id,
         "active_profile_id": active_profile_id,
