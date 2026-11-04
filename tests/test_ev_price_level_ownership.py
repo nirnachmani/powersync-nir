@@ -642,6 +642,218 @@ def test_inactive_smart_schedule_solar_start_keeps_minimum_gate(owner_mode):
     )
 
 
+def test_amber_raw_one_second_starts_weight_current_and_future_hours(monkeypatch):
+    adelaide = ZoneInfo("Australia/Adelaide")
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: datetime(2026, 7, 3, 1, 20, tzinfo=adelaide))
+    monkeypatch.setattr(ev_planner.dt_util, "as_local", lambda value: value.astimezone(adelaide), raising=False)
+    rows = []
+    for channel, prices in (("general", (10, 30, 20, 40)), ("feedIn", (-2, 6, 2, 4))):
+        intervals = [("01:00:01", "01:30:00", 30, prices[0])]
+        intervals += [(f"01:{minute:02d}:01", f"01:{minute + 5:02d}:00" if minute < 55 else "02:00:00", 5, prices[1]) for minute in range(30, 60, 5)]
+        intervals += [("02:00:01", "02:30:00", 30, prices[2]), ("02:30:01", "03:00:00", 30, prices[3])]
+        rows.extend(dict(startTime=f"2026-07-03T{start}+09:30", endTime=f"2026-07-03T{end}+09:30",
+                         duration=duration, channelType=channel, perKwh=price)
+                    for start, end, duration, price in intervals)
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["amber_coordinator"] = SimpleNamespace(data={"forecast": list(reversed(rows))})
+    entry = _FakeConfigEntry()
+    entry.data = {"amber_api_token": "token"}
+    result = asyncio.run(ev_planner.PriceForecaster(hass, entry).get_price_forecast(2))
+    assert [(p.hour, p.import_cents, p.export_cents) for p in result] == [
+        ("2026-07-03T01:00:00", 25, 4), ("2026-07-03T02:00:00", 30, 3)]
+
+
+@pytest.mark.parametrize(
+    ("start", "duration", "expected"),
+    [("01:30:00", 30, 20), ("01:30:02", 30, 30),
+     ("01:29:59", 30, 30), ("01:30:01", None, 30),
+     ("01:30:01", 0, 30), ("01:30:01", True, 30)],
+)
+def test_amber_explicit_bounds_preserve_gaps_overlaps_and_invalid_durations(monkeypatch, start, duration, expected):
+    adelaide = ZoneInfo("Australia/Adelaide")
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: datetime(2026, 7, 3, 0, tzinfo=adelaide))
+    monkeypatch.setattr(ev_planner.dt_util, "as_local", lambda value: value.astimezone(adelaide), raising=False)
+    rows = [
+        dict(startTime="2026-07-03T01:00:01+09:30", endTime="2026-07-03T01:30:00+09:30", duration=30, perKwh=10),
+        dict(startTime=f"2026-07-03T{start}+09:30", endTime="2026-07-03T02:00:00+09:30", duration=duration, perKwh=30),
+        dict(startTime="2026-07-03T01:00:00+09:30", endTime="2026-07-03T02:00:00+09:30", duration=60, channelType="feedIn", perKwh=-2),
+    ]
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["amber_coordinator"] = SimpleNamespace(data={"forecast": rows})
+    entry = _FakeConfigEntry()
+    entry.data = {"amber_api_token": "token"}
+    result = asyncio.run(ev_planner.PriceForecaster(hass, entry).get_price_forecast(1))
+    assert (result[0].import_cents, result[0].export_cents) == (expected, -2)
+
+
+def test_amber_forecast_weighted_real_intervals(monkeypatch):
+    adelaide = ZoneInfo("Australia/Adelaide")
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: datetime(2026, 7, 3, 0, 0, tzinfo=adelaide))
+    monkeypatch.setattr(ev_planner.dt_util, "as_local", lambda value: value.astimezone(adelaide), raising=False)
+    rows = [
+        {"nemTime": "2026-07-03T01:30:00+09:30", "duration": 30, "channelType": "general", "perKwh": 30},
+        {"nemTime": "2026-07-03T02:00:00+09:30", "duration": 30, "channelType": "general", "perKwh": 40},
+        {"nemTime": "2026-07-03T02:00:00+09:30", "duration": 60, "channelType": "feedIn", "perKwh": -4},
+    ]
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["amber_coordinator"] = SimpleNamespace(data={"forecast": list(reversed(rows))})
+    entry = _FakeConfigEntry()
+    entry.data = {"amber_api_token": "token"}
+    forecast = asyncio.run(ev_planner.PriceForecaster(hass, entry).get_price_forecast(2))
+    assert [(p.hour, p.import_cents, p.export_cents) for p in forecast] == [("2026-07-03T01:00:00", 35, -4)]
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected"),
+    [
+        # The five-minute rate is weighted by time, not record count.
+        ([("01:05", 5, 120), ("02:00", 55, 0)], 10),
+        ([("01:30", 30, 10), ("02:00", 25, 20)], 30),
+        ([("01:40", 40, 10), ("02:00", 30, 20)], 30),
+        ([("02:00", 60, 10), ("02:00", 60, 20)], 30),
+        ([("01:30", 30, float("nan")), ("02:00", 30, 20)], 30),
+        ([("01:30", 30, 10), ("01:30", 30, 10), ("02:00", 30, 20)], 15),
+    ],
+)
+def test_amber_weighted_coverage_and_duplicates(monkeypatch, caplog, rows, expected):
+    adelaide = ZoneInfo("Australia/Adelaide")
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: datetime(2026, 7, 3, 0, 0, tzinfo=adelaide))
+    monkeypatch.setattr(ev_planner.dt_util, "as_local", lambda value: value.astimezone(adelaide), raising=False)
+    forecast_rows = [dict(nemTime=f"2026-07-03T{end}:00+09:30", duration=duration,
+                          channelType="general", perKwh=price) for end, duration, price in rows]
+    forecast_rows.append(dict(startTime="2026-07-03T01:00:00+09:30", endTime="2026-07-03T02:00:00+09:30",
+                              channelType="feedIn", perKwh=-2))
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["amber_coordinator"] = SimpleNamespace(data={"forecast": forecast_rows})
+    entry = _FakeConfigEntry()
+    entry.data = {"amber_api_token": "token"}
+    result = asyncio.run(ev_planner.PriceForecaster(hass, entry).get_price_forecast(1))
+    assert (result[0].import_cents, result[0].export_cents) == (expected, -2)
+    if expected == 30:
+        assert "using 30c default" in caplog.text
+
+
+def test_amber_weighted_missing_coverage_logs_once_per_channel(monkeypatch, caplog):
+    adelaide = ZoneInfo("Australia/Adelaide")
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: datetime(2026, 7, 3, 0, tzinfo=adelaide))
+    monkeypatch.setattr(ev_planner.dt_util, "as_local", lambda value: value.astimezone(adelaide), raising=False)
+    rows = [
+        dict(nemTime="2026-07-03T01:30:00+09:30", duration=30, channelType="general", perKwh=10),
+        dict(nemTime="2026-07-03T02:30:00+09:30", duration=30, channelType="feedIn", perKwh=-2),
+        dict(nemTime="2026-07-03T04:00:00+09:30", duration=60, channelType="general", perKwh=20),
+    ]
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["amber_coordinator"] = SimpleNamespace(data={"forecast": rows})
+    entry = _FakeConfigEntry()
+    entry.data = {"amber_api_token": "token"}
+    result = asyncio.run(ev_planner.PriceForecaster(hass, entry).get_price_forecast(3))
+    assert [(p.import_cents, p.export_cents) for p in result] == [(30, 8), (30, 8), (20, 8)]
+    warnings = [record.getMessage() for record in caplog.records if "coverage" in record.getMessage()]
+    assert len(warnings) == 2
+    assert any("general" in message and "2 hours" in message and "2026-07-03T01:00:00+09:30" in message and "using 30c default" in message for message in warnings)
+    assert any("feedIn" in message and "3 hours" in message and "2026-07-03T01:00:00+09:30" in message and "using 8c default" in message for message in warnings)
+
+
+def test_amber_weighted_current_hour_requires_remaining_coverage(monkeypatch):
+    adelaide = ZoneInfo("Australia/Adelaide")
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: datetime(2026, 7, 3, 1, 20, tzinfo=adelaide))
+    monkeypatch.setattr(ev_planner.dt_util, "as_local", lambda value: value.astimezone(adelaide), raising=False)
+    rows = [dict(nemTime="2026-07-03T01:30:00+09:30", duration=30, perKwh=10),
+            dict(nemTime="2026-07-03T02:00:00+09:30", duration=30, perKwh=30)]
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["amber_coordinator"] = SimpleNamespace(data={"forecast": rows})
+    entry = _FakeConfigEntry()
+    entry.data = {"amber_api_token": "token"}
+    result = asyncio.run(ev_planner.PriceForecaster(hass, entry).get_price_forecast(1))
+    assert result[0].import_cents == 25
+    assert result[0].export_cents == 8
+
+
+def test_amber_weighted_adelaide_dst_fold(monkeypatch):
+    adelaide = ZoneInfo("Australia/Adelaide")
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: datetime(2026, 4, 5, 0, 0, tzinfo=adelaide))
+    monkeypatch.setattr(ev_planner.dt_util, "as_local", lambda value: value.astimezone(adelaide), raising=False)
+    rows = [dict(startTime="2026-04-05T02:00:00+10:30", endTime="2026-04-05T02:00:00+09:30", perKwh=10),
+            dict(startTime="2026-04-05T02:00:00+09:30", endTime="2026-04-05T03:00:00+09:30", perKwh=20)]
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["amber_coordinator"] = SimpleNamespace(data={"forecast": rows})
+    entry = _FakeConfigEntry()
+    entry.data = {"amber_api_token": "token"}
+    result = asyncio.run(ev_planner.PriceForecaster(hass, entry).get_price_forecast(2))
+    assert [(p.hour, p.import_cents) for p in result] == [("2026-04-05T02:00:00+10:30", 10), ("2026-04-05T02:00:00+09:30", 20)]
+
+
+def test_amber_weighted_explicit_bounds_split_and_override_nem(monkeypatch):
+    adelaide = ZoneInfo("Australia/Adelaide")
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: datetime(2026, 10, 4, 0, tzinfo=adelaide))
+    monkeypatch.setattr(ev_planner.dt_util, "as_local", lambda value: value.astimezone(adelaide), raising=False)
+    rows = [dict(startTime="2026-10-04T01:00:00+09:30", endTime="2026-10-04T04:00:00+10:30",
+                 nemTime="2026-10-04T06:00:00+10:30", duration=5, perKwh=-5)]
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["amber_coordinator"] = SimpleNamespace(data={"forecast": rows})
+    entry = _FakeConfigEntry()
+    entry.data = {"amber_api_token": "token"}
+    result = asyncio.run(ev_planner.PriceForecaster(hass, entry).get_price_forecast(3))
+    assert [(p.hour, p.import_cents, p.period) for p in result] == [
+        ("2026-10-04T01:00:00", -5, "offpeak"), ("2026-10-04T03:00:00", -5, "offpeak")]
+
+
+def test_flow_power_retains_original_forecast_route(monkeypatch):
+    adelaide = ZoneInfo("Australia/Adelaide")
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: datetime(2026, 7, 3, 0, tzinfo=adelaide))
+    monkeypatch.setattr(ev_planner.dt_util, "as_local", lambda value: value.astimezone(adelaide), raising=False)
+    rows = [dict(nemTime="2026-07-03T01:30:00+09:30", duration=30, perKwh=11),
+            dict(nemTime="2026-07-03T02:00:00+09:30", duration=30, perKwh=44)]
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["amber_coordinator"] = SimpleNamespace(data={"forecast": rows})
+    entry = _FakeConfigEntry()
+    entry.data = {"amber_api_token": "token", "electricity_provider": "flow_power"}
+    result = asyncio.run(ev_planner.PriceForecaster(hass, entry).get_price_forecast(2))
+    # Preserve the legacy UTC-hour grouping, including its half-hour-offset collision.
+    assert [(p.hour, p.import_cents) for p in result] == [("2026-07-03T01:00:00", 11)]
+
+
+def test_amber_no_usable_intervals_uses_existing_fallback(monkeypatch):
+    adelaide = ZoneInfo("Australia/Adelaide")
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: datetime(2026, 7, 3, 0, tzinfo=adelaide))
+    monkeypatch.setattr(ev_planner.dt_util, "as_local", lambda value: value.astimezone(adelaide), raising=False)
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["amber_coordinator"] = SimpleNamespace(data={"forecast": [
+        dict(startTime="2026-07-03T01:00:00+09:30", perKwh=1)]})
+    entry = _FakeConfigEntry()
+    entry.data = {"amber_api_token": "token"}
+    forecaster = ev_planner.PriceForecaster(hass, entry)
+    sentinel = [ev_planner.PriceForecast(hour="fallback", import_cents=99, export_cents=8, period="peak")]
+    async def fallback(hours):
+        return sentinel
+    monkeypatch.setattr(forecaster, "_get_sigenergy_tariff_forecast", fallback)
+    assert asyncio.run(forecaster.get_price_forecast(1)) is sentinel
+
+
+def test_amber_weighted_forecast_drives_cost_optimized_plan(monkeypatch):
+    adelaide = ZoneInfo("Australia/Adelaide")
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: datetime(2026, 7, 3, 0, tzinfo=adelaide))
+    monkeypatch.setattr(ev_planner.dt_util, "as_local", lambda value: value.astimezone(adelaide), raising=False)
+    rows = [dict(nemTime="2026-07-03T01:30:00+09:30", duration=30, perKwh=0),
+            dict(nemTime="2026-07-03T02:00:00+09:30", duration=30, perKwh=60),
+            dict(nemTime="2026-07-03T03:00:00+09:30", duration=60, perKwh=10)]
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["amber_coordinator"] = SimpleNamespace(data={"forecast": rows})
+    entry = _FakeConfigEntry()
+    entry.data = {"amber_api_token": "token"}
+    planner = ev_planner.ChargingPlanner(hass, entry)
+    planner.surplus_forecaster.forecast_surplus = AsyncMock(return_value=[])
+    plan = asyncio.run(planner.plan_charging(
+        vehicle_id=VIN, current_soc=50, target_soc=55, target_time=None,
+        resolved_capacity=ev_capacity.resolve_ev_battery_capacity(manual_capacity_kwh=40),
+        charger_power_kw=2.3, priority=ev_planner.ChargingPriority.COST_OPTIMIZED,
+        max_grid_price_cents=25.0,
+    ))
+    assert plan.windows
+    assert all(window.start_time.startswith("2026-07-03T02:") for window in plan.windows)
+    assert all(window.price_cents_kwh == 10 for window in plan.windows)
+
+
 def test_amber_forecast_utc_start_times_normalize_to_ha_local(monkeypatch):
     brisbane_tz = timezone(timedelta(hours=10))
     monkeypatch.setattr(

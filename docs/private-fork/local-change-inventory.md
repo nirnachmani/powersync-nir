@@ -16,6 +16,20 @@ current repository only; it is not a deployment or upstream-update procedure.
   relevant no-interaction port preserves its upstream regression without adding
   a private test.
 
+## Amber hourly Smart Schedule forecast
+
+- For configured Amber, Smart Schedule converts actual forecast interval bounds
+  to duration-weighted HA-local hourly import and export prices, preserving
+  repeated daylight-saving hours. The current hour uses its remaining covered
+  portion; insufficient or conflicting channel coverage uses the existing
+  30c import / 8c export estimates. Preserve Amber's one-second start-boundary
+  convention and the distinction between actual interval data and estimates.
+- This is an EV Smart Schedule projection only: do not overwrite it with the
+  upstream first-price UTC-hour grouping. Preserve the shared Amber feed, Flow
+  Power behavior, hourly plan/API format, runtime price ceiling and physical
+  charger guards. Better EV plans may legitimately affect the optimizer's EV
+  input without changing the optimizer's own price forecast.
+
 ## HACS-only scheduled updates (fork identity)
 
 - The optional PowerSync auto-update scheduler in `auto_update.py` may install

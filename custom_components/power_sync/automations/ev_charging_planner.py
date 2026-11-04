@@ -2117,7 +2117,11 @@ class PriceForecaster:
 
         # Amber/Flow Power: Use Amber API for dynamic wholesale pricing (changes every 5 mins)
         if electricity_provider in ("amber", "flow_power"):
-            amber_forecast = await self._get_amber_forecast(hours)
+            amber_forecast = await (
+                self._get_weighted_amber_forecast(hours)
+                if electricity_provider == "amber"
+                else self._get_amber_forecast(hours)
+            )
             if amber_forecast:
                 return amber_forecast
 
@@ -2240,6 +2244,155 @@ class PriceForecaster:
                     period="epex",
                 )
             )
+        return forecasts or None
+
+    async def _get_weighted_amber_forecast(self, hours: int) -> Optional[List[PriceForecast]]:
+        """Aggregate Amber intervals over actual local hours, independently per channel."""
+        from ..const import CONF_AMBER_API_TOKEN
+
+        if not self.config_entry.data.get(CONF_AMBER_API_TOKEN):
+            return None
+        entry = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
+        coordinator = entry.get("amber_coordinator")
+        data = getattr(coordinator, "data", None)
+        if not isinstance(data, dict) or not data.get("forecast"):
+            return None
+
+        now_local = dt_util.now()
+        if now_local.tzinfo is None:
+            now_local = dt_util.as_local(now_local)
+        now = now_local.astimezone(timezone.utc)
+
+        def timestamp(value):
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=now_local.tzinfo)
+            return parsed.astimezone(timezone.utc)
+
+        # Records with no known duration are not evidence of an hourly price.
+        # In particular startTime-only synthetic fixtures cannot be expanded.
+        intervals = {"general": set(), "feedIn": set()}
+        invalid_intervals = 0
+        for row in data["forecast"]:
+            if not isinstance(row, dict):
+                continue
+            channel = row.get("channelType", "general")
+            if channel not in intervals:
+                continue
+            start = end = None
+            try:
+                start = timestamp(row["startTime"])
+                end = timestamp(row["endTime"])
+                if end <= start:
+                    start = end = None
+                else:
+                    # Amber's explicit starts can be one second after the
+                    # nominal interval boundary; only adjust that convention.
+                    try:
+                        duration = row["duration"]
+                        if isinstance(duration, bool):
+                            raise ValueError("invalid interval duration")
+                        duration = float(duration)
+                        if not math.isfinite(duration) or duration <= 0:
+                            raise ValueError("invalid interval duration")
+                        nominal_start = end - timedelta(minutes=duration)
+                        if start == nominal_start + timedelta(seconds=1):
+                            start = nominal_start
+                    except (KeyError, TypeError, ValueError, OverflowError):
+                        pass
+            except (KeyError, TypeError, ValueError, OverflowError):
+                start = end = None
+            if start is None:
+                try:
+                    end = timestamp(row["nemTime"])
+                    duration = float(row["duration"])
+                    if not math.isfinite(duration) or duration <= 0:
+                        raise ValueError("invalid interval duration")
+                    start = end - timedelta(minutes=duration)
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    invalid_intervals += 1
+                    continue
+            try:
+                raw_price = row["perKwh"]
+                if isinstance(raw_price, bool):
+                    raise ValueError("boolean is not a price")
+                price = float(raw_price)
+                if not math.isfinite(price):
+                    price = None
+            except (KeyError, TypeError, ValueError, OverflowError):
+                price = None
+            intervals[channel].add((start, end, price))
+
+        if invalid_intervals:
+            _LOGGER.warning(
+                "Amber EV forecast ignored %d records without valid interval bounds",
+                invalid_intervals,
+            )
+        usable = [record for records in intervals.values() for record in records
+                  if record[2] is not None and record[1] > now]
+        if not usable or hours <= 0:
+            return None
+
+        def hour_start(instant):
+            local = dt_util.as_local(instant)
+            return local.replace(minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+
+        first = hour_start(max(now, min(record[0] for record in usable)))
+        last = max(record[1] for record in usable)
+        buckets = []
+        missing_coverage = {}
+        cursor = first
+        while cursor < last and len(buckets) < hours:
+            local = dt_util.as_local(cursor)
+            # Advancing in absolute time preserves both occurrences of a DST fold.
+            end = cursor + timedelta(hours=1)
+            required_start = max(cursor, now)
+            values = []
+            for channel, default in (("general", 30.0), ("feedIn", 8.0)):
+                pieces = sorted(
+                    ((max(start, required_start), min(stop, end), price)
+                     for start, stop, price in intervals[channel]
+                     if start < end and stop > required_start),
+                    key=lambda piece: (piece[0], piece[1]),
+                )
+                covered = required_start
+                weighted = 0.0
+                valid = True
+                for start, stop, price in pieces:
+                    if start != covered or price is None:
+                        valid = False
+                        break
+                    weighted += (stop - start).total_seconds() * price
+                    covered = stop
+                if not valid or covered != end:
+                    if channel not in missing_coverage:
+                        missing_coverage[channel] = [0, local, default]
+                    missing_coverage[channel][0] += 1
+                    values.append(default)
+                else:
+                    values.append(weighted / (end - required_start).total_seconds())
+            buckets.append((local, values))
+            cursor = end
+
+        for channel, (count, first_local, default) in missing_coverage.items():
+            _LOGGER.warning(
+                "Amber EV forecast %s has missing, invalid or overlapping coverage in %d hours; first %s; using %.0fc default",
+                channel, count, first_local.isoformat(), default,
+            )
+
+        counts = {}
+        for local, _ in buckets:
+            key = local.replace(tzinfo=None).isoformat()
+            counts[key] = counts.get(key, 0) + 1
+        forecasts = []
+        for local, (import_cents, export_cents) in buckets:
+            key = local.replace(tzinfo=None).isoformat()
+            forecasts.append(PriceForecast(
+                hour=local.isoformat() if counts[key] > 1 else key,
+                import_cents=import_cents,
+                export_cents=export_cents,
+                period="offpeak" if import_cents < 15 else "peak" if import_cents > 35 else "shoulder",
+            ))
         return forecasts or None
 
     async def _get_amber_forecast(self, hours: int) -> Optional[List[PriceForecast]]:

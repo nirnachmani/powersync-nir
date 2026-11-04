@@ -1,3 +1,10 @@
+<!-- release: v2.12.1616-nir.2 -->
+
+## v2.12.1616-nir.2 — correct hourly Amber Smart Schedule forecasts
+- Smart Schedule now converts Amber's short import and feed-in forecast intervals into duration-weighted local-hour prices rather than taking the first interval in a misaligned hour. Current-hour forecasts use the remaining covered portion; incomplete or conflicting channel coverage uses the existing 30c/8c estimates.
+- The Smart Schedule remains hourly and retains its existing live-price checks. More accurate EV plans can change the EV demand passed to the battery optimizer; the shared Amber feed, optimizer price model, Flow Power and Android/API contracts are unchanged. Existing planner limitations around the repeated daylight-saving hour and the final partial departure hour are not addressed by this correction.
+- Source publication only: no Home Assistant installation, restart or charger command was performed.
+
 <!-- release: v2.12.1616-nir.1 -->
 
 ## v2.12.1616-nir.1 — reviewed upstream through v2.12.1616
