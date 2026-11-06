@@ -37,6 +37,14 @@ class _BoostHarness:
         })
         monkeypatch.setattr(self.power_sync, "async_track_point_in_utc_time", self.track)
         monkeypatch.setattr(self.actions, "execute_actions", self.execute)
+        self.real_stop = self.actions._action_stop_ev_charging_dynamic
+
+        async def fake_stop(hass, entry, params):
+            return await self.execute(hass, entry, [{
+                "action_type": "stop_ev_charging_dynamic", "parameters": params,
+            }])
+
+        monkeypatch.setattr(self.actions, "_action_stop_ev_charging_dynamic", fake_stop)
         monkeypatch.setattr(
             self.power_sync.EVVehicleCommandView,
             "_get_vehicle_charging_config",
@@ -188,6 +196,24 @@ def test_shared_boost_fails_closed_on_selector_or_lease_change(monkeypatch, back
         await h.timers[1].callback(h.timers[1].deadline)
         assert h.stops == []
         assert h.states[h.entry.entry_id][h.physical]["active_profile_id"] == "shared_ev_profile_a"
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("backend", ["generic", "evac"])
+def test_shared_boost_expiry_does_not_reacquire_transition_lock(monkeypatch, backend):
+    async def scenario():
+        h = _BoostHarness(monkeypatch, backend)
+        monkeypatch.setattr(h.actions, "_action_stop_ev_charging_dynamic", h.real_stop)
+        assert (await h.start("shared_ev_profile_a"))["success"]
+        state = h.states[h.entry.entry_id][h.physical]
+        lease = h.ownership.get_ev_ownership(h.hass, h.entry, h.physical)[1]
+        await asyncio.wait_for(h.timers[0].callback(h.timers[0].deadline), 0.5)
+        assert h.runtime["ev_boost_timers"] == {}
+        assert state["pending_stop"]
+        assert h.states[h.entry.entry_id][h.physical] is state
+        assert h.ownership.get_ev_ownership(h.hass, h.entry, h.physical)[1] is lease
+        assert not h.actions._start_dynamic_lock.locked()
+
     asyncio.run(scenario())
 
 

@@ -6186,6 +6186,27 @@ class AutoScheduleExecutor:
                 continue
             if not settings.enabled:
                 self._clear_start_failure(vehicle_id)
+                # A lost executor flag does not end a previously owned shared
+                # session. Disable already authorizes stopping; retain all
+                # ancillary state until that stop is actually settled.
+                if not self.get_state(vehicle_id).is_charging and _matching_shared_mode_owner(
+                    self.hass, self.config_entry, vehicle_id, "smart_schedule"
+                ):
+                    location = await get_ev_location(self.hass, self.config_entry, vehicle_id)
+                    plugged = await is_ev_plugged_in(self.hass, self.config_entry, vehicle_id)
+                    if location not in ("home", "unknown") or not plugged:
+                        continue
+                    if not _matching_shared_mode_owner(
+                        self.hass, self.config_entry, vehicle_id, "smart_schedule"
+                    ):
+                        continue
+                    state = self.get_state(vehicle_id)
+                    if not await self._stop_charging(
+                        vehicle_id, settings, state, reason="Smart Schedule disabled"
+                    ):
+                        state.last_decision = "disabled"
+                        state.last_decision_reason = "Smart Schedule disabled; stop unconfirmed"
+                        continue
                 self._clear_active_charging_preserve_intent(
                     vehicle_id,
                     "Smart Schedule disabled",
@@ -6597,8 +6618,10 @@ class AutoScheduleExecutor:
         # Check if EV has reached target SoC
         if ev_soc >= settings.target_soc:
             # Stop charging if still charging
-            if state.is_charging:
-                await self._stop_charging(
+            if state.is_charging or _matching_shared_mode_owner(
+                self.hass, self.config_entry, vehicle_id, "smart_schedule"
+            ):
+                stopped = await self._stop_charging(
                     vehicle_id,
                     settings,
                     state,
@@ -6606,6 +6629,12 @@ class AutoScheduleExecutor:
                 )
                 state.last_decision = "complete"
                 state.last_decision_reason = f"EV reached target {settings.target_soc}%"
+                if not stopped:
+                    state.last_decision_reason += "; stop unconfirmed, retry scheduled"
+                    if not state.is_charging:
+                        if effective_preserve_home_battery:
+                            self._set_active_charging_preserve_intent(vehicle_id, state.last_decision_reason)
+                        return
                 self._sync_active_charging_preserve_intent(
                     vehicle_id,
                     effective_preserve_home_battery,
@@ -6715,14 +6744,23 @@ class AutoScheduleExecutor:
                     f"Battery {battery_soc:.0f}% at consume floor {effective_consume_level}% — "
                     f"EV charging stopped (stop at floor enabled)"
                 )
-                if state.is_charging:
-                    await self._stop_charging(
+                if state.is_charging or _matching_shared_mode_owner(
+                    self.hass, self.config_entry, vehicle_id, "smart_schedule"
+                ):
+                    stopped = await self._stop_charging(
                         vehicle_id,
                         settings,
                         state,
                         reason=reason,
                     )
-                    state.last_decision = "stopped"
+                    state.last_decision = "stopped" if stopped else "charging"
+                    if not stopped:
+                        reason += "; stop unconfirmed, retry scheduled"
+                        if not state.is_charging:
+                            state.last_decision_reason = reason
+                            if effective_preserve_home_battery:
+                                self._set_active_charging_preserve_intent(vehicle_id, reason)
+                            return
                 elif await self._stop_external_charging_if_needed(
                     vehicle_id,
                     settings,
@@ -7079,7 +7117,9 @@ class AutoScheduleExecutor:
                 state.last_decision_reason = reason
         elif not should_charge:
             self._clear_start_failure(vehicle_id)
-            if state.is_charging:
+            if state.is_charging or _matching_shared_mode_owner(
+                self.hass, self.config_entry, vehicle_id, "smart_schedule"
+            ):
                 # Restore backup reserve when stopping - we'll set it again when next window starts
                 stopped = await self._stop_charging(
                     vehicle_id,
@@ -7092,6 +7132,11 @@ class AutoScheduleExecutor:
                 else:
                     state.last_decision = "charging"
                     reason = f"{reason}; stop unconfirmed, retry scheduled"
+                    if not state.is_charging:
+                        state.last_decision_reason = reason
+                        if effective_preserve_home_battery:
+                            self._set_active_charging_preserve_intent(vehicle_id, reason)
+                        return
             elif await self._stop_external_charging_if_needed(
                 vehicle_id,
                 settings,
@@ -8814,6 +8859,39 @@ def _selected_shared_coordinated_vehicle(
     return True, resolve_active_shared_profile(hass, config_entry)
 
 
+def _matching_shared_mode_owner(hass: Any, config_entry: Any, profile: str, family: str) -> bool:
+    """Find only the selected profile's existing PowerSync mode ownership.
+
+    Conflicting runtime and lease records fail closed. This is evidence of
+    ownership, not a policy decision or evidence of physical charging.
+    """
+    from .shared_loadpoint import canonical_shared_loadpoint_id
+    from .ev_ownership import get_ev_ownerships, owner_family
+    from .actions import _dynamic_ev_state
+
+    shared, selected = _selected_shared_coordinated_vehicle(hass, config_entry)
+    if not shared or not selected or selected != profile:
+        return False
+    physical = canonical_shared_loadpoint_id(config_entry, selected)
+    if physical not in {"generic_ev", "sigenergy_charger"}:
+        return False
+    lease = get_ev_ownerships(hass, config_entry).get(physical)
+    runtime = _dynamic_ev_state.get(config_entry.entry_id, {}).get(physical)
+    found = False
+    if lease:
+        if (lease.get("owner") != "powersync" or lease.get("active_profile_id") != selected
+                or owner_family(lease.get("owner_mode")) != family):
+            return False
+        found = True
+    if runtime and runtime.get("active"):
+        params = runtime.get("params") or {}
+        if (runtime.get("active_profile_id", params.get("active_logical_vehicle_id")) != selected
+                or owner_family(params.get("owner_mode") or params.get("dynamic_mode")) != family):
+            return False
+        found = True
+    return found
+
+
 def _effective_auto_schedule_charger_type(
     settings: AutoScheduleSettings,
     opts: Mapping[str, Any],
@@ -10003,9 +10081,36 @@ async def _stop_coordinated_charging(
         return False
 
     from .actions import _action_stop_ev_charging_dynamic
+    from .ev_ownership import owner_family
+
+    # A lease without a runtime still needs the direct shared stop transaction:
+    # dynamic stop otherwise either skips it or dispatches an untracked write
+    # without creating the pending fence. Ownership alone is not a stop trigger;
+    # this helper is reached only after the mode's ordinary stop decision.
+    profile = params.get("active_logical_vehicle_id")
+    lease_only_shared = False
+    if params.get("shared_loadpoint_binding") and profile:
+        from .actions import _dynamic_ev_state
+        lease_only_shared = (
+            loadpoint_id not in _dynamic_ev_state.get(config_entry.entry_id, {})
+            and _matching_shared_mode_owner(hass, config_entry, profile, owner_family(expected_owner_mode))
+        )
+    if lease_only_shared:
+        from .ev_ownership import get_ev_ownership
+        lease = get_ev_ownership(hass, config_entry, loadpoint_id)[1]
+        if lease is None:
+            return False
+        params["_expected_shared_stop_lease"] = lease
+        params["_expected_shared_stop_identity"] = {key: lease.get(key) for key in (
+            "owner", "owner_mode", "session_id", "active_profile_id", "started_at", "resolver_stop_lease_token"
+        )}
 
     try:
-        success = await _action_stop_ev_charging_dynamic(hass, config_entry, params)
+        if lease_only_shared:
+            from .actions import _action_stop_ev_charging
+            success = await _action_stop_ev_charging(hass, config_entry, params)
+        else:
+            success = await _action_stop_ev_charging_dynamic(hass, config_entry, params)
         if success and charger_type == "zaptec" and cooldown_state is not None:
             cooldown_state.consecutive_stop_failures = 0
             cooldown_state.stop_cooldown_until = 0.0
@@ -11595,15 +11700,23 @@ class PriceLevelChargingExecutor:
                     f"Sigenergy charger decision: should_charge={should_charge}, reason={reason}"
                 )
 
+                stop_unconfirmed = False
                 if should_charge and not vehicle_state.is_charging:
                     await self._start_charging(mode, reason, vehicle_vin=pseudo_vin)
-                elif not should_charge and vehicle_state.is_charging:
-                    await self._stop_charging(reason, vehicle_vin=pseudo_vin)
+                elif not should_charge and (vehicle_state.is_charging or (
+                    shared and self._state.last_decision not in ("away", "unplugged")
+                    and _matching_shared_mode_owner(self.hass, self.config_entry, pseudo_vin, "price_level")
+                )):
+                    stopped = await self._stop_charging(reason, vehicle_vin=pseudo_vin)
+                    if not stopped and shared:
+                        stop_unconfirmed = True
+                        vehicle_state.last_decision = "charging"
+                        vehicle_state.last_decision_reason = f"{reason}; stop unconfirmed"
                 else:
                     vehicle_state.last_decision = "charging" if vehicle_state.is_charging else "waiting"
                     vehicle_state.last_decision_reason = reason
 
-                preserve_charging = vehicle_state.is_charging
+                preserve_charging = vehicle_state.is_charging or stop_unconfirmed
                 if (
                     preserve_charging
                     and reason == "Vehicle not plugged in"
@@ -11654,16 +11767,24 @@ class PriceLevelChargingExecutor:
                     f"Generic Charger decision: should_charge={should_charge}, reason={reason}"
                 )
 
+                stop_unconfirmed = False
                 if should_charge and not vehicle_state.is_charging:
                     await self._start_charging(mode, reason, vehicle_vin=pseudo_vin)
-                elif not should_charge and vehicle_state.is_charging:
-                    await self._stop_charging(reason, vehicle_vin=pseudo_vin)
+                elif not should_charge and (vehicle_state.is_charging or (
+                    shared and self._state.last_decision not in ("away", "unplugged")
+                    and _matching_shared_mode_owner(self.hass, self.config_entry, pseudo_vin, "price_level")
+                )):
+                    stopped = await self._stop_charging(reason, vehicle_vin=pseudo_vin)
+                    if not stopped and shared:
+                        stop_unconfirmed = True
+                        vehicle_state.last_decision = "charging"
+                        vehicle_state.last_decision_reason = f"{reason}; stop unconfirmed"
                 else:
                     vehicle_state.last_decision = "charging" if vehicle_state.is_charging else "waiting"
                     vehicle_state.last_decision_reason = reason
 
-                preserve_charging = vehicle_state.is_charging
-                if (preserve_charging and not getattr(vehicle_state, "start_pending", False)
+                preserve_charging = vehicle_state.is_charging or stop_unconfirmed
+                if (preserve_charging and not stop_unconfirmed and not getattr(vehicle_state, "start_pending", False)
                         and not getattr(vehicle_state, "stop_pending", False)):
                     from .shared_loadpoint import binding_for_entry, resolve_active_shared_profile
 
@@ -12112,6 +12233,9 @@ class ScheduledChargingExecutor:
 
     def _has_scheduled_tesla_sessions(self) -> bool:
         from .ev_ownership import owner_family
+        shared, _ = _selected_shared_coordinated_vehicle(self.hass, self.config_entry)
+        if shared:
+            return False
         return any(owner_family(mode) == "scheduled" for mode in self._tesla_session_modes().values())
 
     async def _pending_stop_observed(self, vin: str, pending: dict) -> bool:
@@ -12446,6 +12570,7 @@ class ScheduledChargingExecutor:
         Evaluate charging decision (legacy method for standalone use).
         For coordinated mode, use get_charging_decision() instead.
         """
+        shared, selected = _selected_shared_coordinated_vehicle(self.hass, self.config_entry)
         should_charge, reason, mode = await self.get_charging_decision(current_price_cents)
 
         # Take action
@@ -12453,7 +12578,10 @@ class ScheduledChargingExecutor:
             {**self.config_entry.data, **self.config_entry.options}
         ) == "tesla"):
             await self._start_charging(reason)
-        elif not should_charge and (self._state.is_charging or self._pending_stops or self._has_scheduled_tesla_sessions()):
+        elif not should_charge and (self._state.is_charging or self._pending_stops or self._has_scheduled_tesla_sessions() or (
+            shared and selected and self._state.last_decision not in ("away", "unplugged")
+            and _matching_shared_mode_owner(self.hass, self.config_entry, selected, "scheduled")
+        )):
             await self._stop_charging(reason)
         else:
             await self.apply_preserve_home_battery(should_charge, reason)
@@ -12820,8 +12948,12 @@ class EVChargingModeCoordinator:
             vehicle_results = {}
 
         scheduled_active = False
+        scheduled_stop_unconfirmed = False
         scheduled_reason = ""
         if scheduled_exec:
+            shared_before, selected_before = _selected_shared_coordinated_vehicle(
+                self.hass, self.config_entry,
+            )
             wants_charge, reason, _source = await scheduled_exec.get_charging_decision(current_price_cents)
             try:
                 from .actions import _record_automated_shared_loadpoint_decision
@@ -12839,6 +12971,9 @@ class EVChargingModeCoordinator:
             had_scheduled_control = (
                 scheduled_exec._state.is_charging or "Scheduled" in self._active_modes
                 or scheduled_exec._pending_stops or scheduled_exec._has_scheduled_tesla_sessions()
+                or (shared_before and selected_before
+                    and scheduled_exec._state.last_decision not in ("away", "unplugged")
+                    and _matching_shared_mode_owner(self.hass, self.config_entry, selected_before, "scheduled"))
             )
             if wants_charge:
                 is_tesla = _configured_charger_type(
@@ -12864,6 +12999,7 @@ class EVChargingModeCoordinator:
             elif had_scheduled_control:
                 # End Scheduled independently of Price-Level on another car.
                 stopped = await scheduled_exec._stop_charging(reason)
+                scheduled_stop_unconfirmed = not stopped
                 scheduled_active = scheduled_exec._state.is_charging
             elif not any_price_level_charging and reason != "Scheduled charging is disabled":
                 external_vehicle_vin, external_charge, external_guard_reason = (
@@ -12906,7 +13042,7 @@ class EVChargingModeCoordinator:
                             scheduled_exec._state.last_decision_reason = scheduled_reason
                 else:
                     self._last_external_scheduled_stop = None
-            if not wants_charge and not scheduled_active and not scheduled_exec._pending_stops:
+            if not wants_charge and not scheduled_active and not scheduled_stop_unconfirmed and not scheduled_exec._pending_stops:
                 await scheduled_exec.apply_preserve_home_battery(False, reason)
             scheduled_reason = scheduled_exec._state.last_decision_reason or reason
 

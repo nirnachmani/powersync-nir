@@ -497,6 +497,11 @@ class SigenergyEVChargerController:
             if not await self.connect():
                 return False
 
+        # Shared-loadpoint authority can change while connecting or reading
+        # the current limit. Recheck immediately before each physical write.
+        guard = getattr(self, "_shared_write_authorized", None)
+        if guard is not None and not guard():
+            return False
         try:
             result = await self._client.write_registers(
                 address=address,

@@ -19061,16 +19061,19 @@ class ChargingBoostView(HomeAssistantView):
 
                         # The dynamic stop checks the selected logical profile
                         # again and fences a replaced controller by identity.
-                        stop_success = await execute_actions(self._hass, self._config_entry, [{
-                            "action_type": "stop_ev_charging_dynamic",
-                            "parameters": {
-                                **action_params,
-                                "vehicle_id": boost_vehicle_id,
-                                "_expected_state": boost_state,
-                                "stop_charging": True,
-                                "stop_reason": "Boost duration elapsed",
-                            },
-                        }])
+                        try:
+                            stop_success = await ev_actions._stop_dynamic_under_transition_lock(
+                                self._hass, self._config_entry, {
+                                    **action_params,
+                                    "vehicle_id": boost_vehicle_id,
+                                    "_expected_state": boost_state,
+                                    "stop_charging": True,
+                                    "stop_reason": "Boost duration elapsed",
+                                },
+                            )
+                        except Exception:
+                            _LOGGER.exception("Boost stop failed for %s", boost_vehicle_id)
+                            stop_success = False
                         if not stop_success:
                             record_ev_command(
                                 self._hass, self._config_entry, boost_vehicle_id,
@@ -21610,6 +21613,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     automation_store = AutomationStore(hass)
     await automation_store.async_load()
+    # Recover fences before registering or starting anything that can control
+    # a charger. An unexpected recovery failure must abort setup, not bypass it.
+    hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})[
+        "automation_store"
+    ] = automation_store
+    from .automations.actions import async_load_pending_shared_stops
+
+    await async_load_pending_shared_stops(hass, entry)
     _bootstrap_static_tariff_schedule(
         hass,
         entry,
@@ -24214,6 +24225,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if tesla_site_country is None and tesla_coordinator:
         tesla_site_country = getattr(tesla_coordinator, "_site_country", None)
     hass.data[DOMAIN][entry.entry_id] = {
+        "_shared_stop_fences": existing_entry_data.get("_shared_stop_fences", {}),
+        "dynamic_ev_state": existing_entry_data.get("dynamic_ev_state", {}),
         "amber_coordinator": amber_coordinator,
         "tesla_coordinator": tesla_coordinator,
         "tesla_capabilities": tesla_capabilities or {},
@@ -44084,6 +44097,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def auto_evaluate_automations(now):
         """Serialize one entry's evaluation and clean its transient sequence budget."""
         async with auto_evaluation_lock:
+            # This must precede even the final handoff in the try/finally below:
+            # on failure no policy or actuator path may run in this cycle.
+            from .automations.actions import async_reconcile_pending_shared_stops
+
+            await async_reconcile_pending_shared_stops(hass, entry)
             try:
                 await _auto_evaluate_automations_unlocked(now)
             finally:
@@ -44091,6 +44109,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _clear_automated_shared_loadpoint_cycle,
                     _observe_shared_loadpoint_for_direct_lease,
                     _stop_external_shared_session_guarded,
+                    is_shared_stop_fenced,
                     _adopt_observed_solar_surplus_shared_session,
                     _adopt_observed_scheduled_shared_session,
                     _adopt_observed_smart_schedule_shared_session,
@@ -44106,7 +44125,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     load_reconciliation_state,
                     persist_reconciliation_state,
                     resolve_end_of_cycle_external_shared_session,
-                    stop_and_confirm_shared_handoff,
+                    mark_stop_pending,
+                    mark_stop_failed,
                 )
                 from .automations.shared_loadpoint import (
                     canonical_shared_loadpoint_id,
@@ -44154,43 +44174,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return True
 
                 async def stop_and_confirm(**kwargs):
-                    async def stop():
-                        return await _stop_external_shared_session_guarded(
-                            hass, entry, kwargs["selected_params"]
-                        )
-
-                    async def observe():
-                        return await _observe_shared_loadpoint_for_direct_lease(
-                            hass, entry, kwargs["binding_id"], kwargs["selected_params"]
-                        )
-
-                    async def persist(updated_state):
-                        await persist_reconciliation_state(
-                            hass, entry, kwargs["binding_id"], updated_state
-                        )
-
-                    async def finalize():
-                        _lease_id, lease = get_ev_ownership(
-                            hass, entry, kwargs["binding_id"]
-                        )
-                        if isinstance(lease, dict) and lease.get("owner") == "external":
-                            release_ev_ownership(
-                                hass,
-                                entry,
-                                kwargs["binding_id"],
-                                reason="Confirmed external shared-session stop",
-                                command="external_stop_confirmed",
-                            )
-
-                    return await stop_and_confirm_shared_handoff(
-                        kwargs["state"],
-                        active_profile_id=kwargs["active_profile_id"],
-                        stop=stop,
-                        observe=observe,
-                        persist=persist,
-                        finalize=finalize,
-                        sleep=asyncio.sleep,
+                    state = kwargs["state"]
+                    mark_stop_pending(state)
+                    state.active_profile_id = kwargs["active_profile_id"]
+                    try:
+                        await persist_reconciliation_state(hass, entry, kwargs["binding_id"], state)
+                    except Exception:
+                        _LOGGER.exception("Cannot persist external stop state; attempting guarded stop")
+                    await _stop_external_shared_session_guarded(
+                        hass, entry, {**kwargs["selected_params"],
+                                      "_observed_session_token": state.observed_session_token}
                     )
+                    if not is_shared_stop_fenced(hass, entry, kwargs["binding_id"]):
+                        mark_stop_failed(state)
+                    try:
+                        await persist_reconciliation_state(hass, entry, kwargs["binding_id"], state)
+                    except Exception:
+                        _LOGGER.exception("Cannot persist external stop state")
+                    return False
 
                 async def release_temporary_external_ownership(lease_token):
                     lease_id, lease = get_ev_ownership(hass, entry, binding_id)
@@ -44294,7 +44295,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 try:
                     reconciliation_state = load_reconciliation_state(hass, entry, binding_id or "")
                     await resolve_end_of_cycle_external_shared_session(
-                        binding_id=binding_id,
+                        binding_id=(None if binding_id and is_shared_stop_fenced(hass, entry, binding_id) else binding_id),
                         active_profile_id=active_profile_id,
                         selected_params=selected_params,
                         state=reconciliation_state,
@@ -47520,14 +47521,17 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         observed_tesla_cancel()
         _LOGGER.debug("Cancelled observed Tesla session polling")
 
-    # Flush active EV charging sessions so they're not lost
+    # Fence new sessions before finalizing and flushing history on unload.
     if session_manager := entry_data.get("session_manager"):
-        for vehicle_id in list(session_manager.active_sessions.keys()):
-            try:
-                await session_manager.end_session(vehicle_id, "ha_restart")
-                _LOGGER.info(f"Flushed EV charging session for {vehicle_id} on unload")
-            except Exception as e:
-                _LOGGER.debug(f"Could not flush session for {vehicle_id}: {e}")
+        try:
+            if not await session_manager.async_close():
+                _LOGGER.error(
+                    "EV session history is not saved on unload; retry remains in memory "
+                    "and history may be lost if Home Assistant stops: %s",
+                    session_manager.history_last_error,
+                )
+        except Exception:
+            _LOGGER.exception("Could not flush EV session history on unload; history may be lost on process exit")
 
     # Persist EV ownership diagnostics before unload. Active leases are only a
     # snapshot; setup restores the last-command context and clears stale owners.

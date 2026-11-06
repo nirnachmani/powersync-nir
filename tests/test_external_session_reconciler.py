@@ -28,6 +28,190 @@ UTC = timezone.utc
 NOW = datetime(2026, 10, 10, 4, 0, tzinfo=UTC)
 
 
+def test_pending_generic_warning_requires_strict_post_dispatch_power(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    now = datetime.now(UTC)
+    dispatch = now - timedelta(seconds=10)
+    state = SimpleNamespace(state="0", attributes={"unit_of_measurement": "W"},
+                            last_reported=None, last_updated=now - timedelta(seconds=1))
+    record = {"dispatch_at": dispatch.isoformat(), "parameters": {"charger_power_entity": "sensor.ev"}}
+    store = SimpleNamespace(_data={"vehicle_charging_configs": [], "_shared_pending_stops": {"generic_ev": record}})
+    async def save(): pass
+    store.async_save = save
+    entry = SimpleNamespace(entry_id="entry", data={"generic_charger_power_entity": "sensor.ev"}, options={})
+    hass = SimpleNamespace(data={"power_sync": {"entry": {"automation_store": store, "_shared_stop_fences": {"generic_ev": {"record": record}}}}},
+                           states=SimpleNamespace(get=lambda entity: state))
+    shared = SimpleNamespace(binding_for_entry=lambda e: True, resolve_active_shared_profile=lambda h, e: "car",
+                             canonical_shared_loadpoint_id=lambda e, p: "generic_ev")
+    command = {"settled_at": None}
+    observed = Mock(side_effect=lambda *args, **kwargs: command.update(settled_at="yes"))
+    ownership = SimpleNamespace(get_ev_last_commands=lambda h, e: {"generic_ev": command}, _schedule_runtime_save=Mock())
+    monkeypatch.setattr(module, "__package__", "custom_components.power_sync.automations")
+    monkeypatch.setitem(sys.modules, "custom_components.power_sync.automations.shared_loadpoint", shared)
+    monkeypatch.setitem(sys.modules, "custom_components.power_sync.automations.ev_ownership", ownership)
+    monkeypatch.setitem(sys.modules, "custom_components.power_sync.action_events", SimpleNamespace(observe_ev_stop=observed))
+    async def scenario():
+        await module.reconcile_selected_shared_loadpoint_cycle(hass, entry, now=now)
+        assert not observed.called
+        state.last_reported = now - timedelta(seconds=1)
+        state.attributes["unit_of_measurement"] = "MW"
+        await module.reconcile_selected_shared_loadpoint_cycle(hass, entry, now=now)
+        assert not observed.called
+        state.attributes["unit_of_measurement"] = "W"
+        record["dispatch_at"] = None
+        await module.reconcile_selected_shared_loadpoint_cycle(hass, entry, now=now)
+        assert not observed.called
+        record["dispatch_at"] = dispatch.isoformat()
+        await module.reconcile_selected_shared_loadpoint_cycle(hass, entry, now=now)
+        # Only the identity-bound stop lifecycle may clear a pending warning.
+        assert not observed.called
+        observed.reset_mock()
+        hass.data["power_sync"]["entry"]["_shared_stop_fences"].clear()
+        store._data["_shared_pending_stops"].clear()
+        state.last_reported = None
+        await module.reconcile_selected_shared_loadpoint_cycle(hass, entry, now=now)
+        assert observed.call_count == 1
+    asyncio.run(scenario())
+
+
+def test_strict_generic_stop_observation_rejects_cached_low_power() -> None:
+    from types import SimpleNamespace
+
+    state = SimpleNamespace(state="0", attributes={"unit_of_measurement": "W"}, last_reported=NOW)
+    hass = SimpleNamespace(states=SimpleNamespace(get=lambda _entity: state))
+    observe = getattr(module, "generic_stop_observation_from_hass", None)
+    assert observe is not None
+    result = observe(hass, binding_id="generic_ev", params={"charger_power_entity": "sensor.ev"},
+                     stop_at=NOW, now=NOW + timedelta(seconds=1))
+    assert result.charging is None
+
+
+@pytest.mark.parametrize("report_field", ["missing", "none"])
+def test_strict_generic_stop_rejects_attribute_only_update(report_field) -> None:
+    from types import SimpleNamespace
+
+    state = SimpleNamespace(
+        state="0", attributes={"unit_of_measurement": "W"},
+        last_updated=NOW + timedelta(seconds=1), last_changed=NOW - timedelta(seconds=1),
+    )
+    if report_field == "none":
+        state.last_reported = None
+    hass = SimpleNamespace(states=SimpleNamespace(get=lambda _entity: state))
+    result = module.generic_stop_observation_from_hass(
+        hass, binding_id="generic_ev", params={"charger_power_entity": "sensor.ev"},
+        stop_at=NOW, now=NOW + timedelta(seconds=2),
+    )
+    assert result.charging is None
+    assert result.evidence == "unknown_stop_observation"
+
+
+def test_strict_evac_stop_observation_reads_twelve_input_registers() -> None:
+    calls = []
+
+    async def read(address, count):
+        calls.append((address, count))
+        return [2, 0, 0, 0, 50, 0, 0, 0, 0, 0, 0, 0]
+
+    observe = getattr(module, "evac_stop_observation_from_reader", None)
+    assert observe is not None
+    result = asyncio.run(observe(binding_id="sigenergy_charger", stop_at=NOW,
+                                 read_input_registers=read,
+                                 clock=lambda: NOW + timedelta(seconds=1)))
+    assert calls == [(32000, 12)]
+    assert result.charging is False
+    assert result.power_kw == 0.05
+
+
+@pytest.mark.parametrize("value,unit,reported,charging,expected", [
+    ("50", "W", NOW, None, False),
+    ("0.05", "kW", NOW, None, False),
+    ("51", "W", NOW, None, True),
+    ("0", "W", NOW, True, None),
+    ("100", "W", NOW, False, None),
+    ("-1", "W", NOW, None, None),
+    ("nan", "W", NOW, None, None),
+    ("inf", "kW", NOW, None, None),
+    ("unknown", "W", NOW, None, None),
+    ("0", None, NOW, None, None),
+    ("0", "MW", NOW, None, None),
+    ("0", "W", None, None, None),
+    ("0", "W", NOW + timedelta(seconds=1), None, None),
+    ("0", "W", NOW - timedelta(seconds=91), None, None),
+    ("0", "W", NOW - timedelta(seconds=90), None, False),
+])
+def test_strict_generic_stop_validation(value, unit, reported, charging, expected) -> None:
+    from types import SimpleNamespace
+
+    state = SimpleNamespace(state=value, attributes={"unit_of_measurement": unit},
+                            last_reported=reported)
+    hass = SimpleNamespace(states=SimpleNamespace(get=lambda _entity: state))
+    result = module.generic_stop_observation_from_hass(
+        hass, binding_id="generic_ev", params={"charger_power_entity": "sensor.ev"},
+        stop_at=NOW - timedelta(seconds=100), now=NOW, charging=charging,
+    )
+    assert result.charging is expected
+    if expected is False:
+        assert result.evidence == "observed_low_power"
+
+
+@pytest.mark.parametrize("raw_state,watts,expected", [
+    (1, 0, False), (2, 50, False), (3, 0, False),
+    (1, 51, True), (4, 0, True), (5, 0, True),
+    (0, 0, None), (6, 0, None), (7, 0, None), (8, 0, None),
+    (2, -1, None),
+])
+def test_strict_evac_stop_classification(raw_state, watts, expected) -> None:
+    unsigned = watts & 0xffffffff
+    regs = [raw_state, 0, 0, unsigned >> 16, unsigned & 0xffff, 0, 0, 0, 0, 0, 0, 0]
+
+    async def read(_address, _count):
+        return regs
+
+    result = asyncio.run(module.evac_stop_observation_from_reader(
+        binding_id="sigenergy_charger", stop_at=NOW, read_input_registers=read,
+        clock=lambda: NOW + timedelta(seconds=1),
+    ))
+    assert result.charging is expected
+
+
+@pytest.mark.parametrize("regs", [None, [], [2] * 11, [2] * 13,
+                                   [2, 0, 0, float('nan')] + [0] * 8])
+def test_strict_evac_stop_rejects_incomplete_or_invalid_reads(regs) -> None:
+    async def read(_address, _count):
+        return regs
+
+    result = asyncio.run(module.evac_stop_observation_from_reader(
+        binding_id="sigenergy_charger", stop_at=NOW, read_input_registers=read,
+        clock=lambda: NOW + timedelta(seconds=1),
+    ))
+    assert result.charging is None
+
+
+def test_strict_evac_stop_requires_a_post_stop_read_and_handles_failure() -> None:
+    calls = []
+
+    async def read(address, count):
+        calls.append((address, count))
+        raise OSError("unavailable")
+
+    async def exercise():
+        before = await module.evac_stop_observation_from_reader(
+            binding_id="sigenergy_charger", stop_at=NOW, read_input_registers=read,
+            clock=lambda: NOW,
+        )
+        assert before.charging is None
+        assert calls == []
+        failed = await module.evac_stop_observation_from_reader(
+            binding_id="sigenergy_charger", stop_at=NOW, read_input_registers=read,
+            clock=lambda: NOW + timedelta(seconds=1),
+        )
+        assert failed.charging is None
+        assert calls == [(32000, 12)]
+
+    asyncio.run(exercise())
+
+
 def test_reconciliation_state_round_trips_through_private_binding_record() -> None:
     class Entry:
         entry_id = "entry-1"

@@ -71,6 +71,19 @@ actions = importlib.import_module("power_sync.automations.actions")
 ownership = importlib.import_module("power_sync.automations.ev_ownership")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_dynamic_runtime():
+    actions._dynamic_ev_state.clear()
+    yield
+    actions._dynamic_ev_state.clear()
+
+
+def _attach_stop_store(hass):
+    store = SimpleNamespace(_data={}, async_save=AsyncMock())
+    hass.data["power_sync"]["entry-1"]["automation_store"] = store
+    return store
+
+
 class _State:
     def __init__(self, state: str) -> None:
         self.state = state
@@ -173,6 +186,19 @@ def test_obsolete_shared_window_stop_cannot_authorize_a_failure_record():
     assert stopped is False
     assert report == {}
     assert ownership.get_ev_last_commands(hass, entry)["generic_ev"] is prior
+    hass.services.async_call.assert_not_awaited()
+
+
+def test_solar_disable_does_not_release_unverified_orphan_shared_lease():
+    hass = _Hass()
+    entry = _Entry()
+    actions._dynamic_ev_state.clear()
+    _claim_shared_loadpoint(hass, profile_id="shared_ev_profile_a", owner_mode="solar_surplus")
+    lease = ownership.get_ev_ownership(hass, entry, "generic_ev")[1]
+
+    assert asyncio.run(actions.stop_solar_surplus_ev_charging(hass, entry)) is False
+
+    assert ownership.get_ev_ownership(hass, entry, "generic_ev")[1] is lease
     hass.services.async_call.assert_not_awaited()
 
 
@@ -1166,6 +1192,7 @@ def test_inactive_logical_generic_id_cannot_issue_direct_start():
 
 def test_selected_logical_generic_id_claims_physical_lease_before_direct_stop_write():
     hass = _Hass()
+    _attach_stop_store(hass)
     leases_at_write = []
 
     async def capture_lease_at_write(*_args, **_kwargs):
@@ -1179,7 +1206,8 @@ def test_selected_logical_generic_id_claims_physical_lease_before_direct_stop_wr
         )
     )
 
-    assert result is True
+    assert result is False  # An acknowledgement is not stop evidence.
+    assert actions.is_shared_stop_fenced(hass, _Entry(), "generic_ev")
     hass.services.async_call.assert_awaited_once_with(
         "switch", "turn_off", {"entity_id": "switch.shared_ev"}, blocking=True
     )
@@ -1466,6 +1494,7 @@ def test_physical_evac_id_cannot_bypass_selected_profile_for_direct_stop(monkeyp
 
 def test_selected_logical_evac_stop_claims_physical_lease_before_write(monkeypatch):
     hass = _Hass()
+    _attach_stop_store(hass)
     entry = _Entry()
     entry.options = {
         **entry.options,
@@ -1487,8 +1516,9 @@ def test_selected_logical_evac_stop_claims_physical_lease_before_write(monkeypat
         actions._action_stop_ev_charging(
             hass, entry, {"charger_type": "sigenergy", "vehicle_id": "shared_ev_profile_a"}
         )
-    ) is True
+    ) is False  # EVAC acknowledgement is not stop evidence.
 
+    assert actions.is_shared_stop_fenced(hass, entry, "sigenergy_charger")
     assert len(leases_at_write) == 1
     assert leases_at_write[0] is not None
     assert leases_at_write[0]["owner"] == "powersync"
@@ -1669,7 +1699,8 @@ def test_fresh_idle_handoff_finalizes_outgoing_profile_with_only_its_live_soc(
                 "owner_mode": "scheduled",
             },
         )
-    ) is True
+    ) is False  # Outgoing cleanup is not an incoming start.
+    hass.services.async_call.assert_not_awaited()
 
     handoff = manager.transfer_idle_session_attribution.await_args.kwargs
     assert handoff["from_vehicle_id"] == "shared_ev_profile_a"
@@ -1722,6 +1753,7 @@ def test_active_shared_handoff_fences_interleaved_old_periodic_write(monkeypatch
 def test_active_shared_handoff_stops_outgoing_profile_before_incoming_profile_can_run(monkeypatch):
     """A selector change authorizes A's physical stop, not B's policy."""
     hass = _Hass(selector_state="tesla")
+    _attach_stop_store(hass)
     entry = _Entry()
     old_params = {
         **_generic_params(),
@@ -1757,13 +1789,6 @@ def test_active_shared_handoff_stops_outgoing_profile_before_incoming_profile_ca
         lambda *_args, **_kwargs: SimpleNamespace(active_profile_id="shared_ev_profile_a"),
     )
 
-    stop_results = []
-
-    async def stop_and_inspect(_reconciliation, *, stop, **_kwargs):
-        stop_results.append(await stop())
-        return False
-
-    monkeypatch.setattr(reconciler, "stop_and_confirm_shared_handoff", stop_and_inspect)
 
     result = asyncio.run(
         actions._action_start_ev_charging_dynamic(
@@ -1779,7 +1804,8 @@ def test_active_shared_handoff_stops_outgoing_profile_before_incoming_profile_ca
     )
 
     assert result is False
-    assert stop_results == [True]
+    assert actions.is_shared_stop_fenced(hass, entry, "generic_ev")
+    assert ownership.get_ev_ownership(hass, entry, "generic_ev")[1]["active_profile_id"] == "shared_ev_profile_a"
     hass.services.async_call.assert_awaited_once_with(
         "switch", "turn_off", {"entity_id": "switch.shared_ev"}, blocking=True
     )
@@ -1794,6 +1820,7 @@ def test_live_physical_handoff_ends_only_outgoing_profile_with_its_soc(
 ):
     """Confirmed physical handoff writes A's final live SoC, never B's sample."""
     hass = _Hass(selector_state="tesla", profile_a_soc=outgoing_soc)
+    _attach_stop_store(hass)
     entry = _Entry()
     entry.options = {
         **entry.options,
@@ -1842,13 +1869,11 @@ def test_live_physical_handoff_ends_only_outgoing_profile_with_its_soc(
         lambda *_args, **_kwargs: SimpleNamespace(active_profile_id="shared_ev_profile_a"),
     )
 
-    async def stop_and_finalize(_reconciliation, *, stop, finalize, **_kwargs):
-        assert await stop() is True
-        await finalize()
-        return False
-
-    monkeypatch.setattr(reconciler, "stop_and_confirm_shared_handoff", stop_and_finalize)
-    manager = SimpleNamespace(end_session=AsyncMock())
+    manager = SimpleNamespace(
+        _session_lock=asyncio.Lock(),
+        active_sessions={"generic_ev": SimpleNamespace(id="outgoing-session")},
+        _end_session_unlocked=AsyncMock(),
+    )
     sessions = types.ModuleType("power_sync.automations.ev_charging_session")
     sessions.get_session_manager = lambda: manager
     monkeypatch.setitem(sys.modules, sessions.__name__, sessions)
@@ -1864,23 +1889,23 @@ def test_live_physical_handoff_ends_only_outgoing_profile_with_its_soc(
         },
     )) is False
 
-    ended = manager.end_session.await_args.kwargs
-    assert ended["vehicle_id"] == "generic_ev"
-    assert ended["reason"] == "profile handoff"
-    assert ended["end_soc"] == expected_end_soc
-    if expected_end_soc is None:
-        assert ended == {
-            "vehicle_id": "generic_ev",
-            "reason": "profile handoff",
-            "end_soc": None,
-            "end_soc_entity": None,
-            "end_soc_time": None,
-            "end_soc_source": None,
-        }
-    else:
-        assert ended["end_soc_entity"] == "sensor.tank_soc"
-        assert ended["end_soc_time"] == states["sensor.tank_soc"].last_updated.isoformat()
-        assert ended["end_soc_source"] == "state"
+    manager._end_session_unlocked.assert_not_awaited()
+    assert actions.is_shared_stop_fenced(hass, entry, "generic_ev")
+    hass.services.async_call.assert_awaited_once_with(
+        "switch", "turn_off", {"entity_id": "switch.shared_ev"}, blocking=True
+    )
+    power = _State("0")
+    power.attributes = {"unit_of_measurement": "W"}
+    setattr(power, "last_reported", datetime.now(timezone.utc))
+    states["sensor.shared_ev_power"] = power
+    asyncio.run(actions.async_reconcile_pending_shared_stops(hass, entry))
+    assert not actions.is_shared_stop_fenced(hass, entry, "generic_ev")
+    manager._end_session_unlocked.assert_awaited_once_with(
+        "generic_ev", "profile handoff", expected_end_soc,
+        "sensor.tank_soc" if expected_end_soc is not None else None,
+        states["sensor.tank_soc"].last_updated.isoformat() if expected_end_soc is not None else None,
+        "state" if expected_end_soc is not None else None,
+    )
 
 
 def test_shared_dynamic_session_keeps_logical_identity_for_periodic_rate_and_stop(monkeypatch):
@@ -1937,13 +1962,14 @@ def test_shared_dynamic_session_keeps_logical_identity_for_periodic_rate_and_sto
 
     # Its dynamic stop uses the same persisted identity to reach the physical key.
     monkeypatch.setattr(actions, "_set_vehicle_amps", original_set_amps)
+    # Acknowledgement alone leaves the shared physical session pending.
     assert asyncio.run(
         actions._action_stop_ev_charging_dynamic(
             hass,
             entry,
             {"vehicle_id": "generic_ev", "stop_charging": True},
         )
-    ) is True
+    ) is False
     assert hass.services.async_call.await_args_list[-1].args == (
         "switch", "turn_off", {"entity_id": "switch.shared_ev"}
     )
@@ -2258,6 +2284,7 @@ def test_delayed_shared_generic_readback_is_rechecked_before_start_succeeds(monk
 @pytest.mark.parametrize(("charger_type", "physical_id"), (("generic", "generic_ev"), ("sigenergy", "sigenergy_charger")))
 def test_external_session_guarded_stop_uses_selected_profile_route(monkeypatch, charger_type, physical_id):
     hass = _Hass()
+    _attach_stop_store(hass)
     entry = _Entry()
     params = {"charger_type": charger_type, "vehicle_id": "shared_ev_profile_a"}
     if charger_type == "generic":
@@ -2275,7 +2302,8 @@ def test_external_session_guarded_stop_uses_selected_profile_route(monkeypatch, 
         extra={"active_profile_id": "shared_ev_profile_a"},
     )
 
-    assert asyncio.run(actions._stop_external_shared_session_guarded(hass, entry, params)) is True
+    assert asyncio.run(actions._stop_external_shared_session_guarded(hass, entry, params)) is False
+    assert actions.is_shared_stop_fenced(hass, entry, physical_id)
     if charger_type == "generic":
         hass.services.async_call.assert_awaited_once_with("switch", "turn_off", {"entity_id": "switch.shared_ev"}, blocking=True)
     else:

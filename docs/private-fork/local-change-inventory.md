@@ -52,6 +52,13 @@ current repository only; it is not a deployment or upstream-update procedure.
   options API, scheduled install, version source, and final HA restart seam;
   ensure a new UI cannot expose an old upstream-only actuator unchanged.
 
+## Shared EV stop, ownership and handoff lifecycle
+
+- For a shared Generic Charger or Sigenergy EVAC, retain and fence the exact physical lease, logical profile and session through an actual stop until a valid post-dispatch low-power observation. Serialize physical commands; prevent old callbacks and direct/zero-current commands from bypassing a pending stop. A confirmed stop may leave the loadpoint unowned until existing policy selects a successor; do not change mode decision triggers or priority.
+- Preserve A→B attribution, the distinction between stop acknowledgment and post-stop observation, and command-neutral fresh-idle handoffs. Generic verification requires a post-dispatch `last_reported` power report with valid W/kW units; EVAC requires the existing direct read with valid nonfault state and power. No observation proves contactor position.
+- Use the existing automation Store for pending-stop recovery, recognizing that HA may suppress or defer save failures; a reported save failure must not prevent an authorized physical stop and must generate a persistent HA warning. Preserve the two-minute unresolved-stop warning without additional phone push, exact-episode dismissal, and the bounded EVAC pre-dispatch connection-rejection retry (three total, at least 30 seconds apart); never blindly retry a timeout or uncertain write. A recovered record without a saved dispatch timestamp remains fenced rather than assuming a stop was delivered.
+- Preserve the focused stop transaction, Generic/EVAC direct and external override, retries, restart, warning, Boost and history regression tests; do not overwrite fork-specific ownership or Android API behavior when porting upstream.
+
 ## Shared physical loadpoint selection and binding
 
 - `custom_components/power_sync/automations/shared_loadpoint.py` defines the

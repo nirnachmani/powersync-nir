@@ -9,6 +9,9 @@ import asyncio
 import logging
 import uuid
 import json
+import os
+import tempfile
+import threading
 import statistics
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
@@ -332,6 +335,16 @@ class ChargingSession:
         return segment
 
 
+_history_path_locks: dict[str, threading.Lock] = {}
+_history_path_locks_guard = threading.Lock()
+
+
+def _history_path_lock(path: Path) -> threading.Lock:
+    """Serialize read/merge/replace across managers and executor threads."""
+    with _history_path_locks_guard:
+        return _history_path_locks.setdefault(os.path.abspath(path), threading.Lock())
+
+
 class ChargingSessionManager:
     """Manages charging sessions and calculates statistics."""
 
@@ -346,6 +359,15 @@ class ChargingSessionManager:
         self.active_sessions: Dict[str, ChargingSession] = {}
         self._storage_path = storage_path
         self._session_lock = asyncio.Lock()
+        self._history_load_lock = asyncio.Lock()
+        self._history_save_lock = asyncio.Lock()
+        self._history_generation = 0
+        self._history_saved_generation = 0
+        self._history_retry_handle = None
+        self._history_task = None
+        self._closing = False
+        self._pending_history: Dict[str, ChargingSession] = {}
+        self.history_last_error = None
 
         # Load existing sessions on init
         self._sessions_cache: List[ChargingSession] = []
@@ -360,49 +382,188 @@ class ChargingSessionManager:
         # Default to HA config directory
         return Path(self.hass.config.config_dir) / "power_sync_ev_sessions.json"
 
-    async def _load_sessions(self) -> None:
+    @property
+    def history_dirty(self) -> bool:
+        """Whether finalized history still needs to be persisted."""
+        return self._history_generation != self._history_saved_generation
+
+    async def _load_sessions(self, *, refresh: bool = False) -> None:
         """Load sessions from storage."""
-        if self._cache_loaded:
+        if self._cache_loaded and not refresh:
             return
 
-        try:
-            if self.storage_path.exists():
+        async with self._history_load_lock:
+            if self._cache_loaded and not refresh:
+                return
+            try:
                 def _read_file():
-                    with open(self.storage_path, "r") as f:
-                        return json.load(f)
+                    try:
+                        with open(self.storage_path, "r") as f:
+                            return json.load(f)
+                    except FileNotFoundError:
+                        return {"sessions": []}
 
                 data = await self.hass.async_add_executor_job(_read_file)
-                self._sessions_cache = [
-                    ChargingSession.from_dict(s) for s in data.get("sessions", [])
+                if not isinstance(data, dict) or not isinstance(data.get("sessions"), list):
+                    raise ValueError("invalid session history format")
+                loaded = [
+                    ChargingSession.from_dict(s) for s in data["sessions"]
                 ]
+                pending_ids = {session.id for session in self._sessions_cache}
+                self._sessions_cache = [s for s in loaded if s.id not in pending_ids] + self._sessions_cache
                 _LOGGER.info(f"Loaded {len(self._sessions_cache)} charging sessions from storage")
-            self._cache_loaded = True
-        except Exception as e:
-            _LOGGER.error(f"Failed to load sessions from storage: {e}")
-            self._sessions_cache = []
-            self._cache_loaded = True
+                self._cache_loaded = True
+            except Exception as e:
+                self.history_last_error = str(e)
+                _LOGGER.error("Failed to load sessions from storage; refusing to overwrite history: %s", e)
+
+    def _schedule_history_save(self, delay: float = 0) -> None:
+        """Keep at most one timer for pending history work."""
+        if self._history_retry_handle is not None:
+            return
+
+        def start_save():
+            self._history_retry_handle = None
+            if self._history_save_lock.locked() or (self._history_task and not self._history_task.done()):
+                self._schedule_history_save(30)
+                return
+            self._history_task = asyncio.create_task(self._save_sessions())
+
+        self._history_retry_handle = asyncio.get_running_loop().call_later(delay, start_save)
 
     async def _save_sessions(self) -> None:
-        """Save sessions to storage."""
+        """Save sessions, retaining retries even if cancelled before I/O."""
         try:
-            # Keep last 365 days of sessions
-            cutoff = dt_util.now() - timedelta(days=365)
-            cutoff_str = cutoff.isoformat()
+            await self._save_sessions_locked()
+        except asyncio.CancelledError:
+            if self.history_dirty:
+                self._schedule_history_save(30)
+            raise
 
-            sessions_to_save = [
-                s for s in self._sessions_cache
-                if s.start_time >= cutoff_str
-            ]
+    async def _save_sessions_locked(self) -> None:
+        """Save sessions to storage."""
+        async with self._history_save_lock:
+            if not self.history_dirty:
+                return
+            try:
+                await self._load_sessions()
+                if not self._cache_loaded:
+                    raise RuntimeError("history load failed; refusing to overwrite existing history")
+                # Keep last 365 days of sessions
+                cutoff = dt_util.now() - timedelta(days=365)
+                cutoff_str = cutoff.isoformat()
 
-            def _write_file():
-                data = {"sessions": [s.to_dict() for s in sessions_to_save]}
-                with open(self.storage_path, "w") as f:
-                    json.dump(data, f, indent=2)
+                generation = self._history_generation
+                sessions_to_save = [
+                    s.to_dict() for s in self._pending_history.values()
+                    if s.start_time >= cutoff_str
+                ]
 
-            await self.hass.async_add_executor_job(_write_file)
-            _LOGGER.debug(f"Saved {len(sessions_to_save)} charging sessions to storage")
-        except Exception as e:
-            _LOGGER.error(f"Failed to save sessions to storage: {e}")
+                pending_snapshot = dict(self._pending_history)
+                pending_ids = set(pending_snapshot)
+
+                def _write_file():
+                    path = self.storage_path
+                    with _history_path_lock(path):
+                        try:
+                            with open(path, "r") as f:
+                                data = json.load(f)
+                        except FileNotFoundError:
+                            data = {"sessions": []}
+                        if not isinstance(data, dict) or not isinstance(data.get("sessions"), list):
+                            raise ValueError("invalid session history format")
+                        existing = [ChargingSession.from_dict(s) for s in data["sessions"]]
+                        merged = [s.to_dict() for s in existing if s.id not in pending_ids and s.start_time >= cutoff_str] + sessions_to_save
+                        name = None
+                        try:
+                            with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix=f".{path.name}.", delete=False) as f:
+                                name = f.name
+                                json.dump({"sessions": merged}, f, indent=2)
+                                f.flush()
+                                os.fsync(f.fileno())
+                            os.replace(name, path)
+                        finally:
+                            if name is not None and os.path.exists(name):
+                                os.unlink(name)
+                        return merged
+
+                job = asyncio.create_task(self.hass.async_add_executor_job(_write_file))
+                try:
+                    merged = await asyncio.shield(job)
+                except asyncio.CancelledError:
+                    # An executor cannot be cancelled: drain it and keep dirty.
+                    self._schedule_history_save(30)
+                    while not job.done():
+                        try:
+                            await asyncio.shield(job)
+                        except asyncio.CancelledError:
+                            continue
+                        except Exception:
+                            break
+                    # Retrieve any exception without treating it as a save.
+                    if not job.cancelled():
+                        job.exception()
+                    raise
+                for session_id in pending_ids:
+                    if self._pending_history.get(session_id) is pending_snapshot[session_id]:
+                        self._pending_history.pop(session_id, None)
+                # Include other managers' disk history without losing newer work.
+                pending = self._pending_history
+                self._sessions_cache = [
+                    ChargingSession.from_dict(item) for item in merged
+                    if item["id"] not in pending
+                ] + list(pending.values())
+                self._history_saved_generation = generation
+                self.history_last_error = None
+                _LOGGER.debug(f"Saved {len(sessions_to_save)} charging sessions to storage")
+                if self.history_dirty:
+                    self._schedule_history_save()
+                elif self._history_retry_handle is not None:
+                    self._history_retry_handle.cancel()
+                    self._history_retry_handle = None
+            except Exception as e:
+                self.history_last_error = str(e)
+                _LOGGER.error("Failed to save charging session history; retrying: %s", e)
+                self._schedule_history_save(30)
+
+    async def async_flush_history(self) -> bool:
+        """Drain in-flight work; retain failed data and retry in memory."""
+        if self._history_retry_handle is not None:
+            self._history_retry_handle.cancel()
+            self._history_retry_handle = None
+        await self._save_sessions()
+        return not self.history_dirty
+
+    async def async_close(self) -> bool:
+        """Fence starts, finalize active sessions, and flush on integration unload.
+
+        Returns False if history could not be saved; pending data remains in
+        memory with its retry scheduled. This does not control any hardware.
+        """
+        self._closing = True
+        async with self._session_lock:
+            for key in list(self.active_sessions):
+                await self._end_session_unlocked(key, "ha_restart")
+        # A scheduled task may not yet have acquired the save lock. Drain it
+        # before flushing the remaining generation, not merely the lock owner.
+        task = self._history_task
+        if task is not None and task is not asyncio.current_task():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # Only a cancelled child is recoverable; propagate cancellation
+                # of this close even if the child was also cancelled.
+                current_task = asyncio.current_task()
+                if current_task is None or current_task.cancelling() or not task.cancelled():
+                    raise
+        saved = await self.async_flush_history()
+        if not saved:
+            _LOGGER.error(
+                "EV session history is not saved on unload; retry remains in memory "
+                "and history may be lost if Home Assistant stops: %s",
+                self.history_last_error,
+            )
+        return saved
 
     async def start_session(
         self,
@@ -429,7 +590,11 @@ class ChargingSessionManager:
             New ChargingSession instance
         """
         async with self._session_lock:
+            if self._closing:
+                raise RuntimeError("Charging session manager is closing")
             await self._load_sessions()
+            if self._closing:
+                raise RuntimeError("Charging session manager is closing")
             session_key = loadpoint_id or vehicle_id
 
             # End any existing session for this physical loadpoint.
@@ -612,9 +777,11 @@ class ChargingSessionManager:
         session.end_soc_time = end_soc_time
         session.end_soc_source = end_soc_source
 
-        # Add to cache and save
+        # Retain the exact completed session; persistence must not delay stop/release.
         self._sessions_cache.append(session)
-        await self._save_sessions()
+        self._pending_history[session.id] = session
+        self._history_generation += 1
+        self._schedule_history_save()
 
         _LOGGER.info(
             f"Ended charging session {session.id}: "
@@ -678,7 +845,8 @@ class ChargingSessionManager:
         Returns:
             List of completed sessions, newest first
         """
-        await self._load_sessions()
+        # Merge disk history on reads: an older manager may have retried late.
+        await self._load_sessions(refresh=True)
 
         cutoff = dt_util.now() - timedelta(days=days)
         cutoff_str = cutoff.isoformat()

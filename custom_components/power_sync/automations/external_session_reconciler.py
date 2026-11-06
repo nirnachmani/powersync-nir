@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import math
 from typing import Any, Awaitable, Callable, Mapping
 
 try:
@@ -234,6 +235,101 @@ def _as_utc(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _stop_observation(binding_id: str, charging: bool | None, power_kw: float | None,
+                      observed_at: datetime | None, evidence: str) -> SharedLoadpointObservation:
+    return SharedLoadpointObservation(binding_id, None, charging, power_kw, observed_at, evidence)
+
+
+def _valid_stop_time(observed: Any, stop_at: Any, now: Any) -> bool:
+    """Require real HA/read timestamps, strictly after the stop and at most 90s old."""
+    if not all(isinstance(value, datetime) and value.utcoffset() is not None
+               for value in (observed, stop_at, now)):
+        return False
+    return stop_at < observed <= now and (now - observed).total_seconds() <= DEFAULT_FRESHNESS_SECONDS
+
+
+def generic_stop_observation_from_hass(
+    hass: Any, *, binding_id: str, params: Mapping[str, Any], stop_at: datetime,
+    now: datetime | None = None, charging: bool | None = None,
+) -> SharedLoadpointObservation:
+    """Classify post-stop HA power; low draw is not contactor/disabled proof.
+
+    The caller supplies the stop timestamp and optionally independent charging
+    evidence. No update_entity service or device command is issued.
+    """
+    unknown = _stop_observation(binding_id, None, None, None, "unknown_stop_observation")
+    current = now if now is not None else datetime.now(timezone.utc)
+    entity_id = params.get("charger_power_entity")
+    state = hass.states.get(entity_id) if isinstance(entity_id, str) and entity_id else None
+    if state is None:
+        return unknown
+    # Attribute-only updates do not establish a fresh power report.
+    observed = getattr(state, "last_reported", None)
+    if not _valid_stop_time(observed, stop_at, current):
+        return unknown
+    attributes = getattr(state, "attributes", None)
+    if not isinstance(attributes, Mapping):
+        return unknown
+    unit = attributes.get("unit_of_measurement")
+    if not isinstance(unit, str) or unit.strip().lower() not in ("w", "kw"):
+        return unknown
+    raw = getattr(state, "state", None)
+    if isinstance(raw, bool):
+        return unknown
+    try:
+        power = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return unknown
+    if not math.isfinite(power) or power < 0:
+        return unknown
+    if unit.strip().lower() == "w":
+        power /= 1000
+    active = power > GENERIC_ACTIVE_POWER_EPSILON_KW
+    if charging is not None and (not isinstance(charging, bool) or charging != active):
+        return unknown
+    return _stop_observation(binding_id, active, power, observed,
+                             "observed_active_power" if active else "observed_low_power")
+
+
+async def evac_stop_observation_from_reader(
+    *, binding_id: str, stop_at: datetime,
+    read_input_registers: Callable[[int, int], Awaitable[Any]],
+    clock: Callable[[], datetime] | None = None,
+) -> SharedLoadpointObservation:
+    """Read raw EVAC input registers after a stop, without issuing any writes.
+
+    The supplied reader must be the charger controller's direct input-register
+    reader, not a cached normalized state. A successful read is not proof of
+    when the charger itself measured power or that its contactor is open.
+    """
+    unknown = _stop_observation(binding_id, None, None, None, "unknown_stop_observation")
+    clock = clock or (lambda: datetime.now(timezone.utc))
+    started = clock()
+    if not _valid_stop_time(started, stop_at, started):
+        return unknown
+    try:
+        regs = await read_input_registers(32000, 12)
+        finished = clock()
+    except Exception:
+        return unknown
+    if not _valid_stop_time(started, stop_at, finished):
+        return unknown
+    if not isinstance(regs, (list, tuple)) or len(regs) != 12 or any(
+        type(reg) is not int or not 0 <= reg <= 0xffff for reg in regs
+    ):
+        return unknown
+    raw_state = regs[0]
+    if raw_state not in (1, 2, 3, 4, 5):
+        return unknown
+    raw_power = (regs[3] << 16) | regs[4]
+    if raw_power & 0x80000000:
+        return unknown
+    power = raw_power / 1000
+    active = raw_state in (4, 5) or power > GENERIC_ACTIVE_POWER_EPSILON_KW
+    return _stop_observation(binding_id, active, power, finished,
+                             "observed_evac_active" if active else "observed_evac_low_power")
 
 
 def generic_power_observation(
@@ -524,8 +620,17 @@ async def reconcile_selected_shared_loadpoint_cycle(
     # observational: do not call confirm_powersync_ev_stop (it releases leases)
     # or infer a stop from stale/unknown/charging telemetry.
     observed_time = _as_utc(state.observed_at) if isinstance(state.observed_at, datetime) else None
+    # Pending shared stops are settled by the identity-bound lifecycle, not
+    # by ordinary reconciliation: even valid idle telemetry must not dismiss
+    # a warning belonging to a replaced owner or session.
+    fences = entry_data.get("_shared_stop_fences", {}) if isinstance(entry_data, dict) else {}
+    pending = fences.get(loadpoint_id) if isinstance(fences, Mapping) else None
+    records = getattr(store, "_data", {}).get("_shared_pending_stops", {})
+    stored = records.get(loadpoint_id) if isinstance(records, Mapping) else None
+    no_pending_stop = pending is None and stored is None
     if (
-        state.physical_active is False
+        no_pending_stop
+        and state.physical_active is False
         and state.evidence in ("fresh_power", "fresh_evac_state")
         and (loadpoint_id == "generic_ev" or evac_idle_power_confirmed)
         and observed_time is not None
@@ -538,7 +643,7 @@ async def reconcile_selected_shared_loadpoint_cycle(
         if isinstance(command, dict):
             was_settled = command.get("settled_at")
             observe_ev_stop(hass, config_entry, loadpoint_id, command,
-                            _as_utc(state.observed_at), charging=False)
+                            observed_time, charging=False)
             if not was_settled and command.get("settled_at"):
                 _schedule_runtime_save(hass, config_entry)
     context = {

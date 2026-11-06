@@ -4,6 +4,8 @@ Command results never imply physical confirmation. Observation cannot dispatch c
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -25,10 +27,10 @@ def fire_action_event(hass: Any, event_type: str, payload: dict[str, Any]) -> No
 
 
 def _notification(hass: Any, entry_id: str, vehicle_id: str, *, reason: str | None,
-                  clear: bool = False) -> None:
+                  clear: bool = False, notification_id: str | None = None) -> bool:
     try:
         from homeassistant.components import persistent_notification
-        notification_id = f"power_sync_ev_stop_{entry_id}_{vehicle_id}"
+        notification_id = notification_id or f"power_sync_ev_stop_{entry_id}_{vehicle_id}"
         if clear:
             persistent_notification.async_dismiss(hass, notification_id)
         else:
@@ -40,10 +42,90 @@ def _notification(hass: Any, entry_id: str, vehicle_id: str, *, reason: str | No
                 title="PowerSync: EV stop needs attention",
                 notification_id=notification_id,
             )
+        return True
     except ImportError:
         _LOGGER.debug("Persistent notifications are unavailable")
     except Exception:
         _LOGGER.exception("Could not update EV stop notification")
+    return False
+
+
+def update_unverified_stop_alert(
+    hass: Any, config_entry: Any, loadpoint_id: str, *, now: datetime,
+    first_stop_at: datetime, episode_id: str, status: str,
+    observation: dict[str, Any] | None, episode_state: dict[str, Any] | None = None,
+) -> None:
+    """Warn once per physical stop episode; caller supplies authoritative identity.
+
+    Observation, when present, has episode_id, observed_at and charging fields.
+    Only a matching post-stop idle observation and verified status can dismiss.
+    The episode ID and original timestamp must remain stable across retries.
+    A caller may persist and restore episode_state, a mutable JSON-compatible
+    dict, after each call. It is bound to the entry, loadpoint and episode.
+    """
+    try:
+        if (not loadpoint_id or not episode_id or status not in ("unresolved", "verified")
+                or now.utcoffset() is None or first_stop_at.utcoffset() is None
+                or first_stop_at > now):
+            return
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return
+    alerts = (hass.data.setdefault("power_sync", {})
+              .setdefault(config_entry.entry_id, {})
+              .setdefault("ev_unverified_stop_alerts", {}))
+    key = (loadpoint_id, episode_id)
+    identity_fields = {"entry_id": config_entry.entry_id, "loadpoint_id": loadpoint_id,
+                       "episode_id": episode_id}
+    state = alerts.get(key)
+    if state is None:
+        state = episode_state if episode_state is not None else {}
+        if not state:
+            state.update(identity_fields, first_stop_at=first_stop_at.isoformat(),
+                         warned=False, cleared=False)
+        try:
+            if (any(state.get(k) != v for k, v in identity_fields.items())
+                    or not isinstance(state.get("warned"), bool)
+                    or not isinstance(state.get("cleared"), bool)):
+                return
+            restored_at = datetime.fromisoformat(state["first_stop_at"])
+            if restored_at.utcoffset() is None or restored_at > now:
+                return
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return
+        alerts[key] = state
+    elif episode_state is not None and episode_state is not state:
+        # Keep a newly supplied persistence target synchronized with live state.
+        episode_state.clear()
+        episode_state.update(state)
+        alerts[key] = state = episode_state
+    first_stop_at = datetime.fromisoformat(state["first_stop_at"])
+    valid_observation = False
+    if observation and observation.get("episode_id") == episode_id:
+        observed_at = observation.get("observed_at")
+        try:
+            if isinstance(observed_at, datetime) and observed_at.utcoffset() is not None:
+                valid_observation = first_stop_at < observed_at <= now
+        except (TypeError, ValueError, OverflowError):
+            pass
+    identity = json.dumps([config_entry.entry_id, loadpoint_id, episode_id], ensure_ascii=True)
+    notification_id = "power_sync_ev_unverified_stop_" + hashlib.sha256(identity.encode()).hexdigest()
+    if status == "verified":
+        if (valid_observation and observation is not None
+                and observation.get("charging") is False and not state["cleared"]):
+            if state["warned"]:
+                if not _notification(hass, config_entry.entry_id, loadpoint_id, reason=None,
+                                     clear=True, notification_id=notification_id):
+                    return
+            state["cleared"] = True
+        return
+    if state["warned"] or state["cleared"] or (now - first_stop_at).total_seconds() < 120:
+        return
+    reason = ("Post-stop telemetry reported charging."
+              if valid_observation and observation is not None and observation.get("charging") is True
+              else "Post-stop telemetry is unavailable or does not confirm a stopped state.")
+    if _notification(hass, config_entry.entry_id, loadpoint_id, reason=reason,
+                     notification_id=notification_id):
+        state["warned"] = True
 
 
 def publish_ev_command(hass: Any, config_entry: Any, vehicle_id: str,

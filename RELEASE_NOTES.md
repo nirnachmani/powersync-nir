@@ -1,3 +1,11 @@
+<!-- release: v2.12.1616-nir.3 -->
+
+## v2.12.1616-nir.3 — shared EV stop and handoff
+- Keep the outgoing Generic Charger or Sigenergy EVAC owner and session fenced while an actual stop is unverified. Release only the matching owner after a qualifying post-stop observation, including mode changes, logical-vehicle handoffs and stops without an immediate successor. This fixes a stop path that could reacquire and strand Smart Schedule ownership.
+- Preserve existing charging-mode decisions, priorities and Android routes. An unresolved stop raises a Home Assistant persistent warning after two minutes; observed continued charging and unavailable evidence are distinguished. Already-idle command-neutral handoffs remain separate from a physical stop.
+- A confirmed EVAC connection rejection before any stop write may be retried at most twice, at least 30 seconds apart; timeouts and uncertain writes are not blindly retried. A reported HA storage failure does not prevent an authorized stop and raises a warning. HA Store can suppress or defer some failures, so restart recovery cannot be guaranteed after an unsuccessful save; a crash before a dispatch timestamp is saved can also leave a stop fenced for manual attention.
+- Generic post-stop verification requires a new HA-reported low-power value; missing or delayed telemetry can delay release. This is an observation of low power, not proof of an open contactor. Source release only: no Home Assistant installation, restart or charger command was performed.
+
 <!-- release: v2.12.1616-nir.2 -->
 
 ## v2.12.1616-nir.2 — correct hourly Amber Smart Schedule forecasts
