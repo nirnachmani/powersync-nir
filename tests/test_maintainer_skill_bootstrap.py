@@ -69,6 +69,17 @@ def test_skill_requires_separate_authorisation_before_deployment():
     assert "never deploy" in skill
 
 
+def test_skill_distinguishes_failed_release_gate_from_blocked_investigation():
+    skill = SOURCE_SKILL.read_text(encoding="utf-8").lower()
+    assert "failed gate blocks publication, not investigation" in skill
+    assert "never blindly refresh a fingerprint" in skill
+    assert "significant user-facing functionality" in skill
+    assert "plain-language summary" in skill
+    assert "whether a user decision is actually needed" in skill
+    assert "for incompatible changes or failed gates, retain the candidate untouched" not in skill
+    assert "specific unresolved fork conflict, failed safety" not in skill
+
+
 def test_private_fork_runner_includes_maintainer_bootstrap_and_cycle_tests():
     runner = (ROOT / "scripts/private-fork/run_private_tests.sh").read_text(encoding="utf-8")
 

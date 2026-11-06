@@ -1,3 +1,9 @@
+<!-- release: v2.12.1616-nir.4 -->
+
+## v2.12.1616-nir.4 — maintainer autonomy and reporting
+- Clarify that a failed release check blocks publication, not investigation: the maintainer must diagnose and resolve ordinary issues autonomously without weakening safety checks.
+- Escalate significant functional choices and genuine operational interruptions with context; start email reports with a plain-language explanation of the affected feature, consequences and whether a decision is needed. No integration runtime behavior changes.
+
 <!-- release: v2.12.1616-nir.3 -->
 
 ## v2.12.1616-nir.3 — shared EV stop and handoff

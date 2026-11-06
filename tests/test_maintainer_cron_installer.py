@@ -121,6 +121,10 @@ def test_apply_creates_one_paused_local_report_only_job_with_fixed_workdir(tmp_p
     assert "maintainer_ledger.py summary" in invocation
     assert "do not run maintainer_cycle.py against it" in invocation
     assert "never a freeform last_reviewed_upstream checkpoint" in invocation
+    assert "A failed gate blocks publication, not investigation" in invocation
+    assert "significant choice affecting functionality" in invocation
+    assert "plain-language summary in the email" in invocation
+    assert "stop at that commit for operator input" not in invocation
     assert " cron resume " not in invocation
 
 

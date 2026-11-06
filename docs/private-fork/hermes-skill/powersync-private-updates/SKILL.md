@@ -1,7 +1,7 @@
 ---
 name: powersync-private-updates
 description: "Use when maintaining the PowerSync Nir fork against upstream."
-version: 1.0.5
+version: 1.0.6
 ---
 
 # PowerSync Nir fork upstream maintenance
@@ -221,8 +221,17 @@ permission, command-fencing and hosted-access code out.
    invariant that cannot be safely amended.
 8. For redundant changes, record the upstream SHA and equivalence rationale;
    retain the private implementation.
-9. For incompatible changes or failed gates, retain the candidate untouched and
-   report the precise conflict/failure. Do not push it as a release or deploy.
+9. A failed gate blocks publication, not investigation. Preserve the candidate
+   and diagnose the failure against the starting revision, then independently
+   correct the adaptation or its specifically reviewed test expectations within
+   the existing functional scope. Rerun the relevant check and required gates;
+   continue through the pinned target once they pass. Never bypass a failure.
+   If an optimiser source fingerprint rejects an intended change, review its
+   actual diff and protected invariants, extend only the exact approved lineage,
+   and retain mutation-rejection coverage. Never blindly refresh a fingerprint
+   or weaken a validator. The failure itself is not evidence of a product bug.
+   Act autonomously on ordinary coding, test, compatibility, and tooling issues;
+   do not ask the user to approve an implementation detail or resume the run.
 
 ## Proportionate testing
 
@@ -275,9 +284,17 @@ permission, command-fencing and hosted-access code out.
   write an end-of-cycle report, or publish until the target is exhausted.
   After final gates, recheck the ledger summary/`next`; a successful test run
   does not convert unfinished work into a finished cycle.
-- Stop early **only** for a specific unresolved fork conflict, failed safety
-  gate, missing required external input, or an actual enforced runtime/resource
-  limit. Record the exact stopping commit and evidence. For a real runtime
+- Stop to request a user choice only when a concrete, investigated conflict
+  requires choosing between materially different outcomes affecting significant user-facing functionality,
+  architecture, activation limits, or a protected security boundary. Explain
+  the actual consequence and alternatives; ordinary upstream product decisions
+  already covered by policy are not such a choice. Do not claim a safety
+  failure alone requires a choice. A genuinely unrecoverable missing access,
+  technical failure, or enforced resource limit is an operational interruption,
+  not a product decision: exhaust reasonable diagnosis and safe alternatives,
+  preserve the candidate and checkpoint, and report evidence and next action.
+  Never publish with a failing gate or fabricate success. Record the exact
+  stopping commit and evidence. For a real runtime
   limit, save the durable checkpoint and next SHA, identify the limit, and
   arrange immediate continuation after the current claim releases rather than
   waiting for the next regular schedule; if no safe handoff can be arranged,
@@ -337,13 +354,24 @@ Blockers / follow-up: <none or factual items>
    its checkpoint/remaining count with the reported target, and inspect local
    versus remote feature/main heads plus worktree status. Distinguish local
    tested commits from pushed changes, a GitHub release, and HA deployment.
-4. Name a **blocker** only for a specific conflict, failing gate, missing input,
-   or confirmed runtime limit. Unreviewed commits are pending work: identify
+4. Name a **blocker** only for an investigated significant user choice or a
+   genuine operational interruption after reasonable attempts; a failed gate
+   alone blocks release, not further investigation. Unreviewed commits are pending work: identify
    the next SHA and describe whether it was actually examined. Explain this in
    plain language before the per-commit table so the email does not imply an
    ordinary backlog needs a human decision.
 
 ## End-of-cycle update report
+
+Begin the report and email with a short plain-language summary written for a
+non-developer. Explain what the affected feature does, what went wrong and
+under what circumstances, the practical effect on the user's system, what
+is known versus unverified, and whether a user decision is actually needed.
+Explain what was tried and why it could not continue; distinguish a release
+gate from a real need for input and an operational interruption. Describe a
+source-fingerprint mismatch as an unrecognised code change, not proof that
+hardware or the feature is broken or safe. Place technical identifiers, exact
+tests and the complete per-update table after this context. Never expose secrets.
 
 At the end of each upstream-update cycle, include this brief Markdown table
 for **every processed commit** in both the detailed report and the **email body**
