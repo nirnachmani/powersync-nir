@@ -9893,7 +9893,15 @@ def test_price_level_handoff_releases_origin_hold_only_after_fresh_idle(
         "active": True, "source": "price_level_charging",
         "active_profile_id": "shared_ev_profile_a",
     }
+    notifications = []
+    data["optimization_coordinator"] = SimpleNamespace(
+        request_ev_preservation_refresh=lambda: notifications.append(hold["active"])
+    )
     executor._preserve_home_battery_active = True
+    # A sibling cannot reattribute an existing hold or wake the optimizer.
+    executor._set_preserve_home_battery_intent("B charging")
+    assert hold["active_profile_id"] == "shared_ev_profile_a"
+    assert notifications == []
     data["_shared_loadpoint_cycle_context"] = {
         "binding_id": physical_id, "active_profile_id": "shared_ev_profile_b",
         "physical_active": True, "observed_at": datetime.now(timezone.utc),
@@ -9915,9 +9923,20 @@ def test_price_level_handoff_releases_origin_hold_only_after_fresh_idle(
     }
     asyncio.run(executor.apply_preserve_home_battery(False, "B ended"))
     assert hold["active"] is True
+    assert notifications == []
     leases.pop(physical_id)
+    from power_sync.automations.actions import _dynamic_ev_state
+    runtime = _dynamic_ev_state.setdefault(entry.entry_id, {})
+    runtime[physical_id] = {"active": True, "active_profile_id": "shared_ev_profile_a"}
+    try:
+        asyncio.run(executor.apply_preserve_home_battery(False, "B ended"))
+        assert hold["active"] is True
+        assert notifications == []
+    finally:
+        runtime.pop(physical_id, None)
     asyncio.run(executor.apply_preserve_home_battery(False, "B ended"))
     assert hold["active"] is False
+    assert notifications == [False]
 
 
 @pytest.mark.parametrize("status,power,age,expected", [
@@ -9998,3 +10017,94 @@ def test_shared_generic_stopped_readback_releases_only_origin_profile_hold(
         "price_level_opportunity", "Cheap price", vehicle_vin="shared_ev_profile_b",
     )
     executor._stop_charging.assert_not_awaited()
+
+
+# Adapted from upstream fbdd9f7: EV preserve transition coverage.
+
+@pytest.mark.parametrize("backend,physical_id", [("generic", "generic_ev"), ("sigenergy", "sigenergy_charger")])
+def test_shared_price_preserve_uses_physical_lease_on_handoff(backend, physical_id):
+    from power_sync.automations.ev_ownership import get_ev_ownerships
+
+    hass = _FakeHass()
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "generic_charger_enabled": backend == "generic",
+        "sigenergy_charger_enabled": backend == "sigenergy",
+        "sigenergy_charger_type": "evac",
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_vehicle",
+        "shared_loadpoint_profile_a_name": "Tank",
+        "shared_loadpoint_profile_a_state": "tank",
+        "shared_loadpoint_profile_b_name": "Tesla",
+        "shared_loadpoint_profile_b_state": "tesla",
+    })
+    selector = SimpleNamespace(state="tank", attributes={})
+    hass.states._states["sensor.connected_vehicle"] = selector
+    get_ev_ownerships(hass, entry)[physical_id] = {
+        "owner": "powersync", "owner_mode": "price_level_opportunity",
+        "active_profile_id": "shared_ev_profile_a",
+    }
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    executor._set_preserve_home_battery_intent("charging")
+    hold = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
+    assert hold["active_profile_id"] == "shared_ev_profile_a"
+    selector.state = "tesla"
+    executor._clear_preserve_home_battery_intent("sibling stopped")
+    assert hold["active"] is True
+
+@pytest.mark.parametrize("mode", ["price_level", "scheduled", "smart_schedule"])
+def test_preserve_transitions_wake_optimizer_once_per_effective_change(mode):
+    """Each EV mode wakes execution; repeated evaluations do not issue more work."""
+    hass = _FakeHass()
+    entry = _FakeConfigEntry()
+    calls = []
+    data = hass.data["power_sync"]["entry-1"]
+    data["optimization_coordinator"] = SimpleNamespace(
+        request_ev_preservation_refresh=lambda: calls.append(
+            data["scheduled_ev_preserve_state"]["active"]
+        )
+    )
+    if mode == "smart_schedule":
+        executor = ev_planner.AutoScheduleExecutor(hass, entry, None)
+        start = lambda: executor._set_active_charging_preserve_intent(VIN, "charging")
+        stop = lambda: executor._clear_active_charging_preserve_intent(VIN, "stopped")
+    else:
+        cls = (ev_planner.PriceLevelChargingExecutor if mode == "price_level"
+               else ev_planner.ScheduledChargingExecutor)
+        executor = cls(hass, entry)
+        start = lambda: executor._set_preserve_home_battery_intent("charging")
+        stop = lambda: executor._clear_preserve_home_battery_intent("stopped")
+    start()
+    start()
+    stop()
+    stop()
+    start()
+    assert calls == [True, False, True]
+
+
+def test_preserve_mode_handoff_does_not_release_battery():
+    """Ending Price-Level must retain a simultaneous Scheduled preserve request."""
+    hass = _FakeHass()
+    entry = _FakeConfigEntry()
+    calls = []
+    data = hass.data["power_sync"]["entry-1"]
+    data["optimization_coordinator"] = SimpleNamespace(
+        request_ev_preservation_refresh=lambda: calls.append(
+            data["scheduled_ev_preserve_state"]["active"]
+        )
+    )
+    price = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    scheduled = ev_planner.ScheduledChargingExecutor(hass, entry)
+    previous_price = ev_planner.get_price_level_executor()
+    previous_scheduled = ev_planner.get_scheduled_charging_executor()
+    ev_planner.set_price_level_executor(price)
+    ev_planner.set_scheduled_charging_executor(scheduled)
+    try:
+        scheduled._set_preserve_home_battery_intent("scheduled")
+        price._set_preserve_home_battery_intent("price accepted")
+        price._clear_preserve_home_battery_intent("price rejected")
+        assert calls == [True]
+        assert data["scheduled_ev_preserve_state"]["source"] == "scheduled_charging"
+        scheduled._clear_preserve_home_battery_intent("window ended")
+        assert calls == [True, False]
+    finally:
+        ev_planner.set_price_level_executor(previous_price)
+        ev_planner.set_scheduled_charging_executor(previous_scheduled)

@@ -406,3 +406,122 @@ def test_concurrent_cached_forced_action_calls_issue_command_once(opt_module, ac
         assert coordinator._last_executed_action == action_name
 
     asyncio.run(_run())
+
+
+# Adapted from upstream fbdd9f7: EV preserve transition coverage.
+
+def test_disable_drains_ev_preservation_before_restoration(opt_module):
+    """Queued EV work must be cancelled before shutdown can restore hardware."""
+    async def run():
+        coordinator = _disable_coordinator(opt_module)
+        events = []
+        started = asyncio.Event()
+
+        async def pending_refresh():
+            try:
+                started.set()
+                await asyncio.Event().wait()
+            finally:
+                events.append("refresh drained")
+
+        async def save(_):
+            events.append("shutdown save")
+
+        task = asyncio.create_task(pending_refresh())
+        coordinator._ev_preserve_refresh_task = task
+        coordinator._cost_store.async_save = save
+        await started.wait()
+        await coordinator.disable()
+        assert task.cancelled()
+        assert coordinator._ev_preserve_refresh_task is None
+        assert events == ["refresh drained", "shutdown save"]
+        coordinator.request_ev_preservation_refresh()
+        assert coordinator._ev_preserve_refresh_task is None
+
+    asyncio.run(run())
+
+
+def test_disable_waits_for_inflight_ev_hold_acknowledgement(opt_module):
+    """An accepted hold must become known before shutdown decides to restore it."""
+    async def run():
+        coordinator = _disable_coordinator(opt_module)
+        events = []
+        started = asyncio.Event()
+        acknowledge = asyncio.Event()
+
+        async def hold_command():
+            coordinator._ev_preserve_refresh_executing = True
+            try:
+                started.set()
+                await acknowledge.wait()
+                coordinator._scheduled_ev_no_discharge_active = True
+                events.append("hold acknowledged")
+            finally:
+                coordinator._ev_preserve_refresh_executing = False
+
+        async def restore():
+            events.append("restored")
+            return True
+
+        coordinator.energy_coordinator = SimpleNamespace(restore_no_discharge_mode=restore)
+        task = asyncio.create_task(hold_command())
+        coordinator._ev_preserve_refresh_task = task
+        await started.wait()
+        shutdown = asyncio.create_task(coordinator.disable())
+        await asyncio.sleep(0)
+        assert not shutdown.done()
+        assert not task.cancelled()
+        acknowledge.set()
+        await shutdown
+        assert events == ["hold acknowledged", "restored"]
+        assert coordinator._scheduled_ev_no_discharge_active is False
+
+    asyncio.run(run())
+
+
+def test_disable_restores_uncertain_sigenergy_ev_hold(opt_module):
+    async def run():
+        coordinator = _disable_coordinator(opt_module)
+        coordinator._scheduled_ev_no_discharge_uncertain = True
+        calls = []
+
+        async def restore():
+            calls.append("restore")
+            return True
+
+        coordinator.energy_coordinator = SimpleNamespace(restore_no_discharge_mode=restore)
+        await coordinator.disable()
+        assert calls == ["restore"]
+        assert coordinator._scheduled_ev_no_discharge_uncertain is False
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("marker", ["active", "uncertain"])
+def test_disable_retries_failed_sigenergy_ev_hold_restore(opt_module, marker):
+    async def run():
+        coordinator = _disable_coordinator(opt_module)
+        setattr(coordinator, "_scheduled_ev_no_discharge_" + marker, True)
+        results = iter([False, True])
+        calls = []
+
+        async def restore():
+            calls.append("restore")
+            return next(results)
+
+        coordinator.energy_coordinator = SimpleNamespace(restore_no_discharge_mode=restore)
+        await coordinator.disable()
+        assert not coordinator._enabled
+        assert getattr(coordinator, "_scheduled_ev_no_discharge_" + marker)
+        coordinator._monitoring_mode_active = lambda: True
+        await coordinator.disable()
+        assert calls == ["restore"]
+        coordinator._monitoring_mode_active = lambda: False
+        await coordinator.disable()
+        assert calls == ["restore", "restore"]
+        assert not coordinator._scheduled_ev_no_discharge_active
+        assert not getattr(coordinator, "_scheduled_ev_no_discharge_uncertain", False)
+        await coordinator.disable()
+        assert calls == ["restore", "restore"]
+
+    asyncio.run(run())

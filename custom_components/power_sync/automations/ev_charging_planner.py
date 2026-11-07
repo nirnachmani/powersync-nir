@@ -115,6 +115,17 @@ class SensitiveDataFilter(logging.Filter):
 _LOGGER = logging.getLogger(__name__)
 _LOGGER.addFilter(SensitiveDataFilter())
 
+# EV transition refresh adapted from upstream fbdd9f7.
+def _notify_ev_preserve_transition(entry_data: dict, was_active: bool) -> None:
+    """Request upstream EV preservation refresh after an accepted state write."""
+    state = entry_data.get("scheduled_ev_preserve_state") or {}
+    if was_active != bool(state.get("active")):
+        optimizer = entry_data.get("optimization_coordinator")
+        request_refresh = getattr(optimizer, "request_ev_preservation_refresh", None)
+        if callable(request_refresh):
+            request_refresh()
+
+
 # Minimum power (kW) required to start/continue EV charging.
 # Default 1.4 kW ≈ 6A @ 230V single-phase. Override per-vehicle
 # via charger settings if your charger has a different minimum.
@@ -7372,6 +7383,7 @@ class AutoScheduleExecutor:
             "source": "smart_schedule",
             "reason": reason,
         })
+        _notify_ev_preserve_transition(entry_data, was_active)
         if was_active:
             _LOGGER.info(
                 "Smart Schedule: cleared inactive home battery preserve request%s",
@@ -7389,12 +7401,14 @@ class AutoScheduleExecutor:
         existing = entry_data.get("scheduled_ev_preserve_state", {})
         if existing.get("active") and existing.get("source") not in (None, "smart_schedule"):
             return
+        was_active = bool((entry_data.get("scheduled_ev_preserve_state") or {}).get("active"))
         entry_data["scheduled_ev_preserve_state"] = {
             "active": True,
             "mode": "no_discharge_charge_allowed",
             "source": "smart_schedule",
             "reason": reason,
         }
+        _notify_ev_preserve_transition(entry_data, was_active)
 
     def _smart_schedule_active_preserve_reason(self, fallback: str = "") -> str:
         """Return a representative reason for active Smart Schedule preserve."""
@@ -11123,7 +11137,9 @@ class PriceLevelChargingExecutor:
             self.config_entry.entry_id,
             {},
         )
-        from .shared_loadpoint import binding_for_entry, resolve_active_shared_profile
+        from .shared_loadpoint import (
+            binding_for_entry, canonical_shared_loadpoint_id, resolve_active_shared_profile,
+        )
 
         binding = binding_for_entry(self.config_entry)
         previous = entry_data.get("scheduled_ev_preserve_state") or {}
@@ -11139,7 +11155,9 @@ class PriceLevelChargingExecutor:
             profile_id = resolve_active_shared_profile(self.hass, self.config_entry)
             from .ev_ownership import get_ev_ownerships
 
-            lease = get_ev_ownerships(self.hass, self.config_entry).get("generic_ev")
+            physical_id = canonical_shared_loadpoint_id(self.config_entry, profile_id)
+            lease = (get_ev_ownerships(self.hass, self.config_entry).get(physical_id)
+                     if physical_id else None)
             if not (
                 profile_id
                 and isinstance(lease, dict)
@@ -11148,6 +11166,7 @@ class PriceLevelChargingExecutor:
                 and str(lease.get("owner_mode") or "").startswith("price_level")
             ):
                 profile_id = None
+        was_active = bool((entry_data.get("scheduled_ev_preserve_state") or {}).get("active"))
         entry_data["scheduled_ev_preserve_state"] = {
             "active": True,
             "mode": "no_discharge_charge_allowed",
@@ -11155,6 +11174,7 @@ class PriceLevelChargingExecutor:
             "reason": reason,
             **({"active_profile_id": profile_id} if binding else {}),
         }
+        _notify_ev_preserve_transition(entry_data, was_active)
         self._preserve_home_battery_active = True
 
     def _clear_preserve_home_battery_intent(self, reason: str = "") -> None:
@@ -11211,20 +11231,24 @@ class PriceLevelChargingExecutor:
                 return
         scheduled = get_scheduled_charging_executor()
         if scheduled and getattr(scheduled, "_preserve_home_battery_active", False):
+            was_active = bool((entry_data.get("scheduled_ev_preserve_state") or {}).get("active"))
             state.update({
                 "active": True,
                 "mode": "no_discharge_charge_allowed",
                 "source": "scheduled_charging",
                 "reason": reason,
             })
+            _notify_ev_preserve_transition(entry_data, was_active)
             self._preserve_home_battery_active = False
             return
+        was_active = bool((entry_data.get("scheduled_ev_preserve_state") or {}).get("active"))
         state.update({
             "active": False,
             "mode": "no_discharge_charge_allowed",
             "source": "price_level_charging",
             "reason": reason,
         })
+        _notify_ev_preserve_transition(entry_data, was_active)
         self._preserve_home_battery_active = False
 
     async def apply_preserve_home_battery(
@@ -12105,12 +12129,14 @@ class ScheduledChargingExecutor:
             self.config_entry.entry_id,
             {},
         )
+        was_active = bool((entry_data.get("scheduled_ev_preserve_state") or {}).get("active"))
         entry_data["scheduled_ev_preserve_state"] = {
             "active": True,
             "mode": "no_discharge_charge_allowed",
             "source": "scheduled_charging",
             "reason": reason,
         }
+        _notify_ev_preserve_transition(entry_data, was_active)
         if not self._preserve_home_battery_active:
             _LOGGER.info(
                 "Scheduled charging: requested home battery preserve mode (%s)",
@@ -12130,20 +12156,24 @@ class ScheduledChargingExecutor:
             return
         price_level = get_price_level_executor()
         if price_level and getattr(price_level, "_preserve_home_battery_active", False):
+            was_active = bool((entry_data.get("scheduled_ev_preserve_state") or {}).get("active"))
             state.update({
                 "active": True,
                 "mode": "no_discharge_charge_allowed",
                 "source": "price_level_charging",
                 "reason": reason,
             })
+            _notify_ev_preserve_transition(entry_data, was_active)
             self._preserve_home_battery_active = False
             return
+        was_active = bool((entry_data.get("scheduled_ev_preserve_state") or {}).get("active"))
         state.update({
             "active": False,
             "mode": "no_discharge_charge_allowed",
             "source": "scheduled_charging",
             "reason": reason,
         })
+        _notify_ev_preserve_transition(entry_data, was_active)
         if not self._preserve_home_battery_active:
             return
         self._preserve_home_battery_active = False

@@ -295,6 +295,13 @@ _PENDING_SOC_DIFF_SHA256 = (
     "fee74206fff6a8eb6d075e5c16fa97fdbb94c7b3f775e0f5e0d1e0cdf2acb2a7"
 )
 
+# Upstream fbdd9f7d EV-preservation transition refresh, adapted without its
+# licensing hooks against the exact private pending-SoC successor.
+_EV_PRESERVE_SOURCE = "8228643d9525477723b6f206bc3a6900648c6b36"
+_EV_PRESERVE_DIFF_SHA256 = (
+    "0754d6aa88cf0826690c7e44f86f3d4a178945c5b5357092306a472b2c2f2fd3"
+)
+
 # Exact, path-specific exception for the reviewed Cost Neutral reachable-
 # deadline fix. The normal optimizer baseline contract stays intact: only the
 # complete b20bffb2 source delta is admitted.
@@ -482,6 +489,16 @@ def _pending_soc_diff_is_allowlisted(actual: str) -> bool:
     return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _PENDING_SOC_DIFF_SHA256
 
 
+def _ev_preserve_diff_is_allowlisted(actual: str) -> bool:
+    expected = _git_show(_EV_PRESERVE_SOURCE, COORDINATOR)
+    diff = "\n".join(difflib.unified_diff(
+        expected.splitlines(), actual.splitlines(),
+        fromfile="private_8228643d", tofile="ev_preserve_candidate",
+        lineterm="",
+    ))
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _EV_PRESERVE_DIFF_SHA256
+
+
 def _cost_neutral_reachable_deadline_diff_is_allowlisted(
     expected: str, actual: str
 ) -> bool:
@@ -666,7 +683,10 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
             assert _solar_quota_diff_is_allowlisted(
                 COORDINATOR, _git_show(_PENDING_SOC_SOURCE, COORDINATOR)
             )
-            assert _pending_soc_diff_is_allowlisted(actual)
+            assert _pending_soc_diff_is_allowlisted(
+                _git_show(_EV_PRESERVE_SOURCE, COORDINATOR)
+            )
+            assert _ev_preserve_diff_is_allowlisted(actual)
         elif relative_path == BATTERY_OPTIMIZER:
             # Preserve proof that e3c17217 itself contains only the earlier,
             # reviewed solar-refill and reachable-deadline changes before
@@ -743,13 +763,34 @@ def test_negative_import_solar_allowlist_rejects_a_nearby_policy_mutation():
     assert _solar_quota_diff_is_allowlisted(
         COORDINATOR, _git_show(_PENDING_SOC_SOURCE, COORDINATOR)
     )
-    assert _pending_soc_diff_is_allowlisted(actual)
+    pending = _git_show(_EV_PRESERVE_SOURCE, COORDINATOR)
+    assert _pending_soc_diff_is_allowlisted(pending)
     assert not _pending_soc_diff_is_allowlisted(
-        actual.replace('reason in ("measured_interval", "optimizer_run")',
+        pending.replace('reason in ("measured_interval", "optimizer_run")',
                        'reason == "measured_interval"', 1)
     )
     assert not _pending_soc_diff_is_allowlisted(
-        actual.replace('or solar_export > 1e-9', '', 1)
+        pending.replace('or solar_export > 1e-9', '', 1)
+    )
+    assert _ev_preserve_diff_is_allowlisted(actual)
+    retry_call = 'await self._release_scheduled_ev_no_discharge_mode("optimizer disabled retry")'
+    assert retry_call in actual
+    assert not _ev_preserve_diff_is_allowlisted(actual.replace(retry_call, 'pass', 1))
+    assert not _ev_preserve_diff_is_allowlisted(
+        actual.replace('execution_trigger="ev_preservation"',
+                       'execution_trigger="other"', 1)
+    )
+    assert not _ev_preserve_diff_is_allowlisted(
+        actual.replace('if not getattr(self, "_ev_preserve_refresh_executing", False):',
+                       'if True:', 1)
+    )
+    assert not _ev_preserve_diff_is_allowlisted(
+        actual.replace('self._scheduled_ev_no_discharge_uncertain = True',
+                       'self._scheduled_ev_no_discharge_uncertain = False', 1)
+    )
+    assert not _ev_preserve_diff_is_allowlisted(
+        actual.replace('if active == applied and not (uncertain and not active):',
+                       'if active == applied:', 1)
     )
     assert not _solar_fallback_diff_is_allowlisted(
         _git_show(_SOLAR_QUOTA_SOURCE, COORDINATOR).replace(

@@ -651,6 +651,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except RuntimeError:
             self._execute_lock = asyncio.Lock()
 
+        self._ev_preserve_refresh_task: asyncio.Task | None = None
+        self._ev_preserve_refresh_requested = False
+        self._ev_preserve_refresh_stopping = False
+        self._ev_preserve_refresh_executing = False
+
         # Built-in optimizer
         self._optimizer: BatteryOptimizer | None = None
         self._last_optimizer_result: OptimizerResult | None = None
@@ -937,6 +942,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._idle_hold_reserve: int | None = None
         self._idle_no_discharge_active = False
         self._scheduled_ev_no_discharge_active = False
+        self._scheduled_ev_no_discharge_uncertain = False
         # User's real backup reserve captured ONCE on startup, before any
         # IDLE modifies it. Used as the authoritative restore value.
         self._startup_backup_reserve: int | None = None
@@ -1043,6 +1049,71 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             and not self._scheduled_ev_no_discharge_active
         )
 
+    def request_ev_preservation_refresh(self) -> None:
+        """Apply an EV preserve transition without waiting for the next LP slot."""
+        if not getattr(self, "_enabled", False) or getattr(
+            self, "_ev_preserve_refresh_stopping", False
+        ):
+            return
+        self._ev_preserve_refresh_requested = True
+        task = getattr(self, "_ev_preserve_refresh_task", None)
+        if task is not None and not task.done():
+            return
+        self._ev_preserve_refresh_task = self.hass.async_create_background_task(
+            self._run_ev_preservation_refresh(), "powersync_ev_preservation"
+        )
+
+    async def _run_ev_preservation_refresh(self) -> None:
+        """Coalesce intent changes and execute the latest plan through normal guards."""
+        try:
+            while self._ev_preserve_refresh_requested and self._enabled:
+                self._ev_preserve_refresh_requested = False
+                if not await self._wait_for_deferred_enable_restore():
+                    return
+                if await self._wait_for_restart_force_restore():
+                    return
+                # Match the solve -> execution lock order. A solve already in
+                # flight may apply the new intent itself; recheck after it ends.
+                async with self._optimization_lock:
+                    async with self._execute_lock:
+                        if not self._enabled or getattr(
+                            self, "_ev_preserve_refresh_stopping", False
+                        ):
+                            return
+                        active = self._scheduled_ev_preserve_active()
+                        applied = getattr(self, "_scheduled_ev_no_discharge_active", False)
+                        uncertain = getattr(self, "_scheduled_ev_no_discharge_uncertain", False)
+                        if active == applied and not (uncertain and not active):
+                            continue
+                        action = self._get_current_action()
+                        if action is None or self._executor is None:
+                            continue
+                        runtime_action = self._effective_runtime_action(
+                            action.action, getattr(action, "timestamp", None)
+                        )
+                        if active and runtime_action not in (
+                            "discharge", "export", "consume", "self_consumption", "idle",
+                        ):
+                            # Charging already preserves the battery. Do not
+                            # reissue unrelated force commands for an EV event.
+                            continue
+                        if not self._cached_solar_export_has_settled_feed_in_price(
+                            action, runtime_action
+                        ):
+                            continue
+                        self._ev_preserve_refresh_executing = True
+                        try:
+                            await self._execute_optimizer_action(
+                                action, execution_trigger="ev_preservation"
+                            )
+                        finally:
+                            self._ev_preserve_refresh_executing = False
+                            self.async_set_updated_data(self.get_api_data())
+        except Exception:
+            _LOGGER.exception("EV battery preservation refresh failed; normal execution will retry")
+        finally:
+            self._ev_preserve_refresh_task = None
+
     def _scheduled_ev_preserve_active(self) -> bool:
         """Return True when scheduled EV charging requested no-discharge mode."""
         state = (
@@ -1062,6 +1133,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.energy_coordinator
                 and hasattr(self.energy_coordinator, "set_no_discharge_mode")
             ):
+                # Sigenergy uses multiple writes, any of which may succeed
+                # before failure or cancellation. Keep cleanup responsibility.
+                if self.battery_system == "sigenergy":
+                    self._scheduled_ev_no_discharge_uncertain = True
                 ok = await self.energy_coordinator.set_no_discharge_mode()
             else:
                 ok = await self._set_idle_hold_mode(battery, preserve_charge=True)
@@ -1077,6 +1152,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return False
 
         self._scheduled_ev_no_discharge_active = True
+        self._scheduled_ev_no_discharge_uncertain = False
         _LOGGER.info(
             "Scheduled EV preserve: battery discharge blocked, charging still allowed (%s)",
             reason,
@@ -1085,7 +1161,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _release_scheduled_ev_no_discharge_mode(self, reason: str = "") -> bool:
         """Release scheduled EV no-discharge mode when preserve is no longer active."""
-        if not self._scheduled_ev_no_discharge_active:
+        if not self._scheduled_ev_no_discharge_active and not getattr(
+            self, "_scheduled_ev_no_discharge_uncertain", False
+        ):
             return True
         if self._monitoring_mode_active():
             _LOGGER.info(
@@ -1131,6 +1209,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return False
 
         self._scheduled_ev_no_discharge_active = False
+        self._scheduled_ev_no_discharge_uncertain = False
         _LOGGER.info(
             "Scheduled EV preserve: battery no-discharge mode released%s",
             f" ({reason})" if reason else "",
@@ -5553,6 +5632,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return False
 
         self._enabled = True
+        self._ev_preserve_refresh_stopping = False
         _LOGGER.info("Optimization enabled (built-in LP)")
         initial_delay = max(0.0, float(INITIAL_OPTIMIZATION_DELAY_SECONDS))
         self._initial_optimization_not_before = (
@@ -5912,6 +5992,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def disable(self) -> None:
         """Disable optimization."""
+        # Drain this producer before restoration, so a queued EV transition
+        # cannot race shutdown cleanup or reapply a hold after it completes.
+        self._ev_preserve_refresh_stopping = True
+        self._ev_preserve_refresh_requested = False
+        preserve_task = getattr(self, "_ev_preserve_refresh_task", None)
+        if preserve_task is not None and preserve_task is not asyncio.current_task():
+            # Once a command has started, let its acknowledgement update the
+            # applied marker before cleanup. Cancelling that await can strand
+            # a hardware hold which shutdown does not yet know it owns.
+            if not getattr(self, "_ev_preserve_refresh_executing", False):
+                preserve_task.cancel()
+            await asyncio.gather(preserve_task, return_exceptions=True)
+        self._ev_preserve_refresh_task = None
         solar_export_hold = getattr(self, "_solar_export_hold", None)
         if solar_export_hold and solar_export_hold.active:
             if not await solar_export_hold.clear("optimizer_disable"):
@@ -5920,6 +6013,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "persisted cleanup will retry on startup"
                 )
         if not self._enabled:
+            # A previous disable may have left an unconfirmed EV hold restore.
+            # The release helper retains its marker on failure and enforces
+            # monitoring mode, so repeated disable can safely retry it.
+            await self._release_scheduled_ev_no_discharge_mode("optimizer disabled retry")
             return
 
         monitoring_mode = self._monitoring_mode_active()
@@ -5979,7 +6076,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.info(
                 "Optimizer shutdown: monitoring mode active — skipping IDLE cleanup writes"
             )
-        if self._scheduled_ev_no_discharge_active:
+        if self._scheduled_ev_no_discharge_active or getattr(
+            self, "_scheduled_ev_no_discharge_uncertain", False
+        ):
             if monitoring_mode:
                 _LOGGER.info(
                     "Optimizer shutdown: monitoring mode active — skipping scheduled EV no-discharge release"
@@ -12172,7 +12271,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                 effective_action = "no_discharge"
             elif not preserve_active:
-                await self._release_scheduled_ev_no_discharge_mode("preserve inactive")
+                if not await self._release_scheduled_ev_no_discharge_mode("preserve inactive"):
+                    return
 
             # When transitioning from IDLE to another action, immediately undo
             # what IDLE did (restore work mode and backup_reserve) before
@@ -12696,10 +12796,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             discharge_duration,
                         )
             elif effective_action == "no_discharge":
-                await self._set_scheduled_ev_no_discharge_mode(
+                if await self._set_scheduled_ev_no_discharge_mode(
                     battery,
                     getattr(action, "action", "scheduled_ev_preserve"),
-                )
+                ) is False:
+                    _LOGGER.warning(
+                        "Optimizer: EV no-discharge command failed — keeping "
+                        "previous action marker so the next execution retries"
+                    )
+                    return
             elif effective_action == "idle":
                 if await self._set_idle_hold_mode(
                     battery,
