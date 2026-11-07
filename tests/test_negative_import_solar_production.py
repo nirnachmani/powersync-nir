@@ -422,6 +422,35 @@ def test_runtime_current_retail_stop_expiry_outage_and_disabled_option_recovery(
     run(scenario())
 
 
+def test_sigenergy_grid_status_allows_fresh_on_grid_and_restores_on_loss(runtime_rig):
+    runtime, _, states, _, _, data = runtime_rig
+    entity = "sensor.sigen_plant_grid_connection_status"
+    states[entity] = SimpleNamespace(
+        state="On Grid", attributes={}, last_reported=datetime.now(timezone.utc)
+    )
+    runtime.entry.options["solar_production_grid_connected_entity"] = entity
+
+    async def scenario():
+        await runtime.tick()
+        assert states["switch.pv_enable"].state == "off"
+        states[entity].state = "Off Grid"
+        await runtime.tick()
+        assert states["switch.pv_enable"].state == "on"
+        states[entity].state = "On Grid"
+        await runtime.tick()
+        assert states["switch.pv_enable"].state == "off"
+        states[entity].last_reported = datetime.now(timezone.utc) - timedelta(minutes=2)
+        await runtime.tick()
+        assert states["switch.pv_enable"].state == "on"
+        assert data["solar_production_stop"]["state"] == "grid_unavailable"
+        states[entity].last_reported = datetime.now(timezone.utc)
+        states[entity].state = "unknown"
+        await runtime.tick()
+        assert states["switch.pv_enable"].state == "on"
+
+    run(scenario())
+
+
 def test_runtime_never_stops_without_fresh_grid_connection_proof(runtime_rig):
     runtime,_,states,calls,_,data=runtime_rig
     states["binary_sensor.grid_connected"].last_updated=datetime.now(timezone.utc)-timedelta(minutes=2)

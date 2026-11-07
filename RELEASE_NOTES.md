@@ -1,3 +1,8 @@
+<!-- release: v2.12.1649-nir.3 -->
+
+## v2.12.1649-nir.3 — recognise Sigenergy grid connection
+- Accept the Sigenergy grid connection sensor's `On Grid` state for negative-import solar production stopping. The existing freshness and off-grid safety checks remain in place.
+
 <!-- release: v2.12.1649-nir.2 -->
 
 ## v2.12.1649-nir.2 — simplify maintainer scope
