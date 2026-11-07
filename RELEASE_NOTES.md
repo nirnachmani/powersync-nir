@@ -1,3 +1,9 @@
+<!-- release: v2.12.1649-nir.2 -->
+
+## v2.12.1649-nir.2 — simplify maintainer scope
+- Rework maintainer instructions into one relevance, equivalence, minimal-port and fork-compatibility decision process. Trial maintenance without subagents; fix regressions introduced by an update and avoid unrelated pre-existing issues.
+- Remove contradictory merge and testing directions, keep approved AI explanation providers, preserve safety gates and explain blockers in plain language. No integration runtime behavior changes.
+
 <!-- release: v2.12.1649-nir.1 -->
 
 ## v2.12.1649-nir.1 — reviewed upstream through v2.12.1649

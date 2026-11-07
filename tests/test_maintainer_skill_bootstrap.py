@@ -74,8 +74,14 @@ def test_skill_distinguishes_failed_release_gate_from_blocked_investigation():
     assert "failed gate blocks publication, not investigation" in skill
     assert "never blindly refresh a fingerprint" in skill
     assert "significant user-facing functionality" in skill
-    assert "plain-language summary" in skill
+    assert "explain a blocker in plain language" in skill
     assert "whether a user decision is actually needed" in skill
+    assert "do not delegate" in skill
+    assert "pre-existing" in skill
+    assert "new regressions caused by the update" in skill
+    assert "existing ai explanation providers" in skill
+    assert "integrate_candidate.py" not in skill
+    assert "before and after every candidate integration" not in skill
     assert "for incompatible changes or failed gates, retain the candidate untouched" not in skill
     assert "specific unresolved fork conflict, failed safety" not in skill
 

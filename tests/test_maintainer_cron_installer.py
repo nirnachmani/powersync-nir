@@ -121,9 +121,9 @@ def test_apply_creates_one_paused_local_report_only_job_with_fixed_workdir(tmp_p
     assert "maintainer_ledger.py summary" in invocation
     assert "do not run maintainer_cycle.py against it" in invocation
     assert "never a freeform last_reviewed_upstream checkpoint" in invocation
-    assert "A failed gate blocks publication, not investigation" in invocation
-    assert "significant choice affecting functionality" in invocation
-    assert "plain-language summary in the email" in invocation
+    assert "Use the installed powersync-private-updates skill" in invocation
+    assert "do not delegate" in invocation.lower()
+    assert "explain a blocker in plain language" in invocation.lower()
     assert "stop at that commit for operator input" not in invocation
     assert " cron resume " not in invocation
 
@@ -223,9 +223,8 @@ def test_cron_prompt_requires_approved_ai_hunk_review_and_email_table(tmp_path):
     completed = _run(tmp_path, "--apply", *_valid_args(repo, profile, state), env=env)
     assert completed.returncode == 0, completed.stderr
     invocation = Path(env["HERMES_LOG"]).read_text(encoding="utf-8")
-    assert "already-approved ChatGPT plan explanations" in invocation
-    assert "even if the affected provider is not currently selected" in invocation
-    assert "licensing-adjacent commits hunk by hunk" in invocation
+    assert "approved AI explanation providers remain in scope even if not selected" in invocation
+    assert "Use the installed powersync-private-updates skill" in invocation
     assert "email body must include the complete per-update Markdown table" in invocation
     assert "next --state" in invocation and "--target refs/remotes/upstream/main" in invocation
     assert "approved GitHub release" in invocation
