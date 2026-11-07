@@ -302,6 +302,11 @@ _EV_PRESERVE_DIFF_SHA256 = (
     "0754d6aa88cf0826690c7e44f86f3d4a178945c5b5357092306a472b2c2f2fd3"
 )
 
+# Upstream 813ad249: only the reviewed hypothetical-curtailment cap removal,
+# anchored after the existing EV-preservation lineage.
+_AVAILABLE_SOLAR_SOURCE = "60d4075f8ae2f2a0c487606ebfdd3168c98fa16c"
+_AVAILABLE_SOLAR_DIFF_SHA256 = "911eb13edbebef3f36cda57cd6fac26c18f03b1dc95af84a9ffdcc91f5c74f78"
+
 # Exact, path-specific exception for the reviewed Cost Neutral reachable-
 # deadline fix. The normal optimizer baseline contract stays intact: only the
 # complete b20bffb2 source delta is admitted.
@@ -514,6 +519,15 @@ def _ev_preserve_diff_is_allowlisted(actual: str) -> bool:
     return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _EV_PRESERVE_DIFF_SHA256
 
 
+def _available_solar_diff_is_allowlisted(actual: str) -> bool:
+    expected = _git_show(_AVAILABLE_SOLAR_SOURCE, COORDINATOR)
+    diff = "\n".join(difflib.unified_diff(
+        expected.splitlines(), actual.splitlines(),
+        fromfile="private_60d4075f", tofile="available_solar_candidate", lineterm="",
+    ))
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _AVAILABLE_SOLAR_DIFF_SHA256
+
+
 def _cost_neutral_reachable_deadline_diff_is_allowlisted(
     expected: str, actual: str
 ) -> bool:
@@ -701,7 +715,10 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
             assert _pending_soc_diff_is_allowlisted(
                 _git_show(_EV_PRESERVE_SOURCE, COORDINATOR)
             )
-            assert _ev_preserve_diff_is_allowlisted(actual)
+            assert _ev_preserve_diff_is_allowlisted(
+                _git_show(_AVAILABLE_SOLAR_SOURCE, COORDINATOR)
+            )
+            assert _available_solar_diff_is_allowlisted(actual)
         elif relative_path == BATTERY_OPTIMIZER:
             # Preserve proof that e3c17217 itself contains only the earlier,
             # reviewed solar-refill and reachable-deadline changes before
@@ -790,26 +807,31 @@ def test_negative_import_solar_allowlist_rejects_a_nearby_policy_mutation():
     assert not _pending_soc_diff_is_allowlisted(
         pending.replace('or solar_export > 1e-9', '', 1)
     )
-    assert _ev_preserve_diff_is_allowlisted(actual)
+    ev_preserve = _git_show(_AVAILABLE_SOLAR_SOURCE, COORDINATOR)
+    assert _ev_preserve_diff_is_allowlisted(ev_preserve)
     retry_call = 'await self._release_scheduled_ev_no_discharge_mode("optimizer disabled retry")'
-    assert retry_call in actual
-    assert not _ev_preserve_diff_is_allowlisted(actual.replace(retry_call, 'pass', 1))
+    assert retry_call in ev_preserve
+    assert not _ev_preserve_diff_is_allowlisted(ev_preserve.replace(retry_call, 'pass', 1))
     assert not _ev_preserve_diff_is_allowlisted(
-        actual.replace('execution_trigger="ev_preservation"',
+        ev_preserve.replace('execution_trigger="ev_preservation"',
                        'execution_trigger="other"', 1)
     )
     assert not _ev_preserve_diff_is_allowlisted(
-        actual.replace('if not getattr(self, "_ev_preserve_refresh_executing", False):',
+        ev_preserve.replace('if not getattr(self, "_ev_preserve_refresh_executing", False):',
                        'if True:', 1)
     )
     assert not _ev_preserve_diff_is_allowlisted(
-        actual.replace('self._scheduled_ev_no_discharge_uncertain = True',
+        ev_preserve.replace('self._scheduled_ev_no_discharge_uncertain = True',
                        'self._scheduled_ev_no_discharge_uncertain = False', 1)
     )
     assert not _ev_preserve_diff_is_allowlisted(
-        actual.replace('if active == applied and not (uncertain and not active):',
+        ev_preserve.replace('if active == applied and not (uncertain and not active):',
                        'if active == applied:', 1)
     )
+    assert _available_solar_diff_is_allowlisted(actual)
+    assert not _available_solar_diff_is_allowlisted(actual.replace(
+        "enabled=bool(production and production.can_project()),", "enabled=True,", 1
+    ))
     assert not _solar_fallback_diff_is_allowlisted(
         _git_show(_SOLAR_QUOTA_SOURCE, COORDINATOR).replace(
             'getattr(self, "_ev_integration_enabled", False)', 'True', 1

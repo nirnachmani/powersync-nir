@@ -7436,60 +7436,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 solar_forecast = self._apply_solar_nowcast_derate(solar_forecast, soc)
             adjusted_solar_forecast = list(solar_forecast)
 
-            # Curtailment-aware solar: cap forecast during predicted curtailment periods
-            if solar_forecast and load_forecast and export_prices and self._entry:
-                from ..const import (
-                    CONF_AC_INVERTER_CURTAILMENT_ENABLED,
-                    CONF_BATTERY_CURTAILMENT_ENABLED,
-                    CONF_SIGENERGY_DC_CURTAILMENT_ENABLED,
-                )
-                curtailment_enabled = (
-                    self._entry.options.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False)
-                    or self._entry.options.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
-                    or self._entry.options.get(CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False)
-                )
-                if curtailment_enabled:
-                    from ..curtailment_config import get_curtailment_price_thresholds
-
-                    # Curtailment activates below the configured export value
-                    # when the battery is full, matching runtime curtailment.
-                    # While battery has room, solar charges it (no curtailment).
-                    # Use forward SOC projection to estimate when battery fills.
-                    curtail_threshold_cents, _ = get_curtailment_price_thresholds(
-                        self._entry
-                    )
-                    curtail_threshold = curtail_threshold_cents / 100.0
-                    max_charge_kw = self._config.max_charge_w / 1000.0
-                    capacity_kwh = self._config.battery_capacity_wh / 1000.0
-                    dt_hours = self._config.interval_minutes / 60.0
-                    projected_soc = soc  # 0-1 range
-                    capped = 0
-                    min_len = min(len(solar_forecast), len(load_forecast), len(export_prices))
-                    for t in range(min_len):
-                        surplus_kw = solar_forecast[t] - load_forecast[t]
-                        low_price = export_prices[t] < curtail_threshold
-                        battery_full = projected_soc >= 0.99
-
-                        if low_price and battery_full and solar_forecast[t] > 0:
-                            # Battery full + low price → inverter curtails to load only
-                            cap = load_forecast[t]
-                            if solar_forecast[t] > cap:
-                                solar_forecast[t] = cap
-                                capped += 1
-
-                        # Forward-project SOC for next interval
-                        if surplus_kw > 0 and capacity_kwh > 0:
-                            charge_kw = min(surplus_kw, max_charge_kw)
-                            projected_soc = min(1.0, projected_soc + charge_kw * dt_hours / capacity_kwh)
-                        elif surplus_kw < 0 and capacity_kwh > 0:
-                            projected_soc = max(0.0, projected_soc + surplus_kw * dt_hours / capacity_kwh)
-
-                    if capped:
-                        _LOGGER.info(
-                            "Curtailment-aware solar: capped %d intervals where "
-                            "export < %.0fc/kWh and battery full (solar limited to load)",
-                            capped, curtail_threshold * 100,
-                        )
+            # Upstream 813ad249: preserve available PV for the solver's chosen
+            # dispatch rather than capping it using a hypothetical full battery.
+            # The solver accounts for curtailment in its power balance.
 
             # Adapted from upstream 24fcc7d: project zero PV only while the
             # explicitly whole-site production stop is currently confirmed.
