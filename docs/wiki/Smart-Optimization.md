@@ -7,6 +7,14 @@ forecast, household load forecast, battery limits, and configured reserve floors
 Solar forecasting via Solcast or Open-Meteo Solar Forecast should be configured
 for accurate schedules.
 
+## Historical charging in the optimizer plan
+
+The dashboard labels measured battery charging as **Solar charge** when recorded
+solar generation can cover the charging power and grid import is negligible
+(up to 300 W of measurement variation). Mixed grid/solar charging and missing
+source readings keep the general **Charge** label. Past activity comes from
+measurements, independently of the future optimizer plan.
+
 ## AI Plan Explanation
 
 AI Plan Explanation is optional. It turns an existing deterministic Smart
