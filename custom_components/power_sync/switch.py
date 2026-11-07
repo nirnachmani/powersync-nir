@@ -1007,6 +1007,14 @@ class ForceDischargeSwitch(SwitchEntity):
         # Cancel any existing timer
         if self._cancel_expiry_timer:
             self._cancel_expiry_timer()
+            self._cancel_expiry_timer = None
+        if (
+            not self._discharge_expires_at
+            or _datetime_now_for(self._discharge_expires_at) >= self._discharge_expires_at
+        ):
+            # Pending restoration updates can retain an expired force marker.
+            # They must not create another recurring listener for that marker.
+            return
 
         @callback
         def _check_expiry(now: datetime) -> None:
@@ -1015,14 +1023,13 @@ class ForceDischargeSwitch(SwitchEntity):
                 self._discharge_expires_at
                 and _datetime_now_for(self._discharge_expires_at) >= self._discharge_expires_at
             ):
-                _LOGGER.info("Force discharge expired, restoring normal operation")
+                _LOGGER.info("Force discharge expired; awaiting confirmed restoration")
                 # The service-side expiry callback owns the physical restore.
                 # If its confirmation fails, keep the dispatcher-owned state
                 # on until a confirmed restore changes it.
-                self._cancel_expiry_timer = None
-            elif self._attr_is_on:
-                # Schedule next check
-                self._schedule_expiry_check()
+                if self._cancel_expiry_timer:
+                    self._cancel_expiry_timer()
+                    self._cancel_expiry_timer = None
 
         # Check every 30 seconds
         self._cancel_expiry_timer = async_track_time_interval(
@@ -1171,6 +1178,14 @@ class ForceChargeSwitch(SwitchEntity):
         # Cancel any existing timer
         if self._cancel_expiry_timer:
             self._cancel_expiry_timer()
+            self._cancel_expiry_timer = None
+        if (
+            not self._charge_expires_at
+            or _datetime_now_for(self._charge_expires_at) >= self._charge_expires_at
+        ):
+            # Pending restoration updates can retain an expired force marker.
+            # They must not create another recurring listener for that marker.
+            return
 
         @callback
         def _check_expiry(now: datetime) -> None:
@@ -1179,14 +1194,13 @@ class ForceChargeSwitch(SwitchEntity):
                 self._charge_expires_at
                 and _datetime_now_for(self._charge_expires_at) >= self._charge_expires_at
             ):
-                _LOGGER.info("Force charge expired, restoring normal operation")
+                _LOGGER.info("Force charge expired; awaiting confirmed restoration")
                 # The service-side expiry callback owns the physical restore.
                 # If its confirmation fails, keep the dispatcher-owned state
                 # on until a confirmed restore changes it.
-                self._cancel_expiry_timer = None
-            elif self._attr_is_on:
-                # Schedule next check
-                self._schedule_expiry_check()
+                if self._cancel_expiry_timer:
+                    self._cancel_expiry_timer()
+                    self._cancel_expiry_timer = None
 
         # Check every 30 seconds
         self._cancel_expiry_timer = async_track_time_interval(
