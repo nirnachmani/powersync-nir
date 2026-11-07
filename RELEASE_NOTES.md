@@ -1,3 +1,12 @@
+<!-- release: v2.12.1649-nir.1 -->
+
+## v2.12.1649-nir.1 — reviewed upstream through v2.12.1649
+- Preserve available solar in optimizer dispatch and prefer solar over redundant grid top-ups in fallback plans. Parse Solcast cache data off the Home Assistant event loop.
+- Periodically checkpoint energy and cost totals during continuous telemetry. Clean up expired force charge and discharge listeners during recovery.
+- Retire deleted EV schedules from persistent storage while preserving sibling profiles and shared physical sessions. Refresh EV battery-preservation intent and distinguish accepted charging policy from actual charging in responses.
+- Restore the dashboard manual power-limit slider, improve energy-flow contrast, and identify measured solar charging in plan history.
+- Relevant upstream changes were ported or adapted while preserving the private shared-EV and no-paywall boundaries; unavailable vendor-specific and entitlement-only changes were excluded. Architecture and focused private compatibility gates passed. Source release only: no Home Assistant installation, restart, or physical control was performed.
+
 <!-- release: v2.12.1616-nir.4 -->
 
 ## v2.12.1616-nir.4 — maintainer autonomy and reporting
