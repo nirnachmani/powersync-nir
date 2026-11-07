@@ -2952,6 +2952,8 @@ def test_solaredge_curtailment_release_survives_a_reload(marker_persisted):
             for n in ast.parse(source.read_text()).body
             if getattr(n, "name", None) == "async_setup_entry"
         )
+        from ev_lock_test_support import closure_package
+        namespace["__package__"] = closure_package()
         for name in (
             "_persist_solaredge_curtailment_marker",
             "_solaredge_curtailment_write",
@@ -3020,6 +3022,8 @@ def test_solaredge_curtailment_records_ownership_across_a_restart():
             for n in ast.parse(source.read_text()).body
             if getattr(n, "name", None) == "async_setup_entry"
         )
+        from ev_lock_test_support import closure_package
+        namespace["__package__"] = closure_package()
         for name in (
             "_persist_solaredge_curtailment_marker",
             "_solaredge_curtailment_write",

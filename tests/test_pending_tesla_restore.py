@@ -60,7 +60,9 @@ class _Store:
 
 def _build_persist_helper(store: _Store, entry_data: dict):
     """exec persist_pending_tesla_restore with its free variables injected."""
+    from ev_lock_test_support import closure_package
     namespace: dict = {
+        "__package__": closure_package(),
         "store": store,
         "hass": SimpleNamespace(data={"power_sync": {"entry-1": entry_data}}),
         "entry": SimpleNamespace(entry_id="entry-1"),

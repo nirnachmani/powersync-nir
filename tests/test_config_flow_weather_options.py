@@ -706,7 +706,9 @@ def test_options_flow_capacity_save_round_trips_through_shared_vehicle_store():
         async def async_save(self):
             self.saves += 1
     store = Store()
+    settings_store = SimpleNamespace()
     flow = SimpleNamespace(_get_shared_capacity_store=lambda: store,
+                           _get_shared_schedule_store=lambda: settings_store,
                            _save_ev_options=lambda data: {"options": data})
     data = {
         "generic_charger_enabled": True,
@@ -747,7 +749,9 @@ def test_options_capacity_omission_preserves_existing_vehicle_capacity():
         ]}
         async def async_save(self):
             pass
+    settings_store = SimpleNamespace()
     flow = SimpleNamespace(_get_shared_capacity_store=lambda: Store(),
+                           _get_shared_schedule_store=lambda: settings_store,
                            _save_ev_options=lambda data: {"options": data})
     base = {"generic_charger_enabled": True,
             "shared_loadpoint_connected_vehicle_entity": "sensor.connected_ev",
@@ -947,7 +951,7 @@ def test_ev_charging_sigenergy_charger_slave_id_allows_247():
 
 def test_vehicle_config_creation_preserves_sigenergy_fields():
     source = INIT_PATH.read_text()
-    method = _init_class_method("VehicleChargingConfigView", "post")
+    method = _init_class_method("VehicleChargingConfigView", "_post_locked")
     method_source = ast.get_source_segment(source, method)
 
     assert method_source is not None

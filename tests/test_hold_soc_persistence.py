@@ -103,6 +103,8 @@ def test_persist_force_mode_state_hold_soc_round_trip_writes_expected_blob():
             "brand": "tesla",
         },
     }
+    from ev_lock_test_support import closure_package
+    namespace["__package__"] = closure_package()
     exec(source, namespace)
     asyncio.run(namespace["persist_force_mode_state"]())
 
@@ -205,6 +207,8 @@ def test_restore_force_mode_from_persistence_hold_soc_future_expiry_rearms_timer
             error=lambda msg, *a, **k: errors.append(msg),
         ),
     }
+    from ev_lock_test_support import closure_package
+    namespace["__package__"] = closure_package()
     exec(source, namespace)
     asyncio.run(namespace["restore_force_mode_from_persistence"]())
 
@@ -298,6 +302,8 @@ def test_restore_force_mode_from_persistence_hold_soc_expired_restores_normal():
             error=lambda msg, *a, **k: errors.append(msg),
         ),
     }
+    from ev_lock_test_support import closure_package
+    namespace["__package__"] = closure_package()
     exec(source, namespace)
     asyncio.run(namespace["restore_force_mode_from_persistence"]())
 

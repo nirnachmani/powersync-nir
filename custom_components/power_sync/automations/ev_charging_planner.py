@@ -4825,14 +4825,25 @@ async def save_shared_auto_schedule_price_caps(store, updates: dict[str, float])
             raise ValueError("Invalid logical EV price ceiling")
         validated[profile_id] = price
 
-    stored = await store.async_load() or {}
-    schedules = dict(stored.get("auto_schedule_settings", {}))
-    for profile_id, price in validated.items():
-        existing = schedules.get(profile_id)
-        if existing is None:
-            existing = AutoScheduleSettings(vehicle_id=profile_id).to_dict()
-        schedules[profile_id] = {**existing, "max_grid_price_cents": price}
-    await store.async_save({**stored, "auto_schedule_settings": schedules})
+    from .ev_store_lock import run_ev_store_transaction
+
+    generations = vars(store).setdefault("_power_sync_ev_generations", {})
+    captured = {profile_id: generations.get(profile_id, 0) for profile_id in validated}
+
+    async def save():
+        if any(generations.get(profile_id, 0) != generation
+               for profile_id, generation in captured.items()):
+            raise RuntimeError("Logical EV was deleted while saving price ceilings")
+        stored = await store.async_load() or {}
+        schedules = dict(stored.get("auto_schedule_settings", {}))
+        for profile_id, price in validated.items():
+            existing = schedules.get(profile_id)
+            if existing is None:
+                existing = AutoScheduleSettings(vehicle_id=profile_id).to_dict()
+            schedules[profile_id] = {**existing, "max_grid_price_cents": price}
+        await store.async_save({**stored, "auto_schedule_settings": schedules})
+
+    await run_ev_store_transaction(store, save)
 
 
 @dataclass
@@ -5458,7 +5469,14 @@ class AutoScheduleExecutor:
             _LOGGER.error(f"Failed to load auto-schedule settings: {e}")
 
     async def save_settings(self, store) -> None:
-        """Save settings to storage."""
+        """Save settings to storage under the EV transaction lock."""
+        from .ev_store_lock import run_ev_store_transaction
+
+        await run_ev_store_transaction(
+            store, lambda: AutoScheduleExecutor._save_settings_locked(self, store)
+        )
+
+    async def _save_settings_locked(self, store) -> None:
         try:
             stored_data = await store.async_load() if hasattr(store, 'async_load') else {}
             if not stored_data:
@@ -5763,6 +5781,13 @@ class AutoScheduleExecutor:
         if self._store is None:
             return
 
+        from .ev_store_lock import run_ev_store_transaction
+
+        await run_ev_store_transaction(
+            self._store, lambda: AutoScheduleExecutor._force_save_cached_soc_locked(self)
+        )
+
+    async def _force_save_cached_soc_locked(self) -> None:
         try:
             stored_data = await self._store.async_load() if hasattr(self._store, 'async_load') else {}
             if not stored_data:

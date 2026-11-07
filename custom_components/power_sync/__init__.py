@@ -8259,9 +8259,11 @@ class BatteryHealthView(HomeAssistantView):
 
         store = entry_data.get("store")
         if persist and store:
-            stored_data = await store.async_load() or {}
-            stored_data["battery_health"] = battery_health_data
-            await store.async_save(stored_data)
+            from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+            async with ev_store_lock(store):
+                stored_data = await store.async_load() or {}
+                stored_data["battery_health"] = battery_health_data
+                await cancellation_safe_save(store.async_save(stored_data))
 
         from homeassistant.helpers.dispatcher import async_dispatcher_send
         async_dispatcher_send(
@@ -9180,9 +9182,11 @@ class BatteryHealthView(HomeAssistantView):
             # Persist to storage
             store = self._hass.data[DOMAIN][entry.entry_id].get("store")
             if store:
-                stored_data = await store.async_load() or {}
-                stored_data["battery_health"] = battery_health_data
-                await store.async_save(stored_data)
+                from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+                async with ev_store_lock(store):
+                    stored_data = await store.async_load() or {}
+                    stored_data["battery_health"] = battery_health_data
+                    await cancellation_safe_save(store.async_save(stored_data))
                 _LOGGER.debug("Battery health persisted to storage")
 
             # Notify sensor via dispatcher
@@ -12914,9 +12918,11 @@ async def fetch_tesla_tariff_schedule(hass: HomeAssistant, entry: ConfigEntry) -
             store = entry_data.get("store")
             if store:
                 try:
-                    stored_data = await store.async_load() or {}
-                    stored_data["last_restorable_tesla_tariff"] = tariff
-                    await store.async_save(stored_data)
+                    from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+                    async with ev_store_lock(store):
+                        stored_data = await store.async_load() or {}
+                        stored_data["last_restorable_tesla_tariff"] = tariff
+                        await cancellation_safe_save(store.async_save(stored_data))
                 except Exception as store_err:
                     _LOGGER.debug("Could not persist last restorable Tesla tariff: %s", store_err)
             _LOGGER.info(f"✅ Tesla tariff schedule stored with {len(tou_periods)} TOU periods")
@@ -17227,6 +17233,49 @@ class SolarSurplusStatusView(HomeAssistantView):
             }, status=500)
 
 
+async def _update_powerwall_store(store, changes, *, is_current=None, remove=(), expected=None, verify=False) -> bool:
+    """Merge entry fields under one lock; stale owners cannot commit cleanup."""
+    import copy
+    changes = changes if callable(changes) else copy.deepcopy(changes)
+    lock = vars(store).get("_power_sync_update_lock")
+    if lock is None:
+        lock = store._power_sync_update_lock = asyncio.Lock()
+    async def transaction():
+        async with lock:
+            if is_current is not None and not is_current():
+                return False
+            data = dict(await store.async_load() or {})
+            if is_current is not None and not is_current():
+                return False
+            if expected is not None and any(data.get(key) != value for key, value in expected.items()):
+                return False
+            update = changes(copy.deepcopy(data)) if callable(changes) else changes
+            if update is None:
+                return False
+            data.update(copy.deepcopy(update))
+            for key in remove:
+                data.pop(key, None)
+            await store.async_save(data)
+            if verify:
+                # HA can suppress write errors or defer a shutdown save. A
+                # separate reader cannot see the writer's pending buffer.
+                reader = Store(store.hass, store.version, store.key, minor_version=store.minor_version)
+                if await reader.async_load() != data:
+                    return False
+            return is_current is None or is_current()
+    # Cancelling a foreground owner must not release this lock while HA's
+    # executor is still writing its whole-store snapshot.
+    tasks = vars(store).setdefault("_power_sync_update_tasks", set())
+    task = asyncio.create_task(transaction())
+    tasks.add(task)
+    def finished(done):
+        tasks.discard(done)
+        if not done.cancelled():
+            done.exception()
+    task.add_done_callback(finished)
+    return await asyncio.shield(task)
+
+
 class VehicleChargingConfigView(HomeAssistantView):
     """HTTP view to manage vehicle charging configurations."""
 
@@ -17385,6 +17434,10 @@ class VehicleChargingConfigView(HomeAssistantView):
 
             for entry_id, vehicles in list(_dynamic_ev_state.items()):
                 for vid, state in list(vehicles.items()):
+                    # A logical profile is not the physical runtime key. Keep
+                    # its active runtime and timers intact: fencing alone does
+                    # not dispatch a stop or create a recoverable pending stop.
+                    # Normal shared handoff/stop policy owns physical cleanup.
                     if vid in vehicle_ids or self._dynamic_state_matches_config(state, removed_config):
                         vehicles.pop(vid, None)
                         runtime_ids.add(vid)
@@ -17501,6 +17554,18 @@ class VehicleChargingConfigView(HomeAssistantView):
             }, status=500)
 
     async def post(self, request: web.Request) -> web.Response:
+        """Serialize profile edits with deletion and finish started writes."""
+        from .automations.ev_store_lock import run_ev_store_transaction
+
+        profile_store = self._get_store()
+        entry_data = next((entry for entry in self._hass.data.get(DOMAIN, {}).values()
+                           if isinstance(entry, dict) and entry.get("automation_store") is profile_store), None)
+        settings_store = entry_data.get("store") if entry_data else None
+        if settings_store is None:
+            return await self._post_locked(request)
+        return await run_ev_store_transaction(settings_store, lambda: self._post_locked(request))
+
+    async def _post_locked(self, request: web.Request) -> web.Response:
         """Handle POST request - update vehicle charging config."""
         try:
             data = await request.json()
@@ -17950,7 +18015,72 @@ class VehicleChargingConfigView(HomeAssistantView):
                 "error": str(e)
             }, status=500)
 
+    async def _remove_persisted_vehicle_schedule(self, vehicle_ids: set[str]) -> bool:
+        """Retire exact schedule IDs from the entry store used at restart.
+
+        This is separate from AutomationStore. Prune under the shared store
+        lock rather than saving an executor snapshot over other entry fields.
+        Also permits retrying a deletion completed by an older version that
+        removed the profile but left its schedule behind.
+        """
+        removed = False
+        matched = False
+        profile_store = self._get_store()
+        for entry_data in self._hass.data.get(DOMAIN, {}).values():
+            if (
+                not isinstance(entry_data, dict)
+                or entry_data.get("automation_store") is not profile_store
+            ):
+                continue
+            matched = True
+            settings_store = entry_data.get("store")
+            if settings_store is None:
+                raise RuntimeError("Vehicle schedule storage not available")
+
+            def prune(data):
+                changes = {}
+                for key in ("auto_schedule_settings", "cached_vehicle_soc"):
+                    values = data.get(key)
+                    if isinstance(values, dict) and vehicle_ids.intersection(values):
+                        changes[key] = {
+                            vid: value for vid, value in values.items()
+                            if vid not in vehicle_ids
+                        }
+                return changes or None
+
+            if await _update_powerwall_store(settings_store, prune):
+                removed = True
+        if not matched:
+            raise RuntimeError("Vehicle schedule storage not available")
+        return removed
+
     async def delete(self, request: web.Request) -> web.Response:
+        """Serialize deletion with planner and runtime persistence."""
+        from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+
+        profile_store = self._get_store()
+        entry_data = next((entry for entry in self._hass.data.get(DOMAIN, {}).values()
+                           if isinstance(entry, dict) and entry.get("automation_store") is profile_store), None)
+        settings_store = entry_data.get("store") if entry_data else None
+        if settings_store is None:
+            return await self._delete_locked(request)
+        async def transaction():
+            async with ev_store_lock(settings_store):
+                return await self._delete_locked(request)
+
+        # A cancelled HTTP request must not release the EV lock while the
+        # shielded whole-store write or subsequent profile cleanup continues.
+        tasks = vars(settings_store).setdefault("_power_sync_ev_delete_tasks", set())
+        task = asyncio.create_task(transaction())
+        tasks.add(task)
+        def finished(done):
+            tasks.discard(done)
+            if not done.cancelled():
+                done.exception()
+        task.add_done_callback(finished)
+        return await asyncio.shield(task)
+
+    async def _delete_locked(self, request: web.Request) -> web.Response:
         """Handle DELETE request - remove a vehicle charging config."""
         try:
             vehicle_id = request.query.get("vehicle_id")
@@ -17975,30 +18105,52 @@ class VehicleChargingConfigView(HomeAssistantView):
             )
             updated = [c for c in vehicle_configs if c.get("vehicle_id") != vehicle_id]
 
-            if len(updated) == len(vehicle_configs):
-                return web.json_response({
-                    "success": False,
-                    "error": f"Vehicle {vehicle_id} not found"
-                }, status=404)
-
+            # Logical profiles share physical charger identities and runtime.
+            from .automations.shared_loadpoint import PROFILE_A_ID, PROFILE_B_ID
+            logical_profile = vehicle_id in (PROFILE_A_ID, PROFILE_B_ID)
             cleanup_ids = {vehicle_id}
-            if removed_config:
+            if removed_config and not logical_profile:
                 if removed_config.get("charger_type") == "generic":
                     cleanup_ids.add("generic_ev")
                 if removed_config.get("ocpp_charger_id"):
                     cleanup_ids.add(f"ocpp_{removed_config['ocpp_charger_id']}")
 
-            store._data["vehicle_charging_configs"] = updated
+            # Retire the durable schedule before removing the retryable profile.
+            removed_schedule = await self._remove_persisted_vehicle_schedule(cleanup_ids)
+            if len(updated) == len(vehicle_configs) and not removed_schedule:
+                return web.json_response({
+                    "success": False,
+                    "error": f"Vehicle {vehicle_id} not found"
+                }, status=404)
+
+            import copy
+            old_data = store._data
+            new_data = copy.deepcopy(old_data)
+            new_data["vehicle_charging_configs"] = updated
             for key in ("auto_schedule_settings", "cached_vehicle_soc"):
-                value = store._data.get(key)
+                value = new_data.get(key)
                 if isinstance(value, dict):
                     for cleanup_id in cleanup_ids:
                         value.pop(cleanup_id, None)
-            await store.async_save()
+            store._data = new_data
+            try:
+                await store.async_save()
+            except BaseException:
+                if store._data is new_data:
+                    store._data = old_data
+                raise
+
+            for entry_data in self._hass.data.get(DOMAIN, {}).values():
+                if isinstance(entry_data, dict) and entry_data.get("automation_store") is store:
+                    settings_store = entry_data.get("store")
+                    if settings_store is not None:
+                        generations = vars(settings_store).setdefault("_power_sync_ev_generations", {})
+                        for cleanup_id in cleanup_ids:
+                            generations[cleanup_id] = generations.get(cleanup_id, 0) + 1
 
             cleanup_changes = await self._cleanup_vehicle_runtime_state(
                 cleanup_ids,
-                removed_config,
+                None if logical_profile else removed_config,
             )
 
             _LOGGER.info(
@@ -22224,12 +22376,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if not store:
             return
         try:
-            stored_data = await store.async_load() or {}
-            if curtailed:
-                stored_data["solaredge_curtailment_owned"] = True
-            else:
-                stored_data.pop("solaredge_curtailment_owned", None)
-            await store.async_save(stored_data)
+            from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+            async with ev_store_lock(store):
+                stored_data = await store.async_load() or {}
+                if curtailed:
+                    stored_data["solaredge_curtailment_owned"] = True
+                else:
+                    stored_data.pop("solaredge_curtailment_owned", None)
+                await cancellation_safe_save(store.async_save(stored_data))
         except Exception as err:
             _LOGGER.warning(
                 "Could not persist SolarEdge curtailment ownership marker: %s", err
@@ -24610,9 +24764,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     pass
             if current_fw != last_known_firmware:
                 last_known_firmware = current_fw
-                sd = await store.async_load() or {}
-                sd["last_known_firmware"] = current_fw
-                await store.async_save(sd)
+                from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+                async with ev_store_lock(store):
+                    sd = await store.async_load() or {}
+                    sd["last_known_firmware"] = current_fw
+                    await cancellation_safe_save(store.async_save(sd))
 
         def _on_coordinator_update():
             """Listener for coordinator data updates."""
@@ -24640,9 +24796,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         try:
             store = hass.data[DOMAIN][entry.entry_id]["store"]
             # Preserve other stored data (like battery_health)
-            stored_data = await store.async_load() or {}
-            stored_data["cached_export_rule"] = new_rule
-            await store.async_save(stored_data)
+            from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+            async with ev_store_lock(store):
+                stored_data = await store.async_load() or {}
+                stored_data["cached_export_rule"] = new_rule
+                await cancellation_safe_save(store.async_save(stored_data))
             _LOGGER.debug(f"Persisted cached_export_rule='{new_rule}' to storage")
         except Exception as err:
             _LOGGER.warning(f"Could not persist cached_export_rule='{new_rule}' to storage: {err}")
@@ -29222,13 +29380,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             snapshot_getter = getattr(controller, "get_grid_export_restore_state", None)
             if store and callable(snapshot_getter):
                 try:
-                    stored_data = await store.async_load() or {}
-                    snapshot = snapshot_getter()
-                    if snapshot:
-                        stored_data["goodwe_curtailment_restore_state"] = snapshot
-                    else:
-                        stored_data.pop("goodwe_curtailment_restore_state", None)
-                    await store.async_save(stored_data)
+                    from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+                    async with ev_store_lock(store):
+                        stored_data = await store.async_load() or {}
+                        snapshot = snapshot_getter()
+                        if snapshot:
+                            stored_data["goodwe_curtailment_restore_state"] = snapshot
+                        else:
+                            stored_data.pop("goodwe_curtailment_restore_state", None)
+                        await cancellation_safe_save(store.async_save(stored_data))
                 except Exception as err:
                     _LOGGER.warning(
                         "Could not persist GoodWe curtailment restore state: %s", err
@@ -29352,13 +29512,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if not store or not callable(snapshot_getter):
                 return
             try:
-                stored_data = await store.async_load() or {}
-                snapshot = snapshot_getter()
-                if snapshot:
-                    stored_data["goodwe_curtailment_restore_state"] = snapshot
-                else:
-                    stored_data.pop("goodwe_curtailment_restore_state", None)
-                await store.async_save(stored_data)
+                from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+                async with ev_store_lock(store):
+                    stored_data = await store.async_load() or {}
+                    snapshot = snapshot_getter()
+                    if snapshot:
+                        stored_data["goodwe_curtailment_restore_state"] = snapshot
+                    else:
+                        stored_data.pop("goodwe_curtailment_restore_state", None)
+                    await cancellation_safe_save(store.async_save(stored_data))
             except Exception as err:
                 _LOGGER.warning(
                     "Could not persist GoodWe curtailment restore state: %s", err
@@ -30891,9 +31053,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         hass.data[DOMAIN][entry.entry_id]["last_restorable_tesla_tariff"] = restorable_tariff
         try:
-            stored_data = await store.async_load() or {}
-            stored_data["last_restorable_tesla_tariff"] = restorable_tariff
-            await store.async_save(stored_data)
+            from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+            async with ev_store_lock(store):
+                stored_data = await store.async_load() or {}
+                stored_data["last_restorable_tesla_tariff"] = restorable_tariff
+                await cancellation_safe_save(store.async_save(stored_data))
         except Exception as store_err:
             _LOGGER.debug("Could not persist Tesla tariff baseline from %s: %s", source, store_err)
         return restorable_tariff
@@ -30953,11 +31117,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         for site_id, _token, _provider in site_configs:
             _remember_tesla_grid_charging_preference(site_id, enabled)
         try:
-            data = await store.async_load() or {}
-            data["tesla_grid_charging_preferences"] = dict(
-                tesla_grid_charging_preferences
-            )
-            await store.async_save(data)
+            from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+            async with ev_store_lock(store):
+                data = await store.async_load() or {}
+                data["tesla_grid_charging_preferences"] = dict(
+                    tesla_grid_charging_preferences
+                )
+                await cancellation_safe_save(store.async_save(data))
         except Exception as store_err:
             _LOGGER.warning(
                 "Could not persist Tesla grid charging preference from %s: %s",
@@ -31198,18 +31364,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         means the next startup can finish the restore instead of leaving the
         hardware in a half-restored state with nothing tracking it.
         """
-        stored_data = await store.async_load() or {}
-        marker = (
-            {
-                "reason": reason,
-                "recorded_at": dt_util.utcnow().isoformat(),
-                "_skip_backup_reserve_restore": bool(skip_backup_reserve_restore),
-            }
-            if reason
-            else None
-        )
-        stored_data["pending_tesla_restore"] = marker
-        await store.async_save(stored_data)
+        from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+        async with ev_store_lock(store):
+            stored_data = await store.async_load() or {}
+            marker = (
+                {
+                    "reason": reason,
+                    "recorded_at": dt_util.utcnow().isoformat(),
+                    "_skip_backup_reserve_restore": bool(skip_backup_reserve_restore),
+                }
+                if reason
+                else None
+            )
+            stored_data["pending_tesla_restore"] = marker
+            await cancellation_safe_save(store.async_save(stored_data))
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id)
         if isinstance(entry_data, dict):
             entry_data["pending_tesla_restore"] = marker
@@ -31224,91 +31392,93 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def persist_force_mode_state() -> None:
         """Persist current force charge/discharge/hold state to storage."""
-        stored_data = await store.async_load() or {}
+        from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+        async with ev_store_lock(store):
+            stored_data = await store.async_load() or {}
 
-        # Only save what's needed to restore after restart
-        state_to_save = None
-        if force_charge_state["active"]:
-            state_to_save = {
-                "mode": "charge",
-                "expires_at": force_charge_state["expires_at"].isoformat() if force_charge_state["expires_at"] else None,
-                "hardware_expires_at": force_charge_state["hardware_expires_at"].isoformat() if force_charge_state.get("hardware_expires_at") else None,
-                "duration": force_charge_state.get("duration"),
-                "power_w": _coerce_force_power_w(force_charge_state.get("power_w", 0)),
-                "source": force_charge_state.get("source", "user"),
-                "saved_tariff": _select_restorable_tesla_tariff(force_charge_state["saved_tariff"]),
-                "saved_operation_mode": force_charge_state["saved_operation_mode"],
-                "saved_backup_reserve": force_charge_state["saved_backup_reserve"],
-                "saved_grid_charging_enabled": force_charge_state.get("saved_grid_charging_enabled"),
-                "_skip_backup_reserve_restore": bool(
-                    force_charge_state.get("_skip_backup_reserve_restore")
-                ),
-            }
-        elif force_discharge_state["active"]:
-            state_to_save = {
-                "mode": "discharge",
-                "expires_at": force_discharge_state["expires_at"].isoformat() if force_discharge_state["expires_at"] else None,
-                "hardware_expires_at": force_discharge_state["hardware_expires_at"].isoformat() if force_discharge_state.get("hardware_expires_at") else None,
-                "duration": force_discharge_state.get("duration"),
-                "power_w": _coerce_force_power_w(force_discharge_state.get("power_w", 0)),
-                "battery_discharge_w": _coerce_force_power_w(
-                    force_discharge_state.get("battery_discharge_w", 0)
-                ),
-                "source": force_discharge_state.get("source", "user"),
-                "saved_tariff": _select_restorable_tesla_tariff(force_discharge_state["saved_tariff"]),
-                "saved_operation_mode": force_discharge_state["saved_operation_mode"],
-                "saved_backup_reserve": force_discharge_state["saved_backup_reserve"],
-                "saved_export_rule": force_discharge_state["saved_export_rule"],
-                "saved_grid_charging_enabled": force_discharge_state.get("saved_grid_charging_enabled"),
-                "_skip_backup_reserve_restore": bool(
-                    force_discharge_state.get("_skip_backup_reserve_restore")
-                ),
-            }
-        elif hold_soc_state["active"]:
-            # OB-5: Hold SoC is a third force-like mode (battery locked in
-            # backup/standby) and must be persisted the same way force
-            # charge/discharge are, or a restart/reload mid-hold leaves the
-            # hardware stuck in standby with nothing tracking it. Without
-            # this branch, state_to_save stays None here and the write below
-            # clobbers any previously-persisted force state with None.
-            state_to_save = {
-                "mode": "hold_soc",
-                "expires_at": hold_soc_state["expires_at"].isoformat() if hold_soc_state.get("expires_at") else None,
-                "locked_soc": hold_soc_state.get("locked_soc"),
-                "saved_operation_mode": hold_soc_state.get("saved_operation_mode"),
-                "saved_backup_reserve": hold_soc_state.get("saved_backup_reserve"),
-                "brand": hold_soc_state.get("brand"),
-            }
-        elif self_consumption_state["active"]:
-            state_to_save = {
-                "mode": "self_consumption",
-                "expires_at": self_consumption_state["expires_at"].isoformat() if self_consumption_state.get("expires_at") else None,
-                "duration": self_consumption_state.get("duration"),
-                "engaged_at": self_consumption_state["engaged_at"].isoformat() if self_consumption_state.get("engaged_at") else None,
-                "source": self_consumption_state.get("source", "user"),
-            }
+            # Only save what's needed to restore after restart
+            state_to_save = None
+            if force_charge_state["active"]:
+                state_to_save = {
+                    "mode": "charge",
+                    "expires_at": force_charge_state["expires_at"].isoformat() if force_charge_state["expires_at"] else None,
+                    "hardware_expires_at": force_charge_state["hardware_expires_at"].isoformat() if force_charge_state.get("hardware_expires_at") else None,
+                    "duration": force_charge_state.get("duration"),
+                    "power_w": _coerce_force_power_w(force_charge_state.get("power_w", 0)),
+                    "source": force_charge_state.get("source", "user"),
+                    "saved_tariff": _select_restorable_tesla_tariff(force_charge_state["saved_tariff"]),
+                    "saved_operation_mode": force_charge_state["saved_operation_mode"],
+                    "saved_backup_reserve": force_charge_state["saved_backup_reserve"],
+                    "saved_grid_charging_enabled": force_charge_state.get("saved_grid_charging_enabled"),
+                    "_skip_backup_reserve_restore": bool(
+                        force_charge_state.get("_skip_backup_reserve_restore")
+                    ),
+                }
+            elif force_discharge_state["active"]:
+                state_to_save = {
+                    "mode": "discharge",
+                    "expires_at": force_discharge_state["expires_at"].isoformat() if force_discharge_state["expires_at"] else None,
+                    "hardware_expires_at": force_discharge_state["hardware_expires_at"].isoformat() if force_discharge_state.get("hardware_expires_at") else None,
+                    "duration": force_discharge_state.get("duration"),
+                    "power_w": _coerce_force_power_w(force_discharge_state.get("power_w", 0)),
+                    "battery_discharge_w": _coerce_force_power_w(
+                        force_discharge_state.get("battery_discharge_w", 0)
+                    ),
+                    "source": force_discharge_state.get("source", "user"),
+                    "saved_tariff": _select_restorable_tesla_tariff(force_discharge_state["saved_tariff"]),
+                    "saved_operation_mode": force_discharge_state["saved_operation_mode"],
+                    "saved_backup_reserve": force_discharge_state["saved_backup_reserve"],
+                    "saved_export_rule": force_discharge_state["saved_export_rule"],
+                    "saved_grid_charging_enabled": force_discharge_state.get("saved_grid_charging_enabled"),
+                    "_skip_backup_reserve_restore": bool(
+                        force_discharge_state.get("_skip_backup_reserve_restore")
+                    ),
+                }
+            elif hold_soc_state["active"]:
+                # OB-5: Hold SoC is a third force-like mode (battery locked in
+                # backup/standby) and must be persisted the same way force
+                # charge/discharge are, or a restart/reload mid-hold leaves the
+                # hardware stuck in standby with nothing tracking it. Without
+                # this branch, state_to_save stays None here and the write below
+                # clobbers any previously-persisted force state with None.
+                state_to_save = {
+                    "mode": "hold_soc",
+                    "expires_at": hold_soc_state["expires_at"].isoformat() if hold_soc_state.get("expires_at") else None,
+                    "locked_soc": hold_soc_state.get("locked_soc"),
+                    "saved_operation_mode": hold_soc_state.get("saved_operation_mode"),
+                    "saved_backup_reserve": hold_soc_state.get("saved_backup_reserve"),
+                    "brand": hold_soc_state.get("brand"),
+                }
+            elif self_consumption_state["active"]:
+                state_to_save = {
+                    "mode": "self_consumption",
+                    "expires_at": self_consumption_state["expires_at"].isoformat() if self_consumption_state.get("expires_at") else None,
+                    "duration": self_consumption_state.get("duration"),
+                    "engaged_at": self_consumption_state["engaged_at"].isoformat() if self_consumption_state.get("engaged_at") else None,
+                    "source": self_consumption_state.get("source", "user"),
+                }
 
-        if state_to_save and state_to_save.get("mode") in ("charge", "discharge"):
-            solax_coord = (
-                hass.data.get(DOMAIN, {})
-                .get(entry.entry_id, {})
-                .get("solax_coordinator")
+            if state_to_save and state_to_save.get("mode") in ("charge", "discharge"):
+                solax_coord = (
+                    hass.data.get(DOMAIN, {})
+                    .get(entry.entry_id, {})
+                    .get("solax_coordinator")
+                )
+                get_restore_state = getattr(
+                    solax_coord,
+                    "get_force_restore_state",
+                    None,
+                )
+                if callable(get_restore_state):
+                    solax_restore_state = get_restore_state()
+                    if solax_restore_state:
+                        state_to_save["solax_restore_state"] = solax_restore_state
+
+            stored_data["force_mode_state"] = state_to_save
+            stored_data["tesla_grid_charging_preferences"] = dict(
+                tesla_grid_charging_preferences
             )
-            get_restore_state = getattr(
-                solax_coord,
-                "get_force_restore_state",
-                None,
-            )
-            if callable(get_restore_state):
-                solax_restore_state = get_restore_state()
-                if solax_restore_state:
-                    state_to_save["solax_restore_state"] = solax_restore_state
-
-        stored_data["force_mode_state"] = state_to_save
-        stored_data["tesla_grid_charging_preferences"] = dict(
-            tesla_grid_charging_preferences
-        )
-        await store.async_save(stored_data)
+            await cancellation_safe_save(store.async_save(stored_data))
         try:
             manual_signature = _manual_projection_signature(state_to_save)
             if manual_signature != _last_manual_projection_signature[0]:
@@ -31631,9 +31801,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     if restore_completed:
                         _LOGGER.info("✅ Restored normal operation after expired self-consumption override")
-                        stored_data = await store.async_load() or {}
-                        stored_data["force_mode_state"] = None
-                        await store.async_save(stored_data)
+                        from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+                        async with ev_store_lock(store):
+                            stored_data = await store.async_load() or {}
+                            stored_data["force_mode_state"] = None
+                            await cancellation_safe_save(store.async_save(stored_data))
                     else:
                         _LOGGER.warning(
                             "Expired self-consumption cleanup remains stored "
@@ -31724,9 +31896,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         )
 
                     if not hold_soc_state.get("active"):
-                        stored_data = await store.async_load() or {}
-                        stored_data["force_mode_state"] = None
-                        await store.async_save(stored_data)
+                        from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+                        async with ev_store_lock(store):
+                            stored_data = await store.async_load() or {}
+                            stored_data["force_mode_state"] = None
+                            await cancellation_safe_save(store.async_save(stored_data))
                 else:
                     # Hold SoC is still active - the inverter/gateway itself
                     # stays in standby/backup mode across a restart (that's
@@ -31852,9 +32026,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return
                 if persisted_source == "optimizer":
                     hass.data[DOMAIN][entry.entry_id]["optimizer_force_restart_restore_pending"] = False
-                stored_data = await store.async_load() or {}
-                stored_data["force_mode_state"] = None
-                await store.async_save(stored_data)
+                from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+                async with ev_store_lock(store):
+                    stored_data = await store.async_load() or {}
+                    stored_data["force_mode_state"] = None
+                    await cancellation_safe_save(store.async_save(stored_data))
                 return
 
             if persisted_source == "optimizer":
@@ -31908,9 +32084,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 hass.data[DOMAIN][entry.entry_id]["optimizer_force_restart_restore_pending"] = False
 
-                stored_data = await store.async_load() or {}
-                stored_data["force_mode_state"] = None
-                await store.async_save(stored_data)
+                from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+                async with ev_store_lock(store):
+                    stored_data = await store.async_load() or {}
+                    stored_data["force_mode_state"] = None
+                    await cancellation_safe_save(store.async_save(stored_data))
                 return
 
             if now >= expires_at:
@@ -31947,9 +32125,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 if restore_completed:
                     _LOGGER.info("✅ Restored normal operation after expired force mode")
-                    stored_data = await store.async_load() or {}
-                    stored_data["force_mode_state"] = None
-                    await store.async_save(stored_data)
+                    from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+                    async with ev_store_lock(store):
+                        stored_data = await store.async_load() or {}
+                        stored_data["force_mode_state"] = None
+                        await cancellation_safe_save(store.async_save(stored_data))
                 else:
                     _LOGGER.warning(
                         "Expired persisted force %s cleanup remains stored "
@@ -32008,9 +32188,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 "_allow_monitoring_restore": True,
                             }
                         ):
-                            stored_data = await store.async_load() or {}
-                            stored_data["force_mode_state"] = None
-                            await store.async_save(stored_data)
+                            from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+                            async with ev_store_lock(store):
+                                stored_data = await store.async_load() or {}
+                                stored_data["force_mode_state"] = None
+                                await cancellation_safe_save(store.async_save(stored_data))
                         return
                     try:
                         remaining_min = max(
@@ -32098,9 +32280,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 "_allow_monitoring_restore": True,
                             }
                         ):
-                            stored_data = await store.async_load() or {}
-                            stored_data["force_mode_state"] = None
-                            await store.async_save(stored_data)
+                            from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+                            async with ev_store_lock(store):
+                                stored_data = await store.async_load() or {}
+                                stored_data["force_mode_state"] = None
+                                await cancellation_safe_save(store.async_save(stored_data))
                         return
                     try:
                         remaining_min = max(
@@ -40720,10 +40904,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     try:
                         _store = entry_data.get("store")
                         if _store:
-                            _sd = await _store.async_load() or {}
-                            _sd["manual_export_override"] = True
-                            _sd["manual_export_rule"] = rule
-                            await _store.async_save(_sd)
+                            from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+                            async with ev_store_lock(_store):
+                                _sd = await _store.async_load() or {}
+                                _sd["manual_export_override"] = True
+                                _sd["manual_export_rule"] = rule
+                                await cancellation_safe_save(_store.async_save(_sd))
                     except Exception as _persist_err:
                         _LOGGER.debug("Could not persist manual_export_override: %s", _persist_err)
 
@@ -40741,10 +40927,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             try:
                 _store = entry_data.get("store")
                 if _store:
-                    _sd = await _store.async_load() or {}
-                    _sd["manual_export_override"] = False
-                    _sd["manual_export_rule"] = None
-                    await _store.async_save(_sd)
+                    from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+                    async with ev_store_lock(_store):
+                        _sd = await _store.async_load() or {}
+                        _sd["manual_export_override"] = False
+                        _sd["manual_export_rule"] = None
+                        await cancellation_safe_save(_store.async_save(_sd))
             except Exception as _persist_err:
                 _LOGGER.debug("Could not clear persisted manual_export_override: %s", _persist_err)
             _LOGGER.info("✅ Manual export override cleared")
@@ -40965,12 +41153,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if store is None:
             return
         try:
-            data = await store.async_load() or {}
-            if payload is None:
-                data.pop("max_backup_schedule", None)
-            else:
-                data["max_backup_schedule"] = payload
-            await store.async_save(data)
+            from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+            async with ev_store_lock(store):
+                data = await store.async_load() or {}
+                if payload is None:
+                    data.pop("max_backup_schedule", None)
+                else:
+                    data["max_backup_schedule"] = payload
+                await cancellation_safe_save(store.async_save(data))
         except Exception as err:
             _LOGGER.warning("Failed to persist max_backup_schedule: %s", err)
 
@@ -42493,9 +42683,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Persist to storage
         store = hass.data[DOMAIN][entry.entry_id].get("store")
         if store:
-            stored_data = await store.async_load() or {}
-            stored_data["battery_health"] = battery_health_data
-            await store.async_save(stored_data)
+            from .automations.ev_store_lock import ev_store_lock, cancellation_safe_save
+            async with ev_store_lock(store):
+                stored_data = await store.async_load() or {}
+                stored_data["battery_health"] = battery_health_data
+                await cancellation_safe_save(store.async_save(stored_data))
             _LOGGER.debug("Battery health persisted to storage")
 
         # Notify sensor via dispatcher

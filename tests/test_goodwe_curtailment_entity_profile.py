@@ -173,6 +173,8 @@ def _build_goodwe_curtailment_handler(
         handler_source = handler_source.replace(
             "import time as _time_mod", "_time_mod = _test_time"
         )
+    from ev_lock_test_support import closure_package
+    namespace["__package__"] = closure_package()
     exec(handler_source, namespace)
     exec(_nested_function_source("handle_goodwe_curtailment"), namespace)
     return namespace["handle_goodwe_curtailment"], entry_data, logger, dispatches

@@ -462,8 +462,25 @@ def shared_profile_configs(config_entry: Any) -> list[dict[str, Any]]:
 
 
 async def save_shared_profile_capacities(
-    store: Any, capacities: Mapping[str, Any],
+    store: Any, capacities: Mapping[str, Any], *, settings_store: Any = None,
 ) -> bool:
+    """Serialize options capacity writes with profile deletion when available."""
+    if settings_store is None:
+        return await _save_shared_profile_capacities_locked(store, capacities)
+    from .ev_store_lock import run_ev_store_transaction
+
+    generations = vars(settings_store).setdefault("_power_sync_ev_generations", {})
+    captured = {profile_id: generations.get(profile_id, 0) for profile_id in capacities}
+
+    async def save():
+        if any(generations.get(profile_id, 0) != value for profile_id, value in captured.items()):
+            raise RuntimeError("Logical EV was deleted while saving capacity")
+        return await _save_shared_profile_capacities_locked(store, capacities)
+
+    return await run_ev_store_transaction(settings_store, save)
+
+
+async def _save_shared_profile_capacities_locked(store: Any, capacities: Mapping[str, Any]) -> bool:
     """Save Options capacities to the same vehicle records edited by the app."""
     from .ev_vehicle_capacity import validate_ev_battery_capacity
 

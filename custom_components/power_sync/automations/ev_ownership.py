@@ -345,14 +345,18 @@ async def persist_ev_runtime_state(
     if runtime_store is None or not hasattr(runtime_store, "_data"):
         return
 
-    runtime_store._data["ev_runtime_state"] = _runtime_snapshot(hass, config_entry)
-    save = getattr(runtime_store, "async_save", None)
-    if save is None:
-        return
+    from .ev_store_lock import ev_store_lock, cancellation_safe_save
 
-    result = save()
-    if hasattr(result, "__await__"):
-        await result
+    lock_store = entry.get("store") or runtime_store
+    async with ev_store_lock(lock_store):
+        runtime_store._data["ev_runtime_state"] = _runtime_snapshot(hass, config_entry)
+        save = getattr(runtime_store, "async_save", None)
+        if save is None:
+            return
+
+        result = save()
+        if hasattr(result, "__await__"):
+            await cancellation_safe_save(result)
 
 
 def _schedule_runtime_save(hass: Any, config_entry: Any) -> None:

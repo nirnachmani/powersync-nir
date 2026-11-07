@@ -8409,64 +8409,85 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
 
     async def _save_ev_options_and_capacities(self, ev_input: dict[str, Any]) -> FlowResult:
         """Persist form-only per-EV settings before committing entry options."""
-        from .automations.shared_loadpoint import (
-            PROFILE_A_ID, PROFILE_B_ID, SharedLoadpointBinding,
-            save_shared_profile_capacities,
-        )
-        from .automations.ev_charging_planner import save_shared_auto_schedule_price_caps
+        async def apply_options():
+            nonlocal ev_input
+            from .automations.shared_loadpoint import (
+                PROFILE_A_ID, PROFILE_B_ID, SharedLoadpointBinding,
+                save_shared_profile_capacities,
+            )
+            from .automations.ev_charging_planner import save_shared_auto_schedule_price_caps
 
-        price_fields = (
-            (PROFILE_A_ID, CONF_SHARED_PROFILE_A_PRICE_CAP_FORM),
-            (PROFILE_B_ID, CONF_SHARED_PROFILE_B_PRICE_CAP_FORM),
-        )
-        price_updates = {}
-        if SharedLoadpointBinding.from_options(ev_input) is not None:
-            price_updates = {
-                profile_id: ev_input[key]
-                for profile_id, key in price_fields if key in ev_input
-            }
-            updates = {}
-            for profile_id, capacity_key, clear_key in (
-                (PROFILE_A_ID, CONF_SHARED_PROFILE_A_CAPACITY_FORM, CONF_SHARED_PROFILE_A_CAPACITY_CLEAR_FORM),
-                (PROFILE_B_ID, CONF_SHARED_PROFILE_B_CAPACITY_FORM, CONF_SHARED_PROFILE_B_CAPACITY_CLEAR_FORM),
-            ):
-                if ev_input.get(clear_key):
-                    updates[profile_id] = None
-                elif capacity_key in ev_input:
-                    updates[profile_id] = ev_input[capacity_key]
-            capacity_store = self._get_shared_capacity_store()
-            if updates:
-                if capacity_store is None:
-                    raise RuntimeError("Logical EV vehicle storage is unavailable")
-                from .automations.ev_vehicle_capacity import validate_ev_battery_capacity
-                for capacity in updates.values():
-                    if capacity is not None:
-                        validate_ev_battery_capacity(capacity)
-            if price_updates:
-                store = self._get_shared_schedule_store()
-                if store is None:
-                    raise RuntimeError("Smart Schedule storage is unavailable")
-                await save_shared_auto_schedule_price_caps(store, price_updates)
-                entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
-                executor = entry_data.get("auto_schedule_executor")
-                if executor is not None:
-                    for profile_id, value in price_updates.items():
-                        settings = executor.update_settings(
-                            profile_id, {"max_grid_price_cents": float(value)}
-                        )
-                        try:
-                            await executor._regenerate_plan(
-                                profile_id, settings, executor.get_state(profile_id)
+            price_fields = (
+                (PROFILE_A_ID, CONF_SHARED_PROFILE_A_PRICE_CAP_FORM),
+                (PROFILE_B_ID, CONF_SHARED_PROFILE_B_PRICE_CAP_FORM),
+            )
+            price_updates = {}
+            if SharedLoadpointBinding.from_options(ev_input) is not None:
+                price_updates = {
+                    profile_id: ev_input[key]
+                    for profile_id, key in price_fields if key in ev_input
+                }
+                updates = {}
+                for profile_id, capacity_key, clear_key in (
+                    (PROFILE_A_ID, CONF_SHARED_PROFILE_A_CAPACITY_FORM, CONF_SHARED_PROFILE_A_CAPACITY_CLEAR_FORM),
+                    (PROFILE_B_ID, CONF_SHARED_PROFILE_B_CAPACITY_FORM, CONF_SHARED_PROFILE_B_CAPACITY_CLEAR_FORM),
+                ):
+                    if ev_input.get(clear_key):
+                        updates[profile_id] = None
+                    elif capacity_key in ev_input:
+                        updates[profile_id] = ev_input[capacity_key]
+                capacity_store = self._get_shared_capacity_store()
+                if updates:
+                    if capacity_store is None:
+                        raise RuntimeError("Logical EV vehicle storage is unavailable")
+                    from .automations.ev_vehicle_capacity import validate_ev_battery_capacity
+                    for capacity in updates.values():
+                        if capacity is not None:
+                            validate_ev_battery_capacity(capacity)
+                if price_updates:
+                    store = self._get_shared_schedule_store()
+                    if store is None:
+                        raise RuntimeError("Smart Schedule storage is unavailable")
+                    await save_shared_auto_schedule_price_caps(store, price_updates)
+                    entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
+                    executor = entry_data.get("auto_schedule_executor")
+                    if executor is not None:
+                        for profile_id, value in price_updates.items():
+                            settings = executor.update_settings(
+                                profile_id, {"max_grid_price_cents": float(value)}
                             )
-                        except Exception as err:
-                            _LOGGER.warning("Could not replan %s after price-cap edit: %s", profile_id, err)
-            if updates:
-                await save_shared_profile_capacities(capacity_store, updates)
-        if any(key in ev_input for _, key in price_fields):
-            ev_input = {key: value for key, value in ev_input.items()
-                        if key not in (CONF_SHARED_PROFILE_A_PRICE_CAP_FORM,
-                                       CONF_SHARED_PROFILE_B_PRICE_CAP_FORM)}
-        return self._save_ev_options(ev_input)
+                            try:
+                                await executor._regenerate_plan(
+                                    profile_id, settings, executor.get_state(profile_id)
+                                )
+                            except Exception as err:
+                                _LOGGER.warning("Could not replan %s after price-cap edit: %s", profile_id, err)
+                if updates:
+                    settings_store = self._get_shared_schedule_store()
+                    if settings_store is None:
+                        raise RuntimeError("Smart Schedule storage is unavailable")
+                    await save_shared_profile_capacities(capacity_store, updates, settings_store=settings_store)
+            if any(key in ev_input for _, key in price_fields):
+                ev_input = {key: value for key, value in ev_input.items()
+                            if key not in (CONF_SHARED_PROFILE_A_PRICE_CAP_FORM,
+                                           CONF_SHARED_PROFILE_B_PRICE_CAP_FORM)}
+            return self._save_ev_options(ev_input)
+
+
+        settings_store = self._get_shared_schedule_store()
+        if settings_store is None:
+            return await apply_options()
+        from .automations.ev_store_lock import run_ev_store_transaction
+        from .automations.shared_loadpoint import PROFILE_A_ID, PROFILE_B_ID
+        generations = vars(settings_store).setdefault("_power_sync_ev_generations", {})
+        captured = {profile: generations.get(profile, 0) for profile in (PROFILE_A_ID, PROFILE_B_ID)}
+
+        async def guarded_apply():
+            if any(generations.get(profile, 0) != value for profile, value in captured.items()):
+                raise RuntimeError("Logical EV was deleted while saving options")
+            return await apply_options()
+
+        return await run_ev_store_transaction(settings_store, guarded_apply)
 
     def _get_option(self, key: str, default: Any = None) -> Any:
         """Get option value with fallback to data for backwards compatibility."""

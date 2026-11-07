@@ -69,6 +69,8 @@ def _setup_node(name):
 
 
 def _load_node(node, namespace):
+    from ev_lock_test_support import closure_package
+    namespace.setdefault("__package__", closure_package())
     node = copy.deepcopy(node)
     node.returns = None
     for arg in node.args.args:
