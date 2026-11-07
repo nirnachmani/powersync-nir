@@ -351,6 +351,21 @@ _FINAL_SOLAR_CREDIT_DIFF_SHA256 = (
 )
 
 
+# Upstream a10bb059 moves cached Solcast parsing off the HA loop. The
+# predecessor remains separately checked against the quota-selection lineage.
+_SOLCAST_EXECUTOR_SOURCE = "0f3da17ce62776065d95b2db8fd4e910ba23bfd1"
+_SOLCAST_EXECUTOR_DIFF_SHA256 = "95b9ee9ae13e025912bc411cbf95080e93962811b71aa6b6f915455832a77bca"
+
+
+def _solcast_executor_diff_is_allowlisted(actual: str) -> bool:
+    expected = _git_show(_SOLCAST_EXECUTOR_SOURCE, LOAD_ESTIMATOR)
+    diff = "\n".join(difflib.unified_diff(
+        expected.splitlines(), actual.splitlines(),
+        fromfile="private_0f3da17c", tofile="solcast_executor_candidate", lineterm="",
+    ))
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _SOLCAST_EXECUTOR_DIFF_SHA256
+
+
 def _final_solar_credit_diff_is_allowlisted(actual: str) -> bool:
     expected = _git_show(_FINAL_SOLAR_CREDIT_SOURCE, COST_NEUTRAL)
     diff = "\n".join(
@@ -708,7 +723,10 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
         elif relative_path == COST_NEUTRAL:
             assert _final_solar_credit_diff_is_allowlisted(actual)
         elif relative_path == LOAD_ESTIMATOR:
-            assert _solar_quota_diff_is_allowlisted(LOAD_ESTIMATOR, actual)
+            assert _solar_quota_diff_is_allowlisted(
+                LOAD_ESTIMATOR, _git_show(_SOLCAST_EXECUTOR_SOURCE, LOAD_ESTIMATOR)
+            )
+            assert _solcast_executor_diff_is_allowlisted(actual)
         else:
             assert actual == expected
 
@@ -826,11 +844,22 @@ def test_solar_quota_allowlists_reject_nearby_unreviewed_changes():
         actual = (
             _git_show(_PENDING_SOC_SOURCE, COORDINATOR)
             if path == COORDINATOR
-            else (ROOT / path).read_text(encoding="utf-8").replace("\r\n", "\n")
+            else _git_show(_SOLCAST_EXECUTOR_SOURCE, LOAD_ESTIMATOR)
         )
         assert _solar_quota_diff_is_allowlisted(path, actual)
         assert source in actual
         assert not _solar_quota_diff_is_allowlisted(path, actual.replace(source, mutation, 1))
+
+
+def test_solcast_executor_allowlist_rejects_unreviewed_changes():
+    actual = (ROOT / LOAD_ESTIMATOR).read_text(encoding="utf-8").replace("\r\n", "\n")
+    assert _solcast_executor_diff_is_allowlisted(actual)
+    for source, mutation in (
+        ('snapshot = [dict(period) for period in cached]', 'snapshot = list(cached)'),
+        ('return any(quotas)', 'return all(quotas)'),
+    ):
+        assert source in actual
+        assert not _solcast_executor_diff_is_allowlisted(actual.replace(source, mutation, 1))
 
 
 def test_solar_only_refill_allowlist_rejects_a_nearby_predicate_mutation():
