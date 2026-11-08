@@ -487,7 +487,7 @@ class ChargingSessionManager:
                                 os.unlink(name)
                         return merged
 
-                job = asyncio.create_task(self.hass.async_add_executor_job(_write_file))
+                job = asyncio.ensure_future(self.hass.async_add_executor_job(_write_file))
                 try:
                     merged = await asyncio.shield(job)
                 except asyncio.CancelledError:

@@ -8653,6 +8653,8 @@ class PriceLevelChargingState:
     stop_cooldown_until: float = 0.0
     # Track whether PowerSync has paused the charger
     managed_by_powersync: bool = False
+    pending_shared_stop: Any = None
+    charging_generation: int = 0
 
 
 def _get_active_dynamic_ev_mode(hass: "HomeAssistant", config_entry: "ConfigEntry", vehicle_id: str) -> Optional[str]:
@@ -10081,6 +10083,7 @@ async def _stop_coordinated_charging(
     stop_untracked: bool = False,
     cooldown_state: Optional[Any] = None,
     log_prefix: str = "EV charging",
+    stop_episode_report: Optional[dict] = None,
 ) -> bool:
     """Stop charging through the configured dynamic charger action."""
     opts = {**config_entry.data, **config_entry.options}
@@ -10100,6 +10103,8 @@ async def _stop_coordinated_charging(
         )
         return False
     params["owner_mode"] = expected_owner_mode
+    if stop_episode_report is not None:
+        params["_stop_episode_report"] = stop_episode_report
     charger_type = params.get("charger_type", _configured_charger_type(opts))
     loadpoint_id = params.get("vehicle_id") or params.get("vehicle_vin")
     if charger_type == "zaptec":
@@ -11151,6 +11156,8 @@ class PriceLevelChargingExecutor:
         state = self._get_or_create_vehicle_state(
             active_profile_id if shared else binding_id
         )
+        state.charging_generation += 1
+        state.pending_shared_stop = None
         state.is_charging = True
         state.charging_mode = "price_level"
         state.last_decision = "charging"
@@ -11375,6 +11382,8 @@ class PriceLevelChargingExecutor:
                 _LOGGER.warning(f"Price-level charging: Failed to start - {reason}")
             return False
 
+        state.charging_generation += 1
+        state.pending_shared_stop = None
         if vehicle_vin:
             state.is_charging = True
             state.charging_mode = mode
@@ -11403,6 +11412,9 @@ class PriceLevelChargingExecutor:
         elif self._state.charging_mode:
             expected_owner_mode = self._state.charging_mode
 
+        stop_state = self._get_or_create_vehicle_state(vehicle_vin) if vehicle_vin else self._state
+        stop_generation = stop_state.charging_generation
+        episode_report = {}
         success = await _stop_coordinated_charging(
             self.hass,
             self._domain,
@@ -11413,7 +11425,20 @@ class PriceLevelChargingExecutor:
             stop_untracked=True,
             cooldown_state=self._get_or_create_vehicle_state("zaptec_standalone"),
             log_prefix="Price-level charging",
+            stop_episode_report=episode_report,
         )
+        current_state = self._get_or_create_vehicle_state(vehicle_vin) if vehicle_vin else self._state
+        if current_state is not stop_state or stop_state.charging_generation != stop_generation:
+            return False
+        if not success and vehicle_vin:
+            from .ev_ownership import owner_family
+
+            state = self._get_or_create_vehicle_state(vehicle_vin)
+            pending = episode_report.get("pending")
+            record = (pending or {}).get("record") or (pending or {}).get("volatile_record") or {}
+            if (pending and record.get("profile_id") == vehicle_vin
+                    and owner_family(record.get("owner_mode")) == owner_family(expected_owner_mode)):
+                state.pending_shared_stop = pending
         if not success:
             return False
 
@@ -11749,6 +11774,11 @@ class PriceLevelChargingExecutor:
                     f"Sigenergy charger decision: should_charge={should_charge}, reason={reason}"
                 )
 
+                pending = vehicle_state.pending_shared_stop
+                if pending and pending.get("settled_observation") is not None:
+                    vehicle_state.is_charging = False
+                    vehicle_state.charging_mode = ""
+                    vehicle_state.pending_shared_stop = None
                 stop_unconfirmed = False
                 if should_charge and not vehicle_state.is_charging:
                     await self._start_charging(mode, reason, vehicle_vin=pseudo_vin)
@@ -11816,6 +11846,11 @@ class PriceLevelChargingExecutor:
                     f"Generic Charger decision: should_charge={should_charge}, reason={reason}"
                 )
 
+                pending = vehicle_state.pending_shared_stop
+                if pending and pending.get("settled_observation") is not None:
+                    vehicle_state.is_charging = False
+                    vehicle_state.charging_mode = ""
+                    vehicle_state.pending_shared_stop = None
                 stop_unconfirmed = False
                 if should_charge and not vehicle_state.is_charging:
                     await self._start_charging(mode, reason, vehicle_vin=pseudo_vin)

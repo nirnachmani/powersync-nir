@@ -36,6 +36,7 @@ from contextvars import ContextVar
 from typing import List, Dict, Any, Optional, Callable
 
 _shared_stop_dispatch = ContextVar("shared_stop_dispatch", default=None)
+_GENERIC_VALIDATION_REJECTED = object()
 
 
 class _EVACConnectRejectedBeforeDispatch:
@@ -441,6 +442,7 @@ async def _start_generic_charger_switch(
     hass: HomeAssistant,
     entity_id: str,
     manual_failure: dict | None = None,
+    authorize_write=None,
 ) -> bool:
     """Start a generic charger switch without duplicating active transactions."""
     entity_id = str(entity_id or "").strip()
@@ -486,6 +488,8 @@ async def _start_generic_charger_switch(
 
     try:
         if needs_reset and switch_state and str(switch_state.state).lower() == "on":
+            if authorize_write is not None and not authorize_write():
+                return False
             await hass.services.async_call(
                 "switch",
                 "turn_off",
@@ -493,6 +497,8 @@ async def _start_generic_charger_switch(
                 blocking=True,
             )
             await asyncio.sleep(1)
+        if authorize_write is not None and not authorize_write():
+            return False
         await hass.services.async_call(
             "switch",
             "turn_on",
@@ -3489,7 +3495,8 @@ def _shared_positive_write_guard(hass, config_entry, params):
         # SoC is required only for Smart Schedule positive commands.
         resolved = resolve_shared_loadpoint_command(hass, config_entry, profile, params)
         current = _dynamic_ev_state.get(config_entry.entry_id, {}).get(physical)
-        return bool(lease is not None and get_ev_ownership(hass, config_entry, physical)[1] is lease
+        return bool(_shared_callback_authorized(config_entry, physical)
+                    and lease is not None and get_ev_ownership(hass, config_entry, physical)[1] is lease
                     and current is runtime and (current is None or current.get("session_id") == session)
                     and not is_shared_stop_fenced(hass, config_entry, physical)
                     and resolved and resolved.get("vehicle_id") == physical
@@ -3556,6 +3563,7 @@ def _shared_generic_stop_authorized(hass, config_entry, physical, params):
                    and params.get("_shared_handoff_outgoing_profile_id") == profile
                    and selected and selected != profile)
     return bool(runtime and runtime is pending.get("runtime")
+                and (not pending.get("retry_guard") or pending["retry_guard"]())
                 and vehicles is pending.get("vehicles")
                 and runtime.get("pending_stop") is pending
                 and runtime.get("session_id") == pending.get("session_id")
@@ -3578,8 +3586,11 @@ async def _stop_sigenergy_charger(
         _LOGGER.error("Sigenergy charger stop: no Modbus host configured")
         return False
 
-    controller = _new_sigenergy_charger(config)
     pending = _shared_stop_dispatch.get()
+    if params.get("shared_loadpoint_binding") and pending is None:
+        _LOGGER.warning("Shared Sigenergy stop blocked without fenced dispatch")
+        return False
+    controller = _new_sigenergy_charger(config)
     if pending is not None:
         from .ev_ownership import get_ev_ownership
         from .shared_loadpoint import canonical_shared_loadpoint_id, resolve_active_shared_profile
@@ -5308,6 +5319,41 @@ async def _stop_zaptec_charging(
 # context alone must never authorize bypassing the lock.
 _shared_io_owner = ContextVar("shared_io_owner", default=None)
 _direct_shared_stop_owner: ContextVar[Any] = ContextVar("direct_shared_stop_owner", default=None)
+_shared_callback_capability: ContextVar[Any] = ContextVar("shared_callback_capability", default=None)
+
+
+def _shared_callback_authorized(config_entry, physical):
+    capability = _shared_callback_capability.get()
+    if capability is None or capability[0] is not asyncio.current_task():
+        return True
+    _, entry_id, vehicle_id, state, generation = capability
+    if config_entry is None or config_entry.entry_id != entry_id or vehicle_id != physical:
+        return True
+    current = _dynamic_ev_state.get(entry_id, {}).get(vehicle_id)
+    return bool(current is state and current.get("active") and not current.get("pending_stop")
+                and current.get("_shared_pause_generation", 0) == generation)
+
+
+def _shared_callback_capability_scope(function):
+    from functools import wraps
+
+    @wraps(function)
+    async def wrapped(hass, config_entry, entry_id, vehicle_id=DEFAULT_VEHICLE_ID):
+        existing = _shared_callback_capability.get()
+        if existing is not None and existing[0] is asyncio.current_task():
+            return await function(hass, config_entry, entry_id, vehicle_id)
+        state = _dynamic_ev_state.get(entry_id, {}).get(vehicle_id)
+        if not state or not state.get("params", {}).get("shared_loadpoint_binding"):
+            return await function(hass, config_entry, entry_id, vehicle_id)
+        token = _shared_callback_capability.set(
+            (asyncio.current_task(), entry_id, vehicle_id, state,
+             state.get("_shared_pause_generation", 0))
+        )
+        try:
+            return await function(hass, config_entry, entry_id, vehicle_id)
+        finally:
+            _shared_callback_capability.reset(token)
+    return wrapped
 
 
 def _shared_physical_io(function):
@@ -5351,6 +5397,11 @@ def _shared_physical_io(function):
                 try:
                     if (function.__name__ != "_action_stop_ev_charging_dynamic_locked"
                             and is_shared_stop_fenced(hass, config_entry, physical)):
+                        return False
+                    if (function.__name__ in ("_action_start_ev_charging", "_set_vehicle_amps_io")
+                            and (function.__name__ != "_set_vehicle_amps_io"
+                                 or call_signature.bind(hass, config_entry, *args, **kwargs).arguments["amps"] > 0)
+                            and not _shared_callback_authorized(config_entry, physical)):
                         return False
                     return await function(hass, config_entry, *args, **kwargs)
                 finally:
@@ -5413,6 +5464,8 @@ async def _action_start_ev_charging(
         if resolved_command is None:
             return False
         _physical_vehicle_id, params = resolved_command
+        if not _shared_callback_authorized(config_entry, _physical_vehicle_id):
+            return False
         # A retained stop owns this physical loadpoint until observation settles.
         # This check is defense-in-depth; serialization of concurrent writes is
         # required separately to close the in-flight race.
@@ -5552,7 +5605,20 @@ async def _action_start_ev_charging(
             if (validated is None or start_lease is None or not shared_guard()
                     or get_ev_ownership(hass, config_entry, _physical_vehicle_id)[1] is not start_lease):
                 return False
-        if await _start_generic_charger_switch(hass, switch_entity):
+        if params.get("shared_loadpoint_binding"):
+            if _physical_vehicle_id is None:
+                return False
+            from .ev_ownership import get_ev_ownership
+            physical_id = _physical_vehicle_id
+
+            def authorize_shared_write():
+                return bool(shared_guard()
+                            and get_ev_ownership(hass, config_entry, physical_id)[1] is start_lease
+                            and _generic_shared_start_still_authorized(hass, config_entry, physical_id, params))
+            started = await _start_generic_charger_switch(hass, switch_entity, authorize_write=authorize_shared_write)
+        else:
+            started = await _start_generic_charger_switch(hass, switch_entity)
+        if started:
             _LOGGER.info("Generic charger started via %s", switch_entity)
             return True
         return False
@@ -5900,7 +5966,8 @@ async def _action_stop_ev_charging(
                 try:
                     return await _action_stop_ev_charging_dynamic_locked(
                         hass, config_entry, {"vehicle_id": _physical_vehicle_id,
-                                             "stop_charging": True, "_expected_state": runtime})
+                                             "stop_charging": True, "_expected_state": runtime,
+                                             "_stop_episode_report": params.get("_stop_episode_report")})
                 finally:
                     _direct_shared_stop_owner.reset(token)
 
@@ -8827,14 +8894,59 @@ async def _resolve_shared_loadpoint_direct_command(
     return str(resolved_params["vehicle_id"]), resolved_params
 
 
-@_shared_physical_io
+_SHARED_PHASE_STOP_REQUIRED = object()
+
+
 async def _set_vehicle_amps(
     hass: HomeAssistant,
     config_entry: ConfigEntry | None,
     vehicle_id: str,
     amps: int,
     params: dict,
-) -> bool:
+) -> bool | None:
+    """Route shared runtime pauses through the transition fence before I/O."""
+    if (amps == 0 and config_entry is not None
+            and params.get("shared_loadpoint_binding")
+            and _shared_stop_dispatch.get() is None):
+        io_owner = _shared_io_owner.get()
+        if io_owner and io_owner[0] is asyncio.current_task():
+            # A caller already holding physical I/O must never wait for transition.
+            return False
+        from .shared_loadpoint import canonical_shared_loadpoint_id
+        from .ev_ownership import get_ev_ownership, owner_family
+
+        profile = params.get("active_logical_vehicle_id") or params.get("logical_vehicle_id")
+        physical = canonical_shared_loadpoint_id(config_entry, profile, params.get("charger_type"))
+        if not physical:
+            return False
+        async with _start_dynamic_lock:
+            state = _dynamic_ev_state.get(config_entry.entry_id, {}).get(physical)
+            lease_id, lease = get_ev_ownership(hass, config_entry, physical)
+            if (not state or not state.get("active") or state.get("pending_stop")
+                    or state.get("params") is not params or lease_id != physical or not lease
+                    or lease.get("owner") != "powersync" or lease.get("active_profile_id") != profile
+                    or owner_family(lease.get("owner_mode")) != owner_family(params.get("owner_mode") or params.get("dynamic_mode"))):
+                return False
+            await _stop_dynamic_under_transition_lock(hass, config_entry, {
+                **params, "vehicle_id": physical, "_expected_state": state,
+                "_shared_runtime_pause": True,
+            })
+            return None
+    result = await _set_vehicle_amps_io(hass, config_entry, vehicle_id, amps, params)
+    if result is _SHARED_PHASE_STOP_REQUIRED:
+        # Both physical I/O and phase locks are released before transition lock.
+        return await _set_vehicle_amps(hass, config_entry, vehicle_id, 0, params)
+    return result
+
+
+@_shared_physical_io
+async def _set_vehicle_amps_io(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry | None,
+    vehicle_id: str,
+    amps: int,
+    params: dict,
+) -> Any:
     """Apply the final per-phase clamp to an owned rate command."""
     # A fenced stop must use the existing lease without refreshing or
     # reacquiring it. The runtime's own params object is the capability.
@@ -8869,18 +8981,28 @@ async def _set_vehicle_amps(
     if handoff:
         params = {**params, "_shared_handoff_stop_authorization": _SHARED_HANDOFF_STOP_AUTHORIZATION,
                   "_shared_handoff_outgoing_profile_id": direct_dispatch[3].get("_shared_handoff_outgoing_profile_id")}
+    # An existing dynamic runtime already owns its lease. Do not replace that
+    # lease merely to calculate a phase clamp; it is the stop's identity fence.
+    reuse_runtime_lease = False
+    if amps > 0 and config_entry is not None:
+        runtime = _dynamic_ev_state.get(config_entry.entry_id, {}).get(vehicle_id)
+        if runtime and runtime.get("params") is params and params.get("shared_loadpoint_binding"):
+            from .ev_ownership import get_ev_ownership
+            reuse_runtime_lease = get_ev_ownership(hass, config_entry, vehicle_id)[1] is not None
     resolved_command = await _resolve_shared_loadpoint_direct_command(
         hass,
         config_entry,
         vehicle_id,
         params,
         allow_shared_handoff_stop=handoff,
-        acquire_shared_lease=not retained_stop,
+        acquire_shared_lease=not retained_stop and not reuse_runtime_lease,
         require_live_shared_profile_soc=amps > 0,
     )
     if resolved_command is None:
         return False
     vehicle_id, params = resolved_command
+    if amps > 0 and params.get("shared_loadpoint_binding") and not _shared_callback_authorized(config_entry, vehicle_id):
+        return False
     if not _phase_load_management_applies(hass, config_entry, params):
         return await _set_vehicle_amps_unchecked(
             hass, config_entry, vehicle_id, amps, params
@@ -8896,6 +9018,8 @@ async def _set_vehicle_amps(
             amps,
             params,
         )
+        if amps > 0 and params.get("shared_loadpoint_binding") and not _shared_callback_authorized(config_entry, vehicle_id):
+            return False
         params["_phase_load_management_applied_amps"] = applied_amps
         active_state = _dynamic_ev_state.get(entry_id, {}).get(vehicle_id)
         current_amps = int(
@@ -8904,6 +9028,10 @@ async def _set_vehicle_amps(
             )
             or 0
         )
+        if (amps > 0 and applied_amps <= 0 and current_amps > 0
+                and params.get("shared_loadpoint_binding")
+                and params.get("charger_type") in ("generic", "sigenergy")):
+            return _SHARED_PHASE_STOP_REQUIRED
         if amps > 0 and applied_amps <= 0 and current_amps <= 0:
             _LOGGER.info(
                 "EV phase load management blocked the managed start for %s",
@@ -8967,6 +9095,8 @@ async def _set_vehicle_amps_unchecked(
     if resolved_command is None:
         return False
     vehicle_id, params = resolved_command
+    if amps > 0 and params.get("shared_loadpoint_binding") and not _shared_callback_authorized(config_entry, vehicle_id):
+        return False
     if not _reserve_automated_shared_loadpoint_sequence(hass, config_entry, params):
         return False
     charger_type = params.get("charger_type", "tesla")
@@ -9200,10 +9330,19 @@ async def _set_vehicle_amps_unchecked(
                     # Setup/wake/current writes can take time. Their telemetry
                     # must not confirm the later switch start.
                     confirmation_started_at = datetime.now(dt_timezone.utc)
-                if switch_entity and not await _start_generic_charger_switch(
-                    hass, switch_entity, manual_failure
-                ):
-                    return False
+                if switch_entity:
+                    if shared_lease is not None:
+                        def authorize_write():
+                            return bool(shared_guard()
+                                        and get_ev_ownership(hass, config_entry, vehicle_id)[1] is shared_lease
+                                        and _generic_shared_start_still_authorized(hass, config_entry, vehicle_id, params))
+                        started = await _start_generic_charger_switch(
+                            hass, switch_entity, manual_failure, authorize_write=authorize_write
+                        )
+                    else:
+                        started = await _start_generic_charger_switch(hass, switch_entity, manual_failure)
+                    if not started:
+                        return False
                 if confirmation_started_at is not None:
                     confirmed = False
                     try:
@@ -11003,6 +11142,7 @@ async def _refresh_dynamic_tesla_charger_capability(
     return True
 
 
+@_shared_callback_capability_scope
 async def _dynamic_ev_update_surplus(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -11017,12 +11157,15 @@ async def _dynamic_ev_update_surplus(
     """
     vehicles = _dynamic_ev_state.get(entry_id, {})
     state = vehicles.get(vehicle_id)
-    if not state or not state.get("active"):
+    if not state or not state.get("active") or state.get("pending_stop"):
         return
+    callback_generation = state.get("_shared_pause_generation", 0)
 
     def _session_was_replaced(stage: str) -> bool:
         current_state = _dynamic_ev_state.get(entry_id, {}).get(vehicle_id)
-        if current_state is state and current_state.get("active"):
+        if (current_state is state and current_state.get("active")
+                and not current_state.get("pending_stop")
+                and current_state.get("_shared_pause_generation", 0) == callback_generation):
             return False
         _LOGGER.debug(
             "Solar surplus EV: Session changed during %s for %s; "
@@ -12025,11 +12168,14 @@ async def _dynamic_ev_update_surplus(
                 _LOGGER.info(f"⚡ Solar surplus EV: Starting - sustained surplus for {sustained_minutes} min")
 
                 # Check if this vehicle's charge is already complete before trying
-                if await _is_vehicle_charge_complete(
+                charge_complete = await _is_vehicle_charge_complete(
                     hass,
                     vehicle_id,
                     params.get("tesla_charging_state_entity"),
-                ):
+                )
+                if _session_was_replaced("pre-start charge-complete lookup"):
+                    return
+                if charge_complete:
                     _LOGGER.info(
                         f"⚡ Solar surplus EV: {vehicle_id[:8]}... is charge complete — "
                         f"looking for next vehicle"
@@ -12053,11 +12199,14 @@ async def _dynamic_ev_update_surplus(
                     return
                 if not start_success:
                     # Check if failure was due to charge complete
-                    if await _is_vehicle_charge_complete(
+                    charge_complete = await _is_vehicle_charge_complete(
                         hass,
                         vehicle_id,
                         params.get("tesla_charging_state_entity"),
-                    ):
+                    )
+                    if _session_was_replaced("failed-start charge-complete lookup"):
+                        return
+                    if charge_complete:
                         _LOGGER.info(
                             f"⚡ Solar surplus EV: {vehicle_id[:8]}... charge complete — "
                             f"looking for next vehicle"
@@ -13492,6 +13641,7 @@ async def _dynamic_ev_update_sigenergy_evdc_native_solar(
         state["native_solar_grid_import_logged"] = False
 
 
+@_shared_callback_capability_scope
 async def _dynamic_ev_update(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -13509,13 +13659,16 @@ async def _dynamic_ev_update(
     """
     vehicles = _dynamic_ev_state.get(entry_id, {})
     state = vehicles.get(vehicle_id)
-    if not state or not state.get("active"):
+    if not state or not state.get("active") or state.get("pending_stop"):
         return
+    callback_generation = state.get("_shared_pause_generation", 0)
 
     def _session_is_current() -> bool:
         """Return whether this callback still owns its entry/vehicle state."""
         current_state = _dynamic_ev_state.get(entry_id, {}).get(vehicle_id)
-        return current_state is state and bool(current_state and current_state.get("active"))
+        return bool(current_state is state and current_state.get("active")
+                    and not current_state.get("pending_stop")
+                    and current_state.get("_shared_pause_generation", 0) == callback_generation)
 
     params = state.get("params", {})
     params = _with_sigenergy_charger_capabilities(config_entry, params, hass)
@@ -13637,6 +13790,8 @@ async def _dynamic_ev_update(
         state,
     ):
         return
+    if not _session_is_current():
+        return
     params = state.get("params") or {}
 
     # target_battery_charge_kw: How much we want the battery to charge (positive = charging into battery)
@@ -13653,6 +13808,8 @@ async def _dynamic_ev_update(
         await _resolve_max_grid_import_kw(hass, config_entry, params)
         or 12.5
     )
+    if not _session_is_current():
+        return
 
     # No grid import mode: prevent ALL grid imports by dynamically adjusting EV charge rate
     no_grid_import = params.get("no_grid_import", False)
@@ -13677,13 +13834,15 @@ async def _dynamic_ev_update(
         state,
     ):
         current_amps = 0
+    if not _session_is_current():
+        return
     physical_restart_required = bool(state.get("physical_restart_required"))
     expected_ownership = state.get("ownership")
     scheduled_floor_active = owner_mode == "scheduled" and not no_grid_import
 
     def _session_still_owns_vehicle() -> bool:
         current_state = _dynamic_ev_state.get(entry_id, {}).get(vehicle_id)
-        if current_state is not state or not current_state.get("active"):
+        if not _session_is_current():
             return False
         current_params = current_state.get("params") or {}
         current_owner_mode = str(
@@ -13744,6 +13903,8 @@ async def _dynamic_ev_update(
                 fixed_amps,
                 params,
             )
+            if not _session_is_current():
+                return
             success = amps_set
             if amps_set and physical_restart_required:
                 state["last_physical_restart_attempt_at"] = (
@@ -13760,6 +13921,8 @@ async def _dynamic_ev_update(
                     start_params,
                     context=None,
                 )
+                if not _session_is_current():
+                    return
                 if success:
                     state["last_start_command_at"] = datetime.now().astimezone()
                     state["charging_started"] = True
@@ -13972,6 +14135,8 @@ async def _dynamic_ev_update(
                 f"reducing to {new_amps}A"
             )
             success = await _set_vehicle_amps(hass, config_entry, vehicle_id, new_amps, params)
+            if not _session_is_current():
+                return
             if success:
                 state["current_amps"] = _phase_applied_amps(params, new_amps)
             return
@@ -14022,6 +14187,8 @@ async def _dynamic_ev_update(
             new_amps,
             params,
         )
+        if not _session_is_current():
+            return
         applied_amps = _phase_applied_amps(params, new_amps)
         success = amps_set
         if amps_set and tesla_restart_required and applied_amps > 0:
@@ -14048,6 +14215,8 @@ async def _dynamic_ev_update(
                 start_params,
                 context=None,
             )
+            if not _session_is_current():
+                return
             if not success:
                 _LOGGER.warning(
                     "Dynamic EV: Failed to restart Tesla charging at %sA",
@@ -15813,6 +15982,9 @@ async def async_load_pending_shared_stops(hass, config_entry):
                 continue
             pending = {"requested_at": datetime.fromisoformat(record["first_attempt_at"]),
                        "record": record, "status": "recovered", "recovered": True}
+            if record.get("last_status") == "validation_rejected_before_dispatch":
+                _LOGGER.warning("Pending Generic stop for %s was rejected before dispatch; "
+                                "ownership cannot be proven after restart, retaining fence", vid)
         existing = vehicles.get(vid)
         if existing and existing.get("pending_stop"):
             pending = existing["pending_stop"]
@@ -15830,7 +16002,7 @@ async def async_load_pending_shared_stops(hass, config_entry):
 
 
 async def async_reconcile_pending_shared_stops(hass, config_entry):
-    """Observe pending stops and retry only proven EVAC pre-dispatch failures."""
+    """Observe pending stops and retry only proven pre-dispatch rejections."""
     from .ev_ownership import get_ev_ownerships
     from .shared_stop_storage import delete_pending_stop, load_pending_stop, upsert_pending_stop
     from .external_session_reconciler import generic_stop_observation_from_hass, evac_stop_observation_from_reader
@@ -15943,7 +16115,7 @@ async def async_reconcile_pending_shared_stops(hass, config_entry):
 
 
 async def _retry_pending_evac_stop(hass, config_entry, vid, state, vehicles, pending, store):
-    """Retry a live, definitely undispatched EVAC stop under both existing locks."""
+    """Retry a live, definitely undispatched stop under both existing locks."""
     from copy import deepcopy
     from .ev_ownership import get_ev_ownership, get_ev_ownerships
     from .ev_charging_session import get_session_manager
@@ -15952,12 +16124,13 @@ async def _retry_pending_evac_stop(hass, config_entry, vid, state, vehicles, pen
     from .shared_stop_storage import MalformedPendingStop, PendingStopConflict, upsert_pending_stop
 
     record = pending.get("record") or pending.get("volatile_record")
-    if (vid != "sigenergy_charger" or pending.get("recovered") or not record
+    generic = vid == "generic_ev" and state.get("direct_stop_only")
+    if ((vid != "sigenergy_charger" and not generic) or pending.get("recovered") or not record
             or pending.get("status") != "failed"
-            or record.get("last_status") != "connect_rejected_before_dispatch"
+            or record.get("last_status") != ("validation_rejected_before_dispatch" if generic else "connect_rejected_before_dispatch")
             or record.get("dispatch_at") is not None or pending.get("dispatch_at")
             or record.get("attempt_count", 3) >= 3
-            or not pending.get("evac_config") or pending["evac_config"].get("charger_type") != "evac"):
+            or (not generic and (not pending.get("evac_config") or pending["evac_config"].get("charger_type") != "evac"))):
         return
     now = datetime.now(dt_timezone.utc)
     try:
@@ -15992,6 +16165,12 @@ async def _retry_pending_evac_stop(hass, config_entry, vid, state, vehicles, pen
                 or pending.get("binding_snapshot") != _shared_stop_binding_snapshot(config_entry)
                 or not selected or resolve_active_shared_profile(hass, config_entry) != selected):
             return False
+        if generic:
+            physical = pending.get("physical_params", {})
+            original = state.get("params", {})
+            for key in ("charger_type", "charger_switch_entity", "charger_amps_entity"):
+                if physical.get(key) != live_record["parameters"].get(key) or original.get(key) != physical.get(key):
+                    return False
         if live_record.get("owner_kind") == "external":
             external = load_reconciliation_state(hass, config_entry, vid)
             if (not live_record.get("observed_session_token")
@@ -16026,7 +16205,7 @@ async def _retry_pending_evac_stop(hass, config_entry, vid, state, vehicles, pen
                 pending["record"] = None
                 expected_record = updated
                 expected_value = deepcopy(updated)
-                _LOGGER.exception("Could not persist EVAC retry for %s; attempting with in-memory fence", vid)
+                _LOGGER.exception("Could not persist shared stop retry for %s; attempting with in-memory fence", vid)
                 _warn_shared_stop_storage_failure(hass, config_entry, vid, pending)
             else:
                 if not current():
@@ -16053,11 +16232,25 @@ async def _retry_pending_evac_stop(hass, config_entry, vid, state, vehicles, pen
                     params[key] = direct[key]
             direct_token = _direct_shared_stop_owner.set((asyncio.current_task(), state, pending, direct))
         try:
-            result = await _stop_sigenergy_charger(hass, config_entry, params)
+            if generic:
+                switch = (params.get("charger_switch_entity") or "").strip()
+                amps_entity = (params.get("charger_amps_entity") or "").strip()
+                if not _shared_generic_stop_authorized(hass, config_entry, vid, params):
+                    result = False
+                elif switch and switch.startswith("switch.") and hass.states.get(switch):
+                    _mark_shared_stop_dispatch()
+                    await hass.services.async_call("switch", "turn_off", {"entity_id": switch}, blocking=True)
+                    result = True
+                elif switch or not amps_entity:
+                    result = _GENERIC_VALIDATION_REJECTED
+                else:
+                    result = await _set_generic_charger_amps_entity(hass, amps_entity, 0)
+            else:
+                result = await _stop_sigenergy_charger(hass, config_entry, params)
         except asyncio.CancelledError:
             raise
         except Exception:
-            _LOGGER.exception("EVAC retry failed for %s", vid)
+            _LOGGER.exception("Shared stop retry failed for %s", vid)
             result = False
         finally:
             _shared_stop_dispatch.reset(dispatch_token)
@@ -16066,12 +16259,13 @@ async def _retry_pending_evac_stop(hass, config_entry, vid, state, vehicles, pen
             pending.pop("retry_guard", None)
         if not current():
             return
-        status = ("connect_rejected_before_dispatch" if result is _EVAC_CONNECT_REJECTED
+        status = ("validation_rejected_before_dispatch" if result is _GENERIC_VALIDATION_REJECTED
+                  else "connect_rejected_before_dispatch" if result is _EVAC_CONNECT_REJECTED
                   else "unconfirmed" if result else "unknown")
         updated = {**updated, "last_status": status,
                    "dispatch_at": pending["dispatch_at"].isoformat() if pending.get("dispatch_at") else None}
         pending["volatile_record"] = updated
-        pending["status"] = "failed" if not result else "unconfirmed"
+        pending["status"] = "failed" if result is _GENERIC_VALIDATION_REJECTED or not result else "unconfirmed"
         if pending.get("record") is not None:
             before = pending["record"]
             try:
@@ -16081,7 +16275,7 @@ async def _retry_pending_evac_stop(hass, config_entry, vid, state, vehicles, pen
                     pending["record"] = saved
             except Exception:
                 pending["record"] = None
-                _LOGGER.exception("Could not persist EVAC retry outcome for %s", vid)
+                _LOGGER.exception("Could not persist shared stop retry outcome for %s", vid)
                 _warn_shared_stop_storage_failure(hass, config_entry, vid, pending)
 
 
@@ -16177,7 +16371,8 @@ async def _settle_pending_shared_stop(hass, config_entry, vid, state, vehicles):
                 active = manager.active_sessions.get(vid)
                 if active is not None and active.id != session_id:
                     return False
-                if active is not None and session_id and current():
+                if (active is not None and session_id and current()
+                        and not pending["params"].get("_shared_runtime_pause")):
                     profile = state.get("active_profile_id") or physical_params.get("active_logical_vehicle_id")
                     sample = _logical_session_soc_provenance(hass, config_entry, profile) if profile else {}
                     await manager._end_session_unlocked(
@@ -16224,6 +16419,21 @@ async def _settle_pending_shared_stop(hass, config_entry, vid, state, vehicles):
         from ..action_events import observe_ev_stop
         observe_ev_stop(hass, config_entry, vid, warning_command,
                         observation.observed_at, charging=False)
+    if pending["params"].get("_shared_runtime_pause"):
+        state["current_amps"] = 0
+        state["target_amps"] = 0
+        state["charging_started"] = False
+        state.pop("stop_outcome", None)
+        state.pop("_battery_floor_stop_retry_at", None)
+        if physical_params.get("charger_type") == "generic" and state.get("external_generic_session"):
+            state.pop("external_generic_session", None)
+            state.pop("last_stop_command_at", None)
+            state["external_start_detection_armed"] = True
+            state["reason"] = "Generic Charger stop confirmed by fresh power readback"
+        pending["settled_observation"] = observation
+        state.pop("pending_stop", None)
+        hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {}).get("_shared_stop_fences", {}).pop(vid, None)
+        return True
     release_ev_ownership(hass, config_entry, vid, command="stop", success=True,
                          reason=pending["params"].get("stop_reason", "stopped"))
     # The replacement diagnostic command is not a new stop dispatch. Prevent
@@ -16363,9 +16573,32 @@ async def _action_stop_ev_charging_dynamic_locked(
         state = vehicles.get(vid)
         state_params = state.get("params", {}) if state else {}
         if state and state.get("pending_stop"):
+            pending = state["pending_stop"]
+            if stop_charging and pending["params"].get("_shared_runtime_pause") and not params.get("_shared_runtime_pause"):
+                from .ev_ownership import owner_family
+                from .ev_ownership import get_ev_ownership
+                lease_id, lease = get_ev_ownership(hass, config_entry, vid)
+                requested_profile = params.get("active_logical_vehicle_id") or params.get("logical_vehicle_id")
+                requested_mode = params.get("owner_mode") or params.get("dynamic_mode")
+                if (lease_id != vid or lease is not pending.get("lease")
+                        or not requested_mode or owner_family(requested_mode) != owner_family(lease.get("owner_mode"))
+                        or requested_profile != lease.get("active_profile_id")):
+                    pending_shared_stop = True
+                    continue
+                pending["params"]["_shared_runtime_pause"] = False
+                pending["params"]["stop_reason"] = params.get("stop_reason", "stopped")
+                state["active"] = False
+                for timer_key in ("cancel_timer", "quick_stop_timer"):
+                    cancel = state.get(timer_key)
+                    if cancel:
+                        cancel()
+                        state[timer_key] = None
             if not stop_charging or not await _settle_pending_shared_stop(
                 hass, config_entry, vid, state, vehicles
             ):
+                report = params.get("_stop_episode_report")
+                if isinstance(report, dict):
+                    report["pending"] = pending
                 pending_shared_stop = True
             continue
         if not (
@@ -16390,6 +16623,9 @@ async def _action_stop_ev_charging_dynamic_locked(
             physical_params["charger_power_entity"] = options.get("generic_charger_power_entity")
         from .shared_loadpoint import resolve_active_shared_profile
         direct_request = _direct_shared_stop_owner.get()
+        # Invalidate all callbacks that began before this stop, including those
+        # that wake only after a fast settlement removed pending_stop.
+        state["_shared_pause_generation"] = state.get("_shared_pause_generation", 0) + 1
         state["pending_stop"] = {
             "requested_at": datetime.now(dt_timezone.utc),
             "runtime": state,
@@ -16413,18 +16649,22 @@ async def _action_stop_ev_charging_dynamic_locked(
                             if physical_params.get("charger_type") == "sigenergy" else None),
         }
         hass.data.setdefault(DOMAIN, {}).setdefault(entry_id, {}).setdefault("_shared_stop_fences", {})[vid] = state["pending_stop"]
-        state["active"] = False
-        for timer_key in ("cancel_timer", "quick_stop_timer"):
-            cancel = state.get(timer_key)
-            if cancel:
-                cancel()
-                state[timer_key] = None
+        if not params.get("_shared_runtime_pause"):
+            state["active"] = False
+            for timer_key in ("cancel_timer", "quick_stop_timer"):
+                cancel = state.get(timer_key)
+                if cancel:
+                    cancel()
+                    state[timer_key] = None
         pending_shared_stop = True
         from uuid import uuid4
         from .shared_stop_storage import (
             PARAMETER_NAMES, MalformedPendingStop, PendingStopConflict, upsert_pending_stop,
         )
         pending = state["pending_stop"]
+        report = params.get("_stop_episode_report")
+        if isinstance(report, dict):
+            report["pending"] = pending
         session_id = state.get("session_id")
         durable_session = str(session_id) if session_id is not None else f"runtime-{uuid4()}"
         profile = state.get("active_profile_id") or state_params.get("active_logical_vehicle_id")
@@ -16487,10 +16727,11 @@ async def _action_stop_ev_charging_dynamic_locked(
                 if state_params.get("charger_type") == "generic":
                     switch = (state_params.get("charger_switch_entity") or "").strip()
                     amps_entity = (state_params.get("charger_amps_entity") or "").strip()
-                    if (not _shared_generic_stop_authorized(hass, config_entry, vid, state_params)
-                            or (switch and (not switch.startswith("switch.") or not hass.states.get(switch)))
-                            or (not switch and not amps_entity)):
+                    if not _shared_generic_stop_authorized(hass, config_entry, vid, state_params):
                         success = False
+                    elif ((switch and (not switch.startswith("switch.") or not hass.states.get(switch)))
+                          or (not switch and not amps_entity)):
+                        success = _GENERIC_VALIDATION_REJECTED
                     elif switch:
                         _mark_shared_stop_dispatch()
                         await hass.services.async_call("switch", "turn_off", {"entity_id": switch}, blocking=True)
@@ -16520,9 +16761,10 @@ async def _action_stop_ev_charging_dynamic_locked(
             _shared_stop_dispatch.reset(token)
             if direct_token is not None:
                 _direct_shared_stop_owner.reset(direct_token)
-        status = ("connect_rejected_before_dispatch" if success is _EVAC_CONNECT_REJECTED
+        status = ("validation_rejected_before_dispatch" if success is _GENERIC_VALIDATION_REJECTED
+                  else "connect_rejected_before_dispatch" if success is _EVAC_CONNECT_REJECTED
                   else "unconfirmed" if success else "unknown")
-        pending["status"] = "unconfirmed" if success else "failed"
+        pending["status"] = "failed" if success is _GENERIC_VALIDATION_REJECTED or not success else "unconfirmed"
         pending["volatile_record"].update(last_status=status,
             dispatch_at=pending["dispatch_at"].isoformat() if pending.get("dispatch_at") else None)
         if record is not None:
@@ -16536,7 +16778,7 @@ async def _action_stop_ev_charging_dynamic_locked(
                 pending["record"] = None
                 _warn_shared_stop_storage_failure(hass, config_entry, vid, pending)
         physical_stop_report = params.get("_physical_stop_report")
-        if isinstance(physical_stop_report, dict):
+        if isinstance(physical_stop_report, dict) and pending.get("dispatch_at"):
             physical_stop_report.setdefault("physical_stop_vehicle_ids", set()).add(vid)
 
     vehicle_ids_to_stop = remaining_vehicle_ids

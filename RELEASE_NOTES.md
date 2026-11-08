@@ -1,3 +1,10 @@
+<!-- release: v2.12.1649-nir.4 -->
+
+## v2.12.1649-nir.4 — shared EV pause and charging history
+- Route shared Generic Charger and Sigenergy EVAC zero-amp pauses through the fenced stop lifecycle. Retain the active controller after fresh post-dispatch idle evidence, so it can resume or hand off safely.
+- Recover the matching Price-Level executor after its pending stop is confirmed, and repair charging-history saves when Home Assistant returns a Future from its executor API.
+- A stop that cannot be confirmed remains fenced and may require attention. Recovery after a restart depends on the saved stop and matching identity; uncertain writes are not blindly retried. Source release only: no Home Assistant installation, restart or charger operation was performed.
+
 <!-- release: v2.12.1649-nir.3 -->
 
 ## v2.12.1649-nir.3 — recognise Sigenergy grid connection
