@@ -1,3 +1,11 @@
+<!-- release: v2.12.1671-nir.1 -->
+
+## v2.12.1671-nir.1 — upstream compatibility and solar EV safeguards
+- Retain the published shared-EV charging-mode handover while integrating reviewed upstream changes through v2.12.1671.
+- Improve optimizer cost settlement, EV selector constraints, solver performance and Cost Neutral export planning. Update tariff and inverter dashboard presentation.
+- Add opt-in accounting for separately measured solar generation and bound solar EV headroom discovery at negative export prices. Preserve private Sigenergy export ownership and shared logical-EV selection and stop fencing.
+- Remote support and remote diagnostic sharing are excluded. Source release only: no Home Assistant installation, restart or physical hardware test was performed.
+
 <!-- release: v2.12.1649-nir.5 -->
 
 ## v2.12.1649-nir.5 — shared EV charging mode handover
