@@ -7297,6 +7297,12 @@ class AutoScheduleExecutor:
         # done so for availability/target checks.
         if current_soc is None:
             current_soc = await self._get_vehicle_soc(vehicle_id)
+        if current_soc is None:
+            state.current_plan = None
+            state.current_window = None
+            state.last_decision = "soc_unavailable"
+            state.last_decision_reason = "Selected vehicle SOC unavailable"
+            return
 
         try:
             resolved_capacity = self.resolve_vehicle_capacity(vehicle_id, settings)

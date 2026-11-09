@@ -6440,6 +6440,10 @@ class PowerSyncEVPanel extends HTMLElement {
             <div class="smart-meta">Target ${this._escHtml(vehicle.target_soc ?? '--')}% | Departure ${this._escHtml(departure)}</div>
             <div class="smart-meta">Usable capacity ${this._escHtml(effectiveCapacity ?? 60)} kWh | ${this._escHtml(sourceLabel)}</div>
             <div class="capacity-editor">
+              <label>Target SOC (%)<input type="number" min="1" max="100" step="1" data-target-input="${this._escAttr(vehicleId)}" value="${this._escAttr(vehicle.target_soc ?? 80)}"></label>
+              <button class="command" data-target-save="${this._escAttr(vehicleId)}" ${this._savingKey ? 'disabled' : ''}>Save target</button>
+            </div>
+            <div class="capacity-editor">
               <label>Capacity override (kWh)
                 <input type="number" min="1" max="250" step="0.1" inputmode="decimal" data-capacity-input="${this._escAttr(vehicleId)}" value="${this._escAttr(manualCapacity)}" placeholder="Automatic">
               </label>
@@ -6508,6 +6512,16 @@ class PowerSyncEVPanel extends HTMLElement {
     });
     this.shadowRoot.querySelectorAll('[data-smart-toggle]').forEach((button) => {
       button.addEventListener('click', () => this._toggleSmartSchedule(button.dataset.smartToggle, button.dataset.enabled === 'true'));
+    });
+    this.shadowRoot.querySelectorAll('[data-target-save]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const vehicleId = button.dataset.targetSave;
+        const raw = this.shadowRoot.querySelector(`[data-target-input="${CSS.escape(vehicleId)}"]`)?.value;
+        const target = Number(raw);
+        if (!raw || !Number.isInteger(target) || target < 1 || target > 100) return;
+        this._runCommand(`target:${vehicleId}`, EV_PANEL_PATHS.autoSettings,
+          { vehicle_id: vehicleId, target_soc: target }, 'Charge target updated');
+      });
     });
     this.shadowRoot.querySelectorAll('[data-capacity-save]').forEach((button) => {
       button.addEventListener('click', () => this._saveVehicleCapacity(button.dataset.capacitySave, false));

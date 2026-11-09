@@ -970,7 +970,7 @@ def test_dashboard_strategy_resource_uses_incremented_cache_buster():
 
     version = re.search(r'DASHBOARD_JS_VERSION = "(\d+)"', const_source)
     assert version is not None
-    assert version.group(1) == "60"
+    assert version.group(1) == "62"
     assert "url = f\"{base_path}?v={POWER_SYNC_VERSION}.{DASHBOARD_JS_VERSION}\"" in source
 
 
@@ -2232,3 +2232,22 @@ def test_energy_day_prices_are_optional_signed_history_with_independent_axes():
       assert.equal(card._localMidnight(autumn+86400000, 'Australia/Sydney') - card._localMidnight(autumn, 'Australia/Sydney'), 25*3600000);
     """
     subprocess.run(['node', '-e', runtime], check=True)
+
+
+def test_dashboard_target_editor_validates_and_addresses_logical_vehicle():
+    source = STRATEGY_PATH.read_text()
+    assert 'data-target-input="${this._escAttr(vehicleId)}"' in source
+    match = re.search(r"    this.shadowRoot.querySelectorAll\('\[data-target-save\]'\).*?\n    \}\);", source, re.DOTALL)
+    assert match
+    code = match.group(0)
+    runtime = """
+      const CSS = {escape: x => x};
+      const EV_PANEL_PATHS = {autoSettings: 'settings'};
+      let callback, value = '75'; const calls = [];
+      const button = {dataset: {targetSave: 'shared_ev_profile_b'}, addEventListener: (_, f) => callback = f};
+      const card = {shadowRoot: {querySelectorAll: () => [button], querySelector: () => ({value})},
+        _runCommand: (...args) => calls.push(args)};
+      (function() { CODE }).call(card); callback(); value=''; callback(); value='101'; callback();
+      if (calls.length !== 1 || calls[0][1] !== 'settings' || calls[0][2].vehicle_id !== 'shared_ev_profile_b' || calls[0][2].target_soc !== 75) throw Error(JSON.stringify(calls));
+    """.replace('CODE', code)
+    subprocess.run(['node', '-e', runtime], check=True, capture_output=True, text=True)

@@ -887,3 +887,16 @@ def test_clearing_manual_override_falls_back_to_provider():
     assert updated.battery_capacity_kwh is None
     assert updated.effective_battery_capacity_kwh == 29.6
     assert updated.battery_capacity_source == CAPACITY_SOURCE_PROVIDER
+
+
+def test_regeneration_discards_stale_plan_when_selected_soc_missing():
+    executor = _executor_with_options()
+    async def no_soc(_vehicle_id):
+        return None
+    executor._get_vehicle_soc = no_soc
+    settings = AutoScheduleSettings(vehicle_id="shared_ev_profile_b", target_soc=80)
+    state = SimpleNamespace(current_plan=object(), current_window=object())
+    asyncio.run(executor._regenerate_plan(settings.vehicle_id, settings, state))
+    assert state.current_plan is None and state.current_window is None
+    assert state.last_decision == "soc_unavailable"
+    assert executor.planner.calls == []
