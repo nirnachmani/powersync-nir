@@ -371,6 +371,10 @@ _SOLAR_FALLBACK_DISPATCH_SHA256 = "326fb596511c1f43b54e7af20e279d9f87095a2dcd1bb
 _EV_SELECTOR_SOURCE = "21b70acf925356a998b17a497a922742ceb6e4f3"
 _EV_SELECTOR_SHA256 = "5511ed0edbf401190f8ebbb5c721d5e180e46ec0def555c613b99eb4002f29d3"
 
+# Upstream 9c156fe7: cycle timing and opt-in benchmark instrumentation.
+_SOLVER_TRACE_SOURCE = "c0cf4bae0cf455c0a9f40c03e71eb5024f5b9fa4"
+_SOLVER_TRACE_SHA256 = "649e38c37f78997af52008c351cb2c1752e63d427664fb77c0be79df6af29565"
+
 # Exact upstream 52465064 plan-schema delta. Legacy no-solar callers remain
 # supported; this digest does not waive changes elsewhere in cost_neutral.py.
 COST_NEUTRAL = OPTIMIZATION / "cost_neutral.py"
@@ -642,6 +646,15 @@ def _ev_selector_diff_is_allowlisted(actual: str) -> bool:
     return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _EV_SELECTOR_SHA256
 
 
+def _solver_trace_diff_is_allowlisted(actual: str) -> bool:
+    expected = _git_show(_SOLVER_TRACE_SOURCE, BATTERY_OPTIMIZER)
+    diff = "\n".join(difflib.unified_diff(
+        expected.splitlines(), actual.splitlines(), fromfile="private_c0cf4bae",
+        tofile="solver_trace_candidate", lineterm="",
+    ))
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _SOLVER_TRACE_SHA256
+
+
 def _protected_solar_export_diff_is_allowlisted(actual: str) -> bool:
     """Only the reviewed no-paywall protected-export source delta is allowed."""
     expected = _git_show(_PROTECTED_SOLAR_EXPORT_SOURCE, BATTERY_OPTIMIZER)
@@ -785,7 +798,10 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
             assert _solar_fallback_dispatch_diff_is_allowlisted(
                 _git_show(_EV_SELECTOR_SOURCE, BATTERY_OPTIMIZER)
             )
-            assert _ev_selector_diff_is_allowlisted(actual)
+            assert _ev_selector_diff_is_allowlisted(
+                _git_show(_SOLVER_TRACE_SOURCE, BATTERY_OPTIMIZER)
+            )
+            assert _solver_trace_diff_is_allowlisted(actual)
         elif relative_path == COST_NEUTRAL:
             assert _final_solar_credit_diff_is_allowlisted(actual)
         elif relative_path == LOAD_ESTIMATOR:
@@ -1035,11 +1051,19 @@ def test_solar_fallback_dispatch_allowlist_rejects_mutations():
 
 
 def test_ev_selector_allowlist_rejects_mutations():
-    actual = (ROOT / BATTERY_OPTIMIZER).read_text(encoding="utf-8").replace("\r\n", "\n")
+    actual = _git_show(_SOLVER_TRACE_SOURCE, BATTERY_OPTIMIZER)
     assert _ev_selector_diff_is_allowlisted(actual)
     before = "cost_neutral_surplus_sign_offset = next_offset"
     assert before in actual
     assert not _ev_selector_diff_is_allowlisted(actual.replace(before, before + " + 1", 1))
+
+
+def test_solver_trace_allowlist_rejects_mutations():
+    actual = (ROOT / BATTERY_OPTIMIZER).read_text(encoding="utf-8").replace("\r\n", "\n")
+    assert _solver_trace_diff_is_allowlisted(actual)
+    before = 'h.setOptionValue("time_limit", float(time_limit))'
+    assert before in actual
+    assert not _solver_trace_diff_is_allowlisted(actual.replace(before, before + "  # changed", 1))
 
 
 def test_final_solar_credit_allowlist_rejects_a_nearby_policy_mutation():
