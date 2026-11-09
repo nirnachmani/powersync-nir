@@ -1,3 +1,9 @@
+<!-- release: v2.12.1649-nir.5 -->
+
+## v2.12.1649-nir.5 — shared EV charging mode handover
+- Keep an eligible incoming charging mode's place while a shared Generic Charger or Sigenergy EVAC stop is being verified. This prevents Solar Surplus from repeatedly reclaiming the charger before Smart Schedule can start.
+- Re-evaluate the successor's policy and selected EV before starting; do not treat a pending stop as a failed Smart Schedule start. Existing post-stop readback and ownership safeguards remain in place. Source release only: no Home Assistant installation, restart, or physical charging test was performed.
+
 <!-- release: v2.12.1649-nir.4 -->
 
 ## v2.12.1649-nir.4 — shared EV pause and charging history

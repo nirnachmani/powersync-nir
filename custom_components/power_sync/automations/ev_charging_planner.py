@@ -8416,6 +8416,15 @@ class AutoScheduleExecutor:
                 # Note: Notifications are sent by _action_start_ev_charging_dynamic
                 return True
             else:
+                if params.get("shared_loadpoint_binding"):
+                    from .actions import _shared_handover_waiting
+                    if _shared_handover_waiting(
+                        self.hass, self.config_entry, params.get("vehicle_id"),
+                        params.get("active_logical_vehicle_id"), params.get("owner_mode"),
+                    ):
+                        self._clear_start_failure(vehicle_id)
+                        _LOGGER.debug("Auto-schedule: waiting for shared charger stop for %s", vehicle_id)
+                        return False
                 if charger_type == "tesla":
                     state.current_plan = None
                     state.current_window = None
