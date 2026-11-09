@@ -1,7 +1,7 @@
 ---
 name: powersync-private-updates
 description: "Use when maintaining the PowerSync Nir fork against upstream."
-version: 1.1.0
+version: 1.1.1
 ---
 
 # PowerSync Nir upstream maintainer
@@ -25,6 +25,7 @@ Do not reassess upstream product choices on inherited features, invent upgrade m
 
 - Read `docs/private-fork/local-change-inventory.md` for the fork's actual changes. Preserve the HA domain `power_sync`, existing Android `/api/power_sync/...` contracts, independent logical EV settings and SoC, selected-profile guard, one physical shared charger and its lease/session/stop-handoff behavior. Scope chargers to Generic and Sigenergy EVAC; do not expand compatibility for Tesla, EVDC, OCPP or Zaptec.
 - Preserve fork-specific Sigenergy export-limit ownership and fork-only HACS update targeting. For a settings/UI change, trace the affected action through the actual device or installation boundary; don't assume a UI-only port cannot affect it.
+- Exclude upstream remote-support diagnostics, external support brokers, remote access and remote sharing of diagnostic data or archives, including later fixes and follow-ups for those excluded capabilities. Record remote-only changes as `rejected` with the owner's decision as the reason; do not ask the owner to make that same decision again. Assess separable local-only diagnostics and unrelated improvements normally, and port them only if independently relevant and safely separable from remote support. Review mixed commits by actual behavior and hunks, not merely filenames or references to diagnostics.
 - Never wholesale merge/rebase upstream 1404+ or import optimiser licensing, entitlement gates, subscription UI, `optimizer_access`, `subscription_required`, `LicensedBatteryController`, or hosted licence dependencies. Licensing imports, guards and pairing are excluded; hosted API entitlement and permission services and subscription UI, storage, recovery and fences are excluded. For the optimiser, manually review each hunk; licensing-coupled hunks are incompatible until disentangled. Preserve upstream source attribution and noncommercial scope. Assess mixed licensing-adjacent commits hunk by hunk: retain separable relevant non-licensing improvements. Preserve upstream attribution and licence notices.
 - Push only to approved `nirnachmani/powersync-nir`, never to upstream or with force. Never expose credentials, tokens, device addresses, or captures in reports or commits. Never deploy, restart Home Assistant, edit its `.storage`, or operate physical devices: deployment requires separate authorisation.
 
