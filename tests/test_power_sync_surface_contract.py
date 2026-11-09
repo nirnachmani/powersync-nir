@@ -383,6 +383,10 @@ _BULK_SOLVER_SHA256 = "2dec933b1166b4b9753c924033433ba86e319d8c862690522b718f441
 _FALLBACK_EXPORT_SOURCE = "55d65a6e6a36d48b79613ea18278998b18394022"
 _FALLBACK_EXPORT_SHA256 = "ffc0c26454a2aa38558cd80901d661e62148f4c0d2aad2f6463a4f02c7714af4"
 
+# Upstream 246de0cf: bound export timing preference under Cost Neutral.
+_BOUNDED_TIME_SOURCE = "9e3248b711b7791a8a63d1e4111e77defb6cedb5"
+_BOUNDED_TIME_SHA256 = "24fec92d4332f7298139ee3f7bb1eadb8c236ff23ad33d60e72e4410eb0f9221"
+
 # Exact upstream 52465064 plan-schema delta. Legacy no-solar callers remain
 # supported; this digest does not waive changes elsewhere in cost_neutral.py.
 COST_NEUTRAL = OPTIMIZATION / "cost_neutral.py"
@@ -681,6 +685,15 @@ def _fallback_export_diff_is_allowlisted(actual: str) -> bool:
     return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _FALLBACK_EXPORT_SHA256
 
 
+def _bounded_time_diff_is_allowlisted(actual: str) -> bool:
+    expected = _git_show(_BOUNDED_TIME_SOURCE, BATTERY_OPTIMIZER)
+    diff = "\n".join(difflib.unified_diff(
+        expected.splitlines(), actual.splitlines(), fromfile="private_9e3248b7",
+        tofile="bounded_time_candidate", lineterm="",
+    ))
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _BOUNDED_TIME_SHA256
+
+
 def _protected_solar_export_diff_is_allowlisted(actual: str) -> bool:
     """Only the reviewed no-paywall protected-export source delta is allowed."""
     expected = _git_show(_PROTECTED_SOLAR_EXPORT_SOURCE, BATTERY_OPTIMIZER)
@@ -833,7 +846,10 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
             assert _bulk_solver_diff_is_allowlisted(
                 _git_show(_FALLBACK_EXPORT_SOURCE, BATTERY_OPTIMIZER)
             )
-            assert _fallback_export_diff_is_allowlisted(actual)
+            assert _fallback_export_diff_is_allowlisted(
+                _git_show(_BOUNDED_TIME_SOURCE, BATTERY_OPTIMIZER)
+            )
+            assert _bounded_time_diff_is_allowlisted(actual)
         elif relative_path == COST_NEUTRAL:
             assert _final_solar_credit_diff_is_allowlisted(actual)
         elif relative_path == LOAD_ESTIMATOR:
@@ -1107,11 +1123,19 @@ def test_bulk_solver_allowlist_rejects_mutations():
 
 
 def test_fallback_export_allowlist_rejects_mutations():
-    actual = (ROOT / BATTERY_OPTIMIZER).read_text(encoding="utf-8").replace("\r\n", "\n")
+    actual = _git_show(_BOUNDED_TIME_SOURCE, BATTERY_OPTIMIZER)
     assert _fallback_export_diff_is_allowlisted(actual)
     before = 'prefer_higher_prices=True,'
     assert before in actual
     assert not _fallback_export_diff_is_allowlisted(actual.replace(before, 'prefer_higher_prices=False,', 1))
+
+
+def test_bounded_time_allowlist_rejects_mutations():
+    actual = (ROOT / BATTERY_OPTIMIZER).read_text(encoding="utf-8").replace("\r\n", "\n")
+    assert _bounded_time_diff_is_allowlisted(actual)
+    before = 'export_eps /= max(1, p_n)'
+    assert before in actual
+    assert not _bounded_time_diff_is_allowlisted(actual.replace(before, 'export_eps *= max(1, p_n)', 1))
 
 
 def test_final_solar_credit_allowlist_rejects_a_nearby_policy_mutation():
