@@ -302,6 +302,21 @@ _EV_PRESERVE_DIFF_SHA256 = (
     "0754d6aa88cf0826690c7e44f86f3d4a178945c5b5357092306a472b2c2f2fd3"
 )
 
+# Upstream cddd6a13: exact passive measured-cost listener delta, after the
+# previously published solar and shared-loadpoint safeguards.
+_MEASURED_COST_SOURCE = "34fb3bfaaf3b5f1bdccc3460db93b63ed2702edf"
+_MEASURED_COST_DIFF_SHA256 = "458200be2286b87870c9d5652084e16cd0e06b4e9cafb8c14c7b3ef02d34012f"
+
+
+def _measured_cost_diff_is_allowlisted(actual: str) -> bool:
+    expected = _git_show(_MEASURED_COST_SOURCE, COORDINATOR)
+    diff = "\n".join(difflib.unified_diff(
+        expected.splitlines(), actual.splitlines(),
+        fromfile="private_34fb3bfa", tofile="measured_cost_candidate", lineterm="",
+    ))
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _MEASURED_COST_DIFF_SHA256
+
+
 # Upstream 813ad249: only the reviewed hypothetical-curtailment cap removal,
 # anchored after the existing EV-preservation lineage.
 _AVAILABLE_SOLAR_SOURCE = "60d4075f8ae2f2a0c487606ebfdd3168c98fa16c"
@@ -731,7 +746,8 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
             assert _ev_preserve_diff_is_allowlisted(
                 _git_show(_AVAILABLE_SOLAR_SOURCE, COORDINATOR)
             )
-            assert _available_solar_diff_is_allowlisted(actual)
+            assert _available_solar_diff_is_allowlisted(_git_show(_MEASURED_COST_SOURCE, COORDINATOR))
+            assert _measured_cost_diff_is_allowlisted(actual)
         elif relative_path == BATTERY_OPTIMIZER:
             # Preserve proof that e3c17217 itself contains only the earlier,
             # reviewed solar-refill and reachable-deadline changes before
@@ -844,9 +860,17 @@ def test_negative_import_solar_allowlist_rejects_a_nearby_policy_mutation():
         ev_preserve.replace('if active == applied and not (uncertain and not active):',
                        'if active == applied:', 1)
     )
-    assert _available_solar_diff_is_allowlisted(actual)
-    assert not _available_solar_diff_is_allowlisted(actual.replace(
+    predecessor = _git_show(_MEASURED_COST_SOURCE, COORDINATOR)
+    assert _available_solar_diff_is_allowlisted(predecessor)
+    assert not _available_solar_diff_is_allowlisted(predecessor.replace(
         "enabled=bool(production and production.can_project()),", "enabled=True,", 1
+    ))
+    assert _measured_cost_diff_is_allowlisted(actual)
+    assert not _measured_cost_diff_is_allowlisted(actual.replace(
+        "self._track_actual_cost(force=True)", "self._track_actual_cost(force=False)", 1
+    ))
+    assert not _measured_cost_diff_is_allowlisted(actual.replace(
+        "self._cost_tracking_stopping = True", "self._cost_tracking_stopping = False", 1
     ))
     assert not _solar_fallback_diff_is_allowlisted(
         _git_show(_SOLAR_QUOTA_SOURCE, COORDINATOR).replace(
