@@ -6578,6 +6578,7 @@ _phase_load_management_targets: Dict[str, Dict[str, Dict[str, Any]]] = {}
 _AUTOMATED_SHARED_SEQUENCE_BUDGET_KEY = "_automated_shared_loadpoint_sequence_budget"
 _AUTOMATED_SHARED_DECISION_LEDGER_KEY = "_automated_shared_loadpoint_decision_ledger"
 _AUTOMATED_SHARED_SEQUENCE_TOKEN_KEY = "_automated_shared_sequence_token"
+_SHARED_HANDOVER_KEY = "_shared_loadpoint_handover"
 _EXTERNAL_SESSION_STOP_AUTHORIZATION = object()
 
 
@@ -6597,6 +6598,9 @@ def _begin_automated_shared_loadpoint_cycle(
     """Start a private, per-evaluation shared-loadpoint sequence budget."""
     entry_data = _automated_shared_sequence_entry_data(hass, config_entry)
     if entry_data is not None:
+        handover = entry_data.get(_SHARED_HANDOVER_KEY)
+        if isinstance(handover, dict):
+            handover["reaffirmed"] = False
         entry_data[_AUTOMATED_SHARED_SEQUENCE_BUDGET_KEY] = {
             "generation": object(),
             "reservations": {},
@@ -6612,6 +6616,45 @@ def _clear_automated_shared_loadpoint_cycle(
     if entry_data is not None:
         entry_data.pop(_AUTOMATED_SHARED_SEQUENCE_BUDGET_KEY, None)
         entry_data.pop(_AUTOMATED_SHARED_DECISION_LEDGER_KEY, None)
+
+
+def _expire_unconfirmed_shared_handover(hass, config_entry):
+    """Do not reserve a charger for a policy that did not allow it this cycle."""
+    entry_data = _automated_shared_sequence_entry_data(hass, config_entry)
+    handover = entry_data.get(_SHARED_HANDOVER_KEY) if entry_data is not None else None
+    if handover and not handover.get("reaffirmed"):
+        entry_data.pop(_SHARED_HANDOVER_KEY, None)
+
+
+def _shared_handover_waiting(hass, config_entry, loadpoint, profile, owner_mode):
+    """Distinguish a pending stop from a failed charger start."""
+    from .ev_ownership import owner_family
+    entry_data = _automated_shared_sequence_entry_data(hass, config_entry)
+    handover = entry_data.get(_SHARED_HANDOVER_KEY) if entry_data is not None else None
+    return bool(handover and handover.get("loadpoint") == loadpoint
+                and handover.get("profile") == profile
+                and owner_family(handover.get("owner_mode")) == owner_family(owner_mode))
+
+
+def _remember_shared_handover(hass, config_entry, loadpoint, params, pending):
+    """Remember only a current selected profile's allowed automated successor."""
+    from .ev_ownership import owner_family
+    from .shared_loadpoint import resolve_active_shared_profile
+
+    entry_data = _automated_shared_sequence_entry_data(hass, config_entry)
+    if entry_data is None or not pending:
+        return
+    profile = params.get("active_logical_vehicle_id")
+    if not profile or resolve_active_shared_profile(hass, config_entry) != profile:
+        return
+    ledger = entry_data.get(_AUTOMATED_SHARED_DECISION_LEDGER_KEY, {})
+    decision = ledger.get(loadpoint, {}).get(profile, {})
+    owner_mode = params.get("owner_mode") or params.get("dynamic_mode")
+    if decision.get("allowed") and owner_family(decision.get("responsible_mode")) == owner_family(owner_mode):
+        entry_data[_SHARED_HANDOVER_KEY] = {
+            "loadpoint": loadpoint, "profile": profile, "owner_mode": owner_mode,
+            "pending": pending, "reaffirmed": True,
+        }
 
 
 async def _preflight_shared_solar_surplus_decision(
@@ -6716,6 +6759,15 @@ def _record_automated_shared_loadpoint_decision(
     loadpoint_id = canonical_shared_loadpoint_id(config_entry, active_profile_id)
     if loadpoint_id not in ("generic_ev", "sigenergy_charger"):
         return
+    from .ev_ownership import owner_family
+    handover = entry_data.get(_SHARED_HANDOVER_KEY)
+    if handover and handover.get("profile") == active_profile_id and (
+        owner_family(handover.get("owner_mode")) == owner_family(responsible_mode)
+    ):
+        if allowed:
+            handover["reaffirmed"] = True
+        else:
+            entry_data.pop(_SHARED_HANDOVER_KEY, None)
     ledger.setdefault(loadpoint_id, {})[active_profile_id] = {
         "allowed": bool(allowed),
         "responsible_mode": responsible_mode,
@@ -14573,6 +14625,30 @@ async def _action_start_ev_charging_dynamic_locked(
     allow_takeover = bool(params.get("allow_ownership_takeover", False))
     entry_vehicles = _dynamic_ev_state.get(entry_id, {})
 
+    if shared_binding is not None:
+        from .ev_ownership import can_take_over_ev_ownership, owner_family
+        entry_data = _automated_shared_sequence_entry_data(hass, config_entry)
+        handover = entry_data.get(_SHARED_HANDOVER_KEY) if entry_data is not None else None
+        if handover:
+            if (handover.get("loadpoint") != vehicle_id or
+                    handover.get("profile") != params.get("active_logical_vehicle_id")):
+                entry_data.pop(_SHARED_HANDOVER_KEY, None)
+            elif owner_family(owner_mode) != owner_family(handover["owner_mode"]):
+                if can_take_over_ev_ownership(handover["owner_mode"], owner_mode,
+                                              allow_takeover=allow_takeover):
+                    entry_data.pop(_SHARED_HANDOVER_KEY, None)
+                else:
+                    _LOGGER.debug("Dynamic EV: %s waiting for %s handover", owner_mode, handover["owner_mode"])
+                    return False
+            elif not handover.get("pending", {}).get("settled_observation"):
+                return False
+            elif handover.get("reaffirmed"):
+                # The successor is evaluated again by its own policy; no saved
+                # command or parameters are replayed after the stop settles.
+                entry_data.pop(_SHARED_HANDOVER_KEY, None)
+            else:
+                return False
+
     # A selector change never authorises us to disturb a live shared charger.
     # If the physical runtime is already attributed to the other profile, only
     # a fresh idle observation can move its logical attribution.  This returns
@@ -14697,6 +14773,10 @@ async def _action_start_ev_charging_dynamic_locked(
                 await persist_reconciliation_state(hass, config_entry, vehicle_id, reconciliation)
                 if DOMAIN in hass.data and entry_id in hass.data[DOMAIN]:
                     hass.data[DOMAIN][entry_id]["dynamic_ev_state"] = entry_vehicles
+                _remember_shared_handover(
+                    hass, config_entry, vehicle_id, params,
+                    {"settled_observation": observation},
+                )
                 # Cleanup did not start or adopt the selected profile.
                 return False
             if observation.charging is not True:
@@ -14721,6 +14801,9 @@ async def _action_start_ev_charging_dynamic_locked(
                 )
             finally:
                 _direct_shared_stop_owner.reset(token)
+            _remember_shared_handover(
+                hass, config_entry, vehicle_id, params, existing_state.get("pending_stop")
+            )
             # No successor start occurs in the stop transaction, even if it
             # eventually settles; normal policy must retry B in a later cycle.
             return False
@@ -15325,6 +15408,11 @@ async def _action_start_ev_charging_dynamic_locked(
         },
     )
     if not teardown_ok:
+        if shared_binding is not None:
+            _remember_shared_handover(
+                hass, config_entry, vehicle_id, params,
+                entry_vehicles.get(vehicle_id, {}).get("pending_stop"),
+            )
         return False
     self_stopped_during_teardown = bool(
         teardown_report.get("physical_stop_vehicle_ids")

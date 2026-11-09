@@ -1565,3 +1565,28 @@ def test_failed_start_backoff_is_exponential_and_bounded(monkeypatch):
 
     assert delays[:4] == [30, 60, 120, 240]
     assert delays[-1] == ev_planner.AUTO_SCHEDULE_START_RETRY_MAX_SECONDS
+
+
+def test_pending_shared_handover_is_not_a_failed_start(monkeypatch):
+    fake_actions = types.ModuleType("power_sync.automations.actions")
+    async def pending_start(*args, **kwargs):
+        args[2]["shared_loadpoint_binding"] = True
+        args[2]["active_logical_vehicle_id"] = "shared_ev_profile_a"
+        return False
+    async def grid_limit(*args, **kwargs):
+        return None
+    fake_actions._action_start_ev_charging_dynamic = pending_start
+    fake_actions._resolve_max_grid_import_kw = grid_limit
+    fake_actions._shared_handover_waiting = lambda *args: True
+    monkeypatch.setitem(sys.modules, "power_sync.automations.actions", fake_actions)
+    monkeypatch.setattr(ev_planner, "_get_optimizer_battery_params", lambda *args, **kwargs: {})
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: types.SimpleNamespace(weekday=lambda: 0))
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor.hass = types.SimpleNamespace()
+    executor.config_entry = types.SimpleNamespace(entry_id="entry-1", data={}, options={
+        "generic_charger_enabled": True, "generic_charger_switch_entity": "switch.charger"})
+    executor._resolve_vehicle_vin = lambda vehicle_id: None
+    settings = ev_planner.AutoScheduleSettings(enabled=True, vehicle_id="generic_ev", charger_type="generic")
+    state = ev_planner.AutoScheduleState(vehicle_id="generic_ev")
+    assert not asyncio.run(executor._start_charging("generic_ev", settings, state, "grid"))
+    assert not getattr(executor, "_start_failure_state", {})

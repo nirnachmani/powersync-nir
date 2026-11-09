@@ -44070,6 +44070,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if coordinator:
                 await coordinator.evaluate(live_status, current_price)
 
+            # A waiting successor must reaffirm its own policy every cycle;
+            # otherwise allow the ordinary Solar Surplus fallback to resume.
+            from .automations.actions import _expire_unconfirmed_shared_handover
+            _expire_unconfirmed_shared_handover(hass, entry)
+
             # Evaluate solar surplus charging (app-driven toggle)
             # When the user enables solar surplus in the mobile app, this starts/stops
             # dynamic solar surplus EV charging based on the stored config.
