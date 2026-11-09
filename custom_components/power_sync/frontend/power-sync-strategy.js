@@ -8608,7 +8608,10 @@ function _boardCards(ctx) {
   }
 
   const hasDC = hasE('solar_curtailment');
-  if (hasDC) add({ key: 'curtail', title: 'Solar curtailment', card: _curtailmentStatus(e, true, false) });
+  const hasAC = hasE('inverter_status');
+  if (hasDC || hasAC) add({ key: 'curtail', title: 'Solar curtailment', card: _curtailmentStatus(e, hasDC, hasAC) });
+  if (hasAC) add({ key: 'acinv', title: 'AC inverter', native: 'ps-inverter-controls-card',
+    config: { entities: { inverter: e('inverter_status') } } });
   add(_boardEntry('pv', 'Solar strings', _pvStringSensors(e, hass, findSensor)));
 
   // Extra physical battery integration details, one card per category.

@@ -211,7 +211,7 @@ def _board_script(body: str) -> str:
         + r"""
   vm.createContext(context);
   const src = fs.readFileSync(process.argv[1], 'utf8').replace(/^export \{[^}]*\};?\s*$/m, '');
-  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsSettingsDialog, PS_SETTING_EDITORS, PsSettingsCard, PsTodayCard, PsNowCard, PsPlanCard, PsControlsCard, psUntilPreview, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, PsTariffCard, psApiCache, psPlannedRunEnd };', context);
+  vm.runInContext(src + '\n;globalThis.__t = { PowerSyncBoard, PsSettingsDialog, PS_SETTING_EDITORS, PsSettingsCard, PsTodayCard, PsNowCard, PsPlanCard, PsControlsCard, psUntilPreview, psSchedule, psWindows, psActionKey, PS_LAYOUT_KEY, PS_DEFAULT_LAYOUT, psChartValue, psChart, psBars, PsPricesCard, PsEnergyCard, PsLoadForecastCard, PsSolarLoadCard, PsBatteryPlanCard, PsTariffCard, PsInverterControlsCard, psApiCache, psPlannedRunEnd };', context);
   const T = context.__t;
 """
         + body
@@ -1244,3 +1244,72 @@ def test_plan_window_shows_varying_targets_instead_of_only_peak_power():
     assert "5.0 kW" in out["rounding"][0] and "–" not in out["rounding"][0]
     assert "2.0 kW–5.0 kW" in out["charge"][0]
     assert "200 W–1.0 kW" in out["solar"][0]
+
+
+def test_native_inverter_controls_confirm_and_route_without_button_card():
+    out = _run_board(r"""
+      (async () => {
+        const calls = [], toasts = [];
+        const card = new T.PsInverterControlsCard();
+        card._config = {entities: {inverter: 'sensor.power_sync_inverter_status'}};
+        card._hass = {states: {'sensor.power_sync_inverter_status': {state: 'online'}},
+          callService: async (...args) => { calls.push(args); }};
+        card._toast = text => toasts.push(text);
+        const click = action => card._onClick({target: {closest: () => ({dataset: {inverterAction: action}})}});
+        card._render();
+        const html = card.innerHTML;
+        for (const action of ['load_following', 'shutdown', 'restore']) {
+          const before = calls.length;
+          await click(action);
+          if (calls.length !== before) throw Error('first tap dispatched');
+          await click(action);
+        }
+        for (const state of ['unavailable', 'unknown', 'offline', 'error']) {
+          card._hass.states['sensor.power_sync_inverter_status'].state = state;
+          await click('shutdown'); await click('shutdown');
+        }
+        card.disconnectedCallback();
+        console.log(JSON.stringify({calls, toasts, html}));
+      })();
+    """)
+    assert out['calls'] == [
+        ['power_sync', 'curtail_inverter', {'mode': 'load_following'}],
+        ['power_sync', 'curtail_inverter', {'mode': 'shutdown'}],
+        ['power_sync', 'restore_inverter', {}],
+    ]
+    assert 'Load Follow' in out['html'] and '>Stop<' in out['html'] and '>Restore<' in out['html']
+    assert all('Request sent' in message for message in out['toasts'])
+
+
+def test_strategy_uses_native_inverter_controls():
+    script = _strategy_script(board_missing=False).replace(
+        "'sensor.power_sync_battery_level': s(69,", "'sensor.power_sync_inverter_status': s('online'), 'sensor.power_sync_battery_level': s(69,"
+    ).replace("type: top.type,", "inverter: cards.find(c => c.key === 'acinv'), type: top.type,")
+    result = subprocess.run(['node', '-e', script, str(STRATEGY_PATH)], check=True, capture_output=True, text=True)
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    assert out['inverter']['native'] == 'ps-inverter-controls-card'
+    assert out['inverter']['config']['entities']['inverter'] == 'sensor.power_sync_inverter_status'
+
+
+def test_native_inverter_controls_serialize_requests_and_report_failure():
+    out = _run_board(r"""
+      (async () => {
+        let release, calls = 0;
+        const messages = [];
+        const card = new T.PsInverterControlsCard();
+        card._config = {entities: {inverter: 'sensor.inverter'}};
+        card._hass = {states: {'sensor.inverter': {state: 'online'}},
+          callService: () => { calls++; return new Promise((resolve, reject) => { release = () => reject(Error('offline')); }); }};
+        card._toast = text => messages.push(text);
+        const click = () => card._onClick({target: {closest: () => ({dataset: {inverterAction: 'shutdown'}})}});
+        await click(); const pending = click();
+        await click(); await click();
+        const during = calls;
+        release(); await pending;
+        console.log(JSON.stringify({calls, during, messages, busy: card._busy, confirm: card._confirm}));
+      })();
+    """)
+    assert out['calls'] == out['during'] == 1
+    assert out['busy'] is None and out['confirm'] is None
+    assert len(out['messages']) == 1 and 'offline' in out['messages'][0]
+    assert 'Request sent' not in out['messages'][0]
