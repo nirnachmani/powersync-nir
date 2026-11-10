@@ -1,3 +1,9 @@
+<!-- release: v2.12.1671-nir.2 -->
+
+## v2.12.1671-nir.2 — negative-price PV stop in self-consumption mode
+- Allow the native Sigenergy PV-limit stop in Remote EMS mode 2 as well as modes 3–6; preserve the existing checks, saved limit and restoration behavior.
+- Source release only; register readback and actual solar generation remain separate observations.
+
 <!-- release: v2.12.1671-nir.1 -->
 
 ## v2.12.1671-nir.1 — upstream compatibility and solar EV safeguards

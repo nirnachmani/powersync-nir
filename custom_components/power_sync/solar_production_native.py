@@ -9,6 +9,9 @@ from __future__ import annotations
 from copy import deepcopy
 
 NATIVE_BRANDS = frozenset({"sigenergy"})
+# Newer Sigenergy protocol revisions describe the PV limit as global;
+# register readback alone cannot prove physical effect.
+PV_LIMIT_EMS_MODES = frozenset({2, 3, 4, 5, 6})
 
 
 class NativeProductionTarget:
@@ -40,7 +43,7 @@ class NativeProductionTarget:
                 controller.REG_REMOTE_EMS_CONTROL_MODE, 1
             )
             self._pv_limit_effective = bool(
-                enabled == [1] and mode and mode[0] in (3, 4, 5, 6)
+                enabled == [1] and mode and mode[0] in PV_LIMIT_EMS_MODES
             )
             return (
                 {"pv_limit": value}
@@ -73,7 +76,7 @@ class NativeProductionTarget:
                 mode = await controller._read_holding_registers(
                     controller.REG_REMOTE_EMS_CONTROL_MODE, 1
                 )
-                if enabled != [1] or not mode or mode[0] not in (3, 4, 5, 6):
+                if enabled != [1] or not mode or mode[0] not in PV_LIMIT_EMS_MODES:
                     return False
             if not getattr(self, "allowed", lambda: True)():
                 return False

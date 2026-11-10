@@ -313,6 +313,61 @@ def test_number_production_control_requires_zero_and_restores_exact_nondefault_v
     run(scenario())
 
 
+@pytest.mark.parametrize("restore_mode", [1, 2])
+def test_sigenergy_mode2_negative_price_stops_and_restores_exact_pv_limit(restore_mode):
+    from contextlib import asynccontextmanager
+    registers = {40029: [1], 40031: [2], 40036: [0, 20000], 40038: [0, 5000]}
+    writes = []
+
+    @asynccontextmanager
+    async def transaction():
+        yield
+
+    async def connect():
+        return True
+
+    async def read(address, count=1):
+        return registers[address]
+
+    async def read_pv():
+        return registers[40036][0] * 65536 + registers[40036][1]
+
+    async def write(address, value):
+        writes.append((address, value))
+        registers[address] = value
+        return True
+
+    controller = SimpleNamespace(
+        connect=connect, _modbus_transaction=transaction, _read_holding_registers=read,
+        _get_current_pv_limit=read_pv, _write_holding_registers=write,
+        _from_unsigned32=lambda value: [value >> 16, value & 65535],
+        REG_REMOTE_EMS_ENABLE=40029, REG_REMOTE_EMS_CONTROL_MODE=40031,
+        REG_PV_MAX_POWER_LIMIT=40036,
+    )
+    identity = {"brand": "sigenergy"}
+    store = Store()
+    manager = pv.ProductionStopManager(
+        store, lambda _: native.NativeProductionTarget(controller, identity), lambda: True
+    )
+
+    async def scenario():
+        await manager.update(-5, [identity])
+        assert manager.owns_control, "mode 2 must admit the finite PV limit"
+        assert store.data["records"][0]["original"] == {"pv_limit": 20000}
+        assert registers[40036] == [0, 0]
+        assert manager.device_confirmed and manager.physical_converged is None
+        registers[40031] = [restore_mode]
+        await manager.update(-5, [identity])
+        assert manager.device_confirmed is (restore_mode == 2)
+        await manager.update(0, [])
+        assert registers[40036] == [0, 20000]
+        assert writes == [(40036, [0, 0]), (40036, [0, 20000])]
+        assert registers[40029] == [1] and registers[40031] == [restore_mode] and registers[40038] == [0, 5000]
+        assert not manager.owns_control
+
+    run(scenario())
+
+
 def test_sigenergy_pv_only_limit_preserves_ems_and_export_and_recovers_when_mode_changes():
     from contextlib import asynccontextmanager
     registers = {40029:[1],40031:[3],40036:[0,7500],40038:[0,5000]}
@@ -335,12 +390,90 @@ def test_sigenergy_pv_only_limit_preserves_ems_and_export_and_recovers_when_mode
         assert registers[40029]==[1] and registers[40031]==[3] and registers[40038]==[0,5000]
         registers[40031]=[2]  # optimiser returns to self-consumption
         await manager.update(-5,[identity])
-        assert not manager.device_confirmed  # PV register is inactive in mode 2
+        assert manager.device_confirmed  # the limit remains eligible in mode 2
         await manager.update(0,[])
         assert registers[40036]==[0,7500]
         assert all(address==40036 for address,_ in writes)
         assert not manager.owns_control
     run(scenario())
+
+
+def test_sigenergy_mode_and_ems_guards_recheck_before_stop():
+    from contextlib import asynccontextmanager
+    registers: dict[int, list[int] | None] = {40029: [1], 40031: [2]}
+    writes = []
+
+    @asynccontextmanager
+    async def transaction():
+        yield
+
+    async def connect():
+        return True
+
+    async def read(address, count=1):
+        return registers[address]
+
+    async def write(address, value):
+        writes.append((address, value))
+        return True
+
+    async def read_pv():
+        return 20000
+
+    controller = SimpleNamespace(
+        connect=connect, _modbus_transaction=transaction, _read_holding_registers=read,
+        _get_current_pv_limit=read_pv, _write_holding_registers=write,
+        _from_unsigned32=lambda value: [value >> 16, value & 65535],
+        REG_REMOTE_EMS_ENABLE=40029, REG_REMOTE_EMS_CONTROL_MODE=40031,
+        REG_PV_MAX_POWER_LIMIT=40036,
+    )
+
+    async def scenario():
+        target = native.NativeProductionTarget(controller, {"brand": "sigenergy"})
+        for mode in (2, 3, 4, 5, 6):
+            registers[40031] = [mode]
+            original = await target.read()
+            assert target.stopped(original) == {"pv_limit": 0}
+        for mode in (0, 1, 7, None):
+            registers[40031] = [mode] if mode is not None else None
+            original = await target.read()
+            assert target.stopped(original) is None
+        registers[40031] = [2]
+        await target.read()
+        registers[40031] = [1]  # changed after the initial read
+        assert not await target.write({"pv_limit": 0})
+        registers[40031] = [2]
+        registers[40029] = [0]
+        assert not await target.write({"pv_limit": 0})
+        assert target.stopped(await target.read()) is None
+        assert not writes
+
+    run(scenario())
+
+
+def test_sigenergy_mode2_rejects_unrestorable_sentinel():
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def transaction():
+        yield
+
+    async def read(address, count=1):
+        return {40029: [1], 40031: [2]}[address]
+
+    async def connect():
+        return True
+
+    async def read_pv():
+        return 0xFFFFFFFF
+
+    controller = SimpleNamespace(
+        connect=connect, _modbus_transaction=transaction,
+        _read_holding_registers=read, _get_current_pv_limit=read_pv,
+        REG_REMOTE_EMS_ENABLE=40029, REG_REMOTE_EMS_CONTROL_MODE=40031,
+    )
+    target = native.NativeProductionTarget(controller, {"brand": "sigenergy"})
+    assert run(target.read()) is None
 
 
 def test_one_unavailable_device_does_not_suppress_other_solar_controls():
