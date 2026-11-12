@@ -387,6 +387,10 @@ _FALLBACK_EXPORT_SHA256 = "ffc0c26454a2aa38558cd80901d661e62148f4c0d2aad2f6463a4
 _BOUNDED_TIME_SOURCE = "9e3248b711b7791a8a63d1e4111e77defb6cedb5"
 _BOUNDED_TIME_SHA256 = "24fec92d4332f7298139ee3f7bb1eadb8c236ff23ad33d60e72e4410eb0f9221"
 
+# Upstream 3b7f72cb: continuous charge provenance across stepped SOC.
+_STEPPED_SOC_SOURCE = "a986af9e0e162d774b4565c29d8c9a7f6c0e9899"
+_STEPPED_SOC_SHA256 = "2cfe46955794f990a4a36c45255dd07dd63430cb53523d5147d1ff9cd2695b0f"
+
 # Exact upstream 52465064 plan-schema delta. Legacy no-solar callers remain
 # supported; this digest does not waive changes elsewhere in cost_neutral.py.
 COST_NEUTRAL = OPTIMIZATION / "cost_neutral.py"
@@ -694,6 +698,15 @@ def _bounded_time_diff_is_allowlisted(actual: str) -> bool:
     return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _BOUNDED_TIME_SHA256
 
 
+def _stepped_soc_diff_is_allowlisted(actual: str) -> bool:
+    expected = _git_show(_STEPPED_SOC_SOURCE, COORDINATOR)
+    diff = "\n".join(difflib.unified_diff(
+        expected.splitlines(), actual.splitlines(), fromfile="private_a986af9e",
+        tofile="stepped_soc_candidate", lineterm="",
+    ))
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _STEPPED_SOC_SHA256
+
+
 def _protected_solar_export_diff_is_allowlisted(actual: str) -> bool:
     """Only the reviewed no-paywall protected-export source delta is allowed."""
     expected = _git_show(_PROTECTED_SOLAR_EXPORT_SOURCE, BATTERY_OPTIMIZER)
@@ -813,7 +826,8 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
                 _git_show(_AVAILABLE_SOLAR_SOURCE, COORDINATOR)
             )
             assert _available_solar_diff_is_allowlisted(_git_show(_MEASURED_COST_SOURCE, COORDINATOR))
-            assert _measured_cost_diff_is_allowlisted(actual)
+            assert _measured_cost_diff_is_allowlisted(_git_show(_STEPPED_SOC_SOURCE, COORDINATOR))
+            assert _stepped_soc_diff_is_allowlisted(actual)
         elif relative_path == BATTERY_OPTIMIZER:
             # Preserve proof that e3c17217 itself contains only the earlier,
             # reviewed solar-refill and reachable-deadline changes before
@@ -859,6 +873,12 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
             assert _solcast_executor_diff_is_allowlisted(actual)
         else:
             assert actual == expected
+
+
+def test_stepped_soc_allowlist_rejects_unreviewed_change():
+    actual = (ROOT / COORDINATOR).read_text(encoding="utf-8")
+    assert _stepped_soc_diff_is_allowlisted(actual)
+    assert not _stepped_soc_diff_is_allowlisted(actual + "\n# unreviewed change\n")
 
 
 def test_amber_optimizer_allowlist_rejects_an_unreviewed_coordinator_change():
