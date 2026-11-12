@@ -135,6 +135,35 @@ def _generic_params() -> dict:
 @pytest.mark.parametrize("charger_type,loadpoint", [
     ("generic", "generic_ev"), ("sigenergy", "sigenergy_charger"),
 ])
+@pytest.mark.parametrize("grid_w,expected", [(30, 26), (-30, 26), (0, 26), (1000, 21)])
+def test_shared_battery_supply_grid_tolerance(monkeypatch, charger_type, loadpoint, grid_w, expected):
+    hass, entry = _Hass(), _Entry()
+    monkeypatch.setattr(actions, "_release_dynamic_tesla_if_away", AsyncMock(return_value=False))
+    monkeypatch.setattr(actions, "_clear_ble_dynamic_session_if_unplugged", AsyncMock(return_value=False))
+    monkeypatch.setattr(actions, "_get_tesla_live_status", AsyncMock(return_value={
+        "battery_power": 6500, "grid_power": grid_w, "solar_power": 0,
+        "load_power": 300, "ev_power": 6240, "battery_soc": 60,
+    }))
+    write = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", write)
+    state = {"active": True, "current_amps": 26, "target_amps": 26,
+             "params": {"dynamic_mode": "battery_target", "owner_mode": "scheduled",
+                        "charger_type": charger_type, "active_logical_vehicle_id": "shared_ev_profile_a",
+                        "target_battery_charge_kw": 0, "max_grid_import_kw": 14.9,
+                        "max_inverter_kw": 14.9, "no_grid_import": True,
+                        "min_charge_amps": 5, "max_charge_amps": 32,
+                        "voltage": 240, "phases": 1}}
+    actions._dynamic_ev_state[entry.entry_id] = {loadpoint: state}
+    for _ in range(4 if abs(grid_w) <= 100 else 1):
+        asyncio.run(actions._dynamic_ev_update(hass, entry, entry.entry_id, loadpoint))
+    assert state["current_amps"] == expected
+    if abs(grid_w) <= 100:
+        write.assert_not_awaited()
+
+
+@pytest.mark.parametrize("charger_type,loadpoint", [
+    ("generic", "generic_ev"), ("sigenergy", "sigenergy_charger"),
+])
 def test_shared_dynamic_window_failed_stop_does_not_announce_success(
     monkeypatch, charger_type, loadpoint,
 ):
