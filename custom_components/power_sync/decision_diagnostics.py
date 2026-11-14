@@ -10,6 +10,10 @@ import hashlib
 import json
 import logging
 import math
+import os
+import queue
+import threading
+from concurrent.futures import Future
 import time
 from pathlib import Path
 import re
@@ -18,23 +22,66 @@ from zoneinfo import ZoneInfo
 
 _LOGGER = logging.getLogger(__name__)
 _NAME = re.compile(r"^(ev|optimizer)-(\d{4}-\d{2}-\d{2})\.jsonl$")
+_NAS_MOUNT = Path('/share/NAS_Backup')
+
+# One daemon per integration module: a hung NFS operation cannot occupy HA's
+# shared executor or create an unbounded thread per retry/reload.
+_disk_jobs = queue.Queue(maxsize=1)
+_disk_start_lock = threading.Lock()
+_disk_thread = None
+
+
+def _disk_worker():
+    while True:
+        future, func, args = _disk_jobs.get()
+        try:
+            if future.set_running_or_notify_cancel():
+                try:
+                    future.set_result(func(*args))
+                except BaseException as exc:
+                    future.set_exception(exc)
+        finally:
+            _disk_jobs.task_done()
+
+
+async def _disk_call(func, *args):
+    global _disk_thread
+    with _disk_start_lock:
+        if _disk_thread is None or not _disk_thread.is_alive():
+            _disk_thread = threading.Thread(target=_disk_worker, name='powersync-diagnostics-disk', daemon=True)
+            _disk_thread.start()
+    future = Future()
+    try:
+        _disk_jobs.put_nowait((future, func, args))
+    except queue.Full as exc:
+        raise OSError('decision logging disk worker is busy') from exc
+    # Cancellation cannot stop a kernel NFS call; the sole daemon remains
+    # isolated until it returns. Queued, cancelled jobs are skipped.
+    return await asyncio.wait_for(asyncio.wrap_future(future), timeout=5.0)
 
 
 class DecisionFileWriter:
     """Append JSON Lines and remove only expired files owned by the logger."""
 
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, *, required_mount: Path | None = None):
         self.directory = Path(directory)
+        self.required_mount = required_mount
+
+    def _check_mount(self) -> None:
+        if self.required_mount is not None and not os.path.ismount(self.required_mount):
+            raise OSError('decision diagnostics NAS share is not mounted')
 
     def append(self, stream: str, day: date, event: dict) -> None:
         if stream not in {"ev", "optimizer"}:
             raise ValueError("unknown decision stream")
+        self._check_mount()
         data = json.dumps(event, separators=(",", ":"), allow_nan=False)
         self.directory.mkdir(parents=True, exist_ok=True)
         with (self.directory / f"{stream}-{day.isoformat()}.jsonl").open("a", encoding="utf-8") as output:
             output.write(data + "\n")
 
     def prune(self, today: date) -> None:
+        self._check_mount()
         if not self.directory.exists():
             return
         cutoff = today - timedelta(days=7)
@@ -52,8 +99,9 @@ class DecisionFileWriter:
 
 def start_entry_diagnostics(hass, entry_id, version):
     """Start the entry-local writer using Home Assistant's configured timezone."""
-    writer = AsyncDecisionWriter(Path(hass.config.path('power_sync_diagnostics')),
-                                 tz=ZoneInfo(hass.config.time_zone), version=version)
+    writer = AsyncDecisionWriter(_NAS_MOUNT / 'power_sync_diagnostics',
+                                 tz=ZoneInfo(hass.config.time_zone), version=version,
+                                 required_mount=_NAS_MOUNT)
     writer.entry_alias = hashlib.sha256(entry_id.encode()).hexdigest()[:12]
     writer.start()
     return writer
@@ -62,11 +110,11 @@ def start_entry_diagnostics(hass, entry_id, version):
 class AsyncDecisionWriter:
     """Bounded producer queue; all file work runs off the event loop."""
 
-    def __init__(self, directory: Path, *, capacity: int = 1024, tz=None, clock=None, shutdown_timeout: float = 5.0, maintenance_interval: float = 3600, version=None):
+    def __init__(self, directory: Path, *, capacity: int = 1024, tz=None, clock=None, shutdown_timeout: float = 5.0, maintenance_interval: float = 3600, version=None, required_mount: Path | None = None):
         self.version = version
         self.entry_alias: str | None = None
         self.session_id = uuid4().hex
-        self.files = DecisionFileWriter(directory)
+        self.files = DecisionFileWriter(directory, required_mount=required_mount)
         self.shutdown_timeout = shutdown_timeout
         self.maintenance_interval = maintenance_interval
         self.tz = tz
@@ -279,7 +327,7 @@ class AsyncDecisionWriter:
         reported_errors = 0
         try:
             initial_day = self.clock().astimezone(self.tz).date()
-            await asyncio.to_thread(self.files.prune, initial_day)
+            await _disk_call(self.files.prune, initial_day)
             last_day = initial_day
         except Exception:
             self.errors += 1
@@ -291,7 +339,7 @@ class AsyncDecisionWriter:
                 try:
                     today = self.clock().astimezone(self.tz).date()
                     if today != last_day:
-                        await asyncio.to_thread(self.files.prune, today)
+                        await _disk_call(self.files.prune, today)
                         last_day = today
                 except Exception:
                     self.errors += 1
@@ -302,7 +350,7 @@ class AsyncDecisionWriter:
                     return
                 stream, day, event = item
                 if day != last_day:
-                    await asyncio.to_thread(self.files.prune, day)
+                    await _disk_call(self.files.prune, day)
                     last_day = day
                 if isinstance(event, tuple):
                     event, recorder = event
@@ -310,7 +358,7 @@ class AsyncDecisionWriter:
                         event['capture'] = await asyncio.to_thread(recorder.export)
                     finally:
                         recorder.close()
-                await asyncio.to_thread(self.files.append, stream, day, event)
+                await _disk_call(self.files.append, stream, day, event)
                 if self.dropped != reported_dropped or self.errors != reported_errors:
                     gap_now = self.clock()
                     gap = {'event': 'diagnostic_gap', 'schema_version': 1, 'version': self.version,
@@ -320,7 +368,7 @@ class AsyncDecisionWriter:
                            'after_sequence': event['sequence'], 'dropped_total': self.dropped,
                            'errors_total': self.errors}
                     try:
-                        await asyncio.to_thread(self.files.append, stream, day, gap)
+                        await _disk_call(self.files.append, stream, day, gap)
                     except Exception:
                         self.errors += 1
                         self._warn_health()
@@ -331,6 +379,10 @@ class AsyncDecisionWriter:
                 self.dropped += 1
                 self._warn_health()
             finally:
+                # If retention failed before a queued solver capture could be
+                # exported, release it rather than retaining its large buffers.
+                if item is not None and isinstance(item[2], tuple):
+                    item[2][1].close()
                 self.queue.task_done()
 
     async def close(self) -> None:

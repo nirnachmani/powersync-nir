@@ -4,9 +4,11 @@ Decision logging is enabled by default when the integration entry starts. No sep
 
 ## Storage and privacy
 
-Records are local JSON Lines under the Home Assistant configuration directory in `power_sync_diagnostics/`: `ev-YYYY-MM-DD.jsonl` and `optimizer-YYYY-MM-DD.jsonl`. The filename date uses the Home Assistant timezone; timestamps are UTC. Cleanup keeps the current local calendar date and the previous seven dates. Consequently the retained interval varies with the time of day and daylight-saving transitions. Cleanup runs at startup and periodically while idle.
+Records are local JSON Lines on the configured Home Assistant network share at `/share/NAS_Backup/power_sync_diagnostics/`: `ev-YYYY-MM-DD.jsonl` and `optimizer-YYYY-MM-DD.jsonl`. Files from earlier versions remain under `/config/power_sync_diagnostics/`; they are not moved or deleted. The filename date uses the Home Assistant timezone; timestamps are UTC. Cleanup keeps the current local calendar date and the previous seven dates. Consequently the retained interval varies with the time of day and daylight-saving transitions. Cleanup runs at startup and periodically while idle.
 
-Data can contain energy consumption, price forecasts, charging schedules and battery states. Treat the directory as private. The logger uses explicitly allowed fields, logical profile IDs and an opaque entry alias; it does not deliberately export tokens, VINs or exact location. It does not transmit files remotely.
+The share must be mounted as `/share/NAS_Backup`; otherwise diagnostics are dropped and a warning is logged, with no fallback to local storage. Network filesystem writes and retention cleanup use a dedicated daemon worker, separate from Home Assistant's shared executor. If NAS I/O stalls, the control path continues and the bounded diagnostics queue can drop records; logging resumes when the share and worker recover. An in-flight network write may complete after a timeout, so a warning does not prove that particular write was absent. A blocked kernel operation cannot be cancelled by Python, but it does not prevent integration unload indefinitely or require spawning further disk workers.
+
+Data can contain energy consumption, price forecasts, charging schedules and battery states. Treat the NAS directory as private. The logger uses explicitly allowed fields, logical profile IDs and an opaque entry alias; it does not deliberately include tokens, VINs or exact location. Records are sent to the configured NAS share, not to a support service.
 
 ## Reading records
 

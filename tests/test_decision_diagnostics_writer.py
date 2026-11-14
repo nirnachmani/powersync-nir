@@ -17,6 +17,76 @@ def load_writer():
     return module
 
 
+def test_entry_diagnostics_use_nas_directory(tmp_path):
+    from types import SimpleNamespace
+    module = load_writer()
+    async def exercise():
+        hass = SimpleNamespace(config=SimpleNamespace(time_zone='Australia/Adelaide', path=lambda name: str(tmp_path / name)))
+        writer = module.start_entry_diagnostics(hass, 'entry', '1')
+        assert writer.files.directory == Path('/share/NAS_Backup/power_sync_diagnostics')
+        await writer.close()
+    asyncio.run(exercise())
+
+
+def test_missing_nas_mount_does_not_create_local_directory(tmp_path):
+    module = load_writer()
+    mount = tmp_path / 'not_mounted'
+    mount.mkdir()
+    files = module.DecisionFileWriter(mount / 'power_sync_diagnostics', required_mount=mount)
+    try:
+        files.append('ev', date(2026, 11, 14), {'event': 'pause'})
+        assert False, 'expected missing mount to fail'
+    except OSError:
+        pass
+    assert not files.directory.exists()
+
+
+def test_stalled_network_io_does_not_block_default_executor_or_shutdown(tmp_path):
+    import threading
+    module = load_writer()
+    entered, release = threading.Event(), threading.Event()
+    threads = []
+    async def exercise():
+        writer = module.AsyncDecisionWriter(tmp_path, shutdown_timeout=0.05)
+        def stuck(*args):
+            threads.append(threading.current_thread())
+            entered.set()
+            release.wait(3)
+        writer.files.prune = stuck
+        writer.start()
+        try:
+            for _ in range(100):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(.001)
+            assert entered.is_set()
+            assert await asyncio.wait_for(asyncio.to_thread(lambda: 'available'), .3) == 'available'
+            await asyncio.wait_for(writer.close(), .3)
+            assert writer.dropped >= 1
+            assert threads[0].daemon and threads[0].name.startswith('powersync-diagnostics')
+        finally:
+            release.set()
+    asyncio.run(exercise())
+
+
+def test_nas_unavailable_then_recovers_without_affecting_producers(tmp_path, monkeypatch):
+    module = load_writer()
+    available = [False]
+    monkeypatch.setattr(module.os.path, 'ismount', lambda path: available[0])
+    async def exercise():
+        writer = module.AsyncDecisionWriter(tmp_path / 'logs', required_mount=tmp_path)
+        writer.start()
+        assert writer.emit('ev', {'event': 'first'})
+        await writer.queue.join()
+        assert writer.dropped >= 1 and writer.errors >= 1
+        available[0] = True
+        assert writer.emit('ev', {'event': 'pause', 'amps': 6})
+        await writer.close()
+    asyncio.run(exercise())
+    rows = [json.loads(line) for line in next((tmp_path / 'logs').glob('ev-*.jsonl')).read_text().splitlines()]
+    assert [row['event'] for row in rows] == ['pause', 'diagnostic_gap']
+
+
 def test_streams_are_separate_and_retention_does_not_remove_other_files(tmp_path):
     module = load_writer()
     writer = module.DecisionFileWriter(tmp_path)
@@ -367,9 +437,11 @@ def test_write_error_warns_without_logging_sensitive_exception(tmp_path, caplog)
     assert 'private-data-sentinel' not in caplog.text
 
 
-def test_entry_lifecycle_records_in_ha_config_and_flushes(tmp_path):
+def test_entry_lifecycle_records_on_nas_and_flushes(tmp_path, monkeypatch):
     from types import SimpleNamespace
     module = load_writer()
+    monkeypatch.setattr(module, '_NAS_MOUNT', tmp_path)
+    monkeypatch.setattr(module.os.path, 'ismount', lambda path: path == tmp_path)
     config = SimpleNamespace(path=lambda name: str(tmp_path / name), time_zone='Australia/Adelaide')
     hass = SimpleNamespace(config=config)
     async def run():
