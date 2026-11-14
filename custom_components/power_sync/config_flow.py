@@ -90,6 +90,7 @@ from .const import (
     CONF_AUTO_UPDATE_ENABLED,
     CONF_AUTO_UPDATE_TIME,
     DEFAULT_AUTO_UPDATE_TIME,
+    CONF_DECISION_LOGGING_ENABLED,
     CONF_CLOUD_FLOW_REPORT,
     CONF_CLOUD_FLOW_GRID_ENTITY,
     CONF_CLOUD_FLOW_SOLAR_ENTITY,
@@ -8854,6 +8855,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             "weather",
             "auto_update",
             "cloud_flow",
+            "decision_logging",
         ]
         if self._effective_battery_system() == BATTERY_SYSTEM_SUNGROW:
             menu_options.append("history_relink")
@@ -8864,6 +8866,24 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         return self.async_show_menu(
             step_id="advanced",
             menu_options=menu_options,
+        )
+
+    async def async_step_decision_logging(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Enable or disable private decision logging for this entry."""
+        if user_input is not None:
+            return self._save_and_finish({
+                CONF_DECISION_LOGGING_ENABLED: user_input.get(CONF_DECISION_LOGGING_ENABLED, False),
+            })
+        return self.async_show_form(
+            step_id="decision_logging",
+            data_schema=vol.Schema({
+                vol.Optional(
+                    CONF_DECISION_LOGGING_ENABLED,
+                    default=self._get_option(CONF_DECISION_LOGGING_ENABLED, True),
+                ): BooleanSelector(),
+            }),
         )
 
     async def async_step_back(

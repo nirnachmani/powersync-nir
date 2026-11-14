@@ -24502,17 +24502,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Local retrospective diagnostics are observer-only and default on.
     # A setup failure must not leave the writer running after the entry unloads.
     try:
-        from .const import POWER_SYNC_VERSION
+        from .const import CONF_DECISION_LOGGING_ENABLED, POWER_SYNC_VERSION
         from .decision_diagnostics import start_entry_diagnostics
 
-        diagnostics = start_entry_diagnostics(hass, entry.entry_id, POWER_SYNC_VERSION)
-        hass.data[DOMAIN][entry.entry_id]["decision_diagnostics"] = diagnostics
+        diagnostics = start_entry_diagnostics(
+            hass, entry.entry_id, POWER_SYNC_VERSION,
+            enabled=entry.options.get(CONF_DECISION_LOGGING_ENABLED, True),
+        )
+        if diagnostics is not None:
+            hass.data[DOMAIN][entry.entry_id]["decision_diagnostics"] = diagnostics
 
-        def _close_decision_diagnostics():
-            if not diagnostics._closing:
-                hass.async_create_task(diagnostics.close())
+            def _close_decision_diagnostics():
+                if not diagnostics._closing:
+                    hass.async_create_task(diagnostics.close())
 
-        entry.async_on_unload(_close_decision_diagnostics)
+            entry.async_on_unload(_close_decision_diagnostics)
     except Exception:
         _LOGGER.warning("PowerSync decision logging could not be started")
 

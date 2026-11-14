@@ -1424,6 +1424,9 @@ def powersync_auth_start_url(client_instance_id: str | None = None) -> str:
 POWERSYNC_AUTH_START_URL = powersync_auth_start_url()
 POWERSYNC_AUTH_ME_URL = "https://api.powersync.cc/auth/me"
 
+# Private fork decision diagnostics; enabled by default.
+CONF_DECISION_LOGGING_ENABLED = "decision_logging_enabled"
+
 # PowerSync Cloud energy-flow reporter (opt-in) — pushes local grid/solar/
 # battery/load telemetry to /v1/flow every DEFAULT_CLOUD_FLOW_INTERVAL
 # seconds in a ChargeHQ-compatible shape, so the cloud can drive

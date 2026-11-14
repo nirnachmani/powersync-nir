@@ -97,8 +97,10 @@ class DecisionFileWriter:
                 path.unlink()
 
 
-def start_entry_diagnostics(hass, entry_id, version):
+def start_entry_diagnostics(hass, entry_id, version, *, enabled=True):
     """Start the entry-local writer using Home Assistant's configured timezone."""
+    if not enabled:
+        return None
     writer = AsyncDecisionWriter(_NAS_MOUNT / 'power_sync_diagnostics',
                                  tz=ZoneInfo(hass.config.time_zone), version=version,
                                  required_mount=_NAS_MOUNT)

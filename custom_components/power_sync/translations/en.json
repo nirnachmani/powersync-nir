@@ -1340,6 +1340,7 @@
           "weather": "Weather & solar forecast",
           "auto_update": "PowerSync auto-update",
           "cloud_flow": "PowerSync Cloud energy-flow reporter",
+          "decision_logging": "Decision logging",
           "history_relink": "Sungrow history relink"
         }
       },
@@ -1465,6 +1466,12 @@
           "auto_update_enabled": "When enabled, PowerSync looks for an install-capable HACS update entity once per day.",
           "auto_update_time": "Local Home Assistant time. Default is 03:00."
         },
+        "submit": "Save"
+      },
+      "decision_logging": {
+        "title": "Decision logging",
+        "description": "Record optimizer and EV decisions to the configured NAS share. Changing this setting reloads PowerSync.",
+        "data": {"decision_logging_enabled": "Enable decision logging"},
         "submit": "Save"
       },
       "cloud_flow": {

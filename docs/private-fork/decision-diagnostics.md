@@ -1,6 +1,6 @@
 # Local decision diagnostics
 
-Decision logging is enabled by default when the integration entry starts. No separate activation setting is provided. It records future decisions only; it cannot reconstruct inputs that were not recorded in the past.
+Decision logging is enabled by default. In PowerSync's integration options, choose **Advanced settings → Decision logging** to turn it on or off. Saving reloads PowerSync. When off, the writer and local diagnostic solver capture are not started; existing logs are left in place and are not pruned until logging is enabled again. Other HA logging and independently enabled developer regression capture are unchanged. The logger records future decisions only; it cannot reconstruct inputs that were not recorded in the past.
 
 ## Storage and privacy
 
