@@ -4918,6 +4918,57 @@ def _vehicle_config_value(
     return default
 
 
+def _observe_smart_schedule(function):
+    """Observe completed policy evaluation without changing its result."""
+    from functools import wraps
+    @wraps(function)
+    async def wrapped(self, vehicle_id, settings, live_status, current_price_cents):
+        failed = False
+        token = None
+        trace_context = None
+        try:
+            observer = self.hass.data.get('power_sync', {}).get(self.config_entry.entry_id, {}).get('decision_diagnostics')
+            if observer is not None:
+                from .actions import _current_decision_trace, _decision_trace_id
+                if _current_decision_trace() is None:
+                    from uuid import uuid4
+                    import asyncio
+                    trace_context = _decision_trace_id
+                    token = trace_context.set((asyncio.current_task(), uuid4().hex))
+        except Exception:
+            pass
+        try:
+            return await function(self, vehicle_id, settings, live_status, current_price_cents)
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            try:
+                observer = self.hass.data.get('power_sync', {}).get(self.config_entry.entry_id, {}).get('decision_diagnostics')
+                if observer is not None:
+                    state = self._state.get(vehicle_id)
+                    trace_id = None
+                    try:
+                        from .actions import _current_decision_trace
+                        trace_id = _current_decision_trace()
+                    except Exception:
+                        pass
+                    observer.emit('ev', {'event': 'smart_schedule_decision', 'trace_id': trace_id,
+                        'reported_state': 'exception' if failed else getattr(state, 'last_decision', None),
+                        'target_soc': settings.target_soc, 'price_cents': current_price_cents,
+                        'battery_soc': live_status.get('battery_soc'),
+                        'solar_power_w': live_status.get('solar_power'),
+                        'grid_power_w': live_status.get('grid_power'),
+                        'load_power_w': live_status.get('load_power'),
+                        'is_charging': getattr(state, 'is_charging', None)})
+            except Exception:
+                pass
+            finally:
+                if token is not None and trace_context is not None:
+                    trace_context.reset(token)
+    return wrapped
+
+
 class AutoScheduleExecutor:
     """
     Automatically executes charging plans based on optimal windows.
@@ -6524,6 +6575,7 @@ class AutoScheduleExecutor:
 
         return selected_profile == vehicle_id
 
+    @_observe_smart_schedule
     async def _evaluate_vehicle(
         self,
         vehicle_id: str,
@@ -7004,6 +7056,34 @@ class AutoScheduleExecutor:
                         vehicle_id,
                     )
 
+        # Record the post-policy decision and the operands actually consumed.
+        try:
+            observer = self.hass.data.get('power_sync', {}).get(self.config_entry.entry_id, {}).get('decision_diagnostics')
+            if observer is not None:
+                reason_code = ('price_unavailable' if reason == 'Current retail price unavailable' else
+                               'above_price_cap' if reason.startswith('Grid price ') else
+                               'solar_only' if reason.startswith('Solar-only') else
+                               'demand_window' if reason.startswith('In demand peak') else
+                               'price_policy_blocked' if reason.startswith('Opportunistic blocked') else
+                               'battery_below_pause_floor' if reason.startswith('Battery ') else
+                               'insufficient_surplus' if reason.startswith(('Surplus ', 'Strict solar surplus ')) and not should_charge else
+                               'evaluation')
+                try:
+                    from .actions import _current_decision_trace
+                    trace_id = _current_decision_trace()
+                except Exception:
+                    trace_id = None
+                observer.emit('ev', {'event': 'smart_schedule_policy', 'trace_id': trace_id, 'profile': vehicle_id,
+                    'should_charge': should_charge, 'reason': reason_code, 'source': source,
+                    'ev_soc': ev_soc, 'target_soc': settings.target_soc,
+                    'battery_soc': battery_soc, 'min_battery_soc': effective_home_min,
+                    'price_cents': current_price_cents, 'export_price_cents': current_export_price_cents,
+                    'max_price_cents': effective_max_price, 'solar_power_kw': solar_power_kw,
+                    'home_load_kw': load_power_kw, 'solar_surplus_kw': current_surplus_kw,
+                    'time_critical': is_time_critical})
+        except Exception:
+            pass
+
         # Publish the effective, post-policy decision separately from the
         # stored optimizer envelope. A bounded exact-VIN free-grid signal is
         # the only authority dynamic control may use to disregard an LP zero.
@@ -7064,6 +7144,18 @@ class AutoScheduleExecutor:
                 continue
 
         state.current_window = current_window
+        try:
+            observer = self.hass.data.get('power_sync', {}).get(self.config_entry.entry_id, {}).get('decision_diagnostics')
+            if observer is not None:
+                from .actions import _current_decision_trace
+                observer.emit('ev', {'event': 'smart_schedule_window', 'trace_id': _current_decision_trace(),
+                    'profile': vehicle_id, 'source': source, 'should_charge': should_charge,
+                    'window_start': getattr(current_window, 'start_time', None),
+                    'window_end': getattr(current_window, 'end_time', None),
+                    'window_price_cents': getattr(current_window, 'price_cents_kwh', None),
+                    'target_time': getattr(state.current_plan, 'target_time', None)})
+        except Exception:
+            pass
 
         # Log the decision
         _LOGGER.debug(
@@ -8871,6 +8963,16 @@ def _can_stop_loadpoint_for_mode(
             if active_mode else
             "loadpoint is not owned by this mode"
         )
+        try:
+            observer = hass.data.get('power_sync', {}).get(config_entry.entry_id, {}).get('decision_diagnostics')
+            if observer is not None:
+                from .actions import _current_decision_trace
+                observer.emit('ev', {'event': 'ownership_stop_blocked',
+                    'trace_id': _current_decision_trace(), 'profile': vehicle_id,
+                    'owner_mode': active_mode, 'requested_mode': expected_owner_mode,
+                    'reason': 'owner_conflict' if active_mode else 'owner_missing'})
+        except Exception:
+            pass
         from .shared_loadpoint import binding_for_entry
         record_ev_command(
             hass,
@@ -10472,6 +10574,34 @@ def _has_current_disconnected_sigenergy_evac(
     )
 
 
+def _observe_price_decision(function):
+    """Record each completed Price-Level policy return, including early exits."""
+    from functools import wraps
+
+    @wraps(function)
+    async def wrapped(self, *args, **kwargs):
+        result = await function(self, *args, **kwargs)
+        try:
+            observer = self.hass.data.get('power_sync', {}).get(self.config_entry.entry_id, {}).get('decision_diagnostics')
+            if observer is not None:
+                reason = result[1]
+                code = ('price_level_disabled' if reason == 'Price-level charging is disabled' else
+                        'demand_window' if reason.startswith('In demand peak period') else
+                        'unplugged' if reason == 'Vehicle not plugged in' else
+                        'away' if reason.startswith('Vehicle not at home') else
+                        'home_battery_low' if reason.startswith('Home battery ') else
+                        'price_policy')
+                price = kwargs.get('current_price_cents', args[-1] if args else None)
+                profile = kwargs.get('vehicle_vin', args[0] if len(args) > 1 else None)
+                observer.emit('ev', {'event': 'price_level_result', 'reason': code,
+                    'price_cents': price, 'profile': profile, 'should_charge': result[0],
+                    'owner_mode': result[2]})
+        except Exception:
+            pass
+        return result
+    return wrapped
+
+
 class PriceLevelChargingExecutor:
     """
     Executes price-level charging based on current price thresholds.
@@ -11490,6 +11620,7 @@ class PriceLevelChargingExecutor:
         await self.apply_preserve_home_battery(False, reason)
         return True
 
+    @_observe_price_decision
     async def get_charging_decision(self, current_price_cents: Optional[float]) -> Tuple[bool, str, str]:
         """
         Get charging decision without taking action.
@@ -11562,6 +11693,17 @@ class PriceLevelChargingExecutor:
             "wants_charge" if decision.should_charge else "waiting"
         )
         self._state.last_decision_reason = decision.reason
+        try:
+            observer = self.hass.data.get('power_sync', {}).get(self.config_entry.entry_id, {}).get('decision_diagnostics')
+            if observer is not None:
+                observer.emit('ev', {'event': 'price_level_decision',
+                    'price_cents': current_price_cents, 'ev_soc': ev_soc,
+                    'recovery_soc': settings.get('recovery_soc', 40),
+                    'recovery_price_cents': settings.get('recovery_price_cents', 30),
+                    'opportunity_price_cents': settings.get('opportunity_price_cents', 10),
+                    'should_charge': decision.should_charge, 'owner_mode': decision.mode})
+        except Exception:
+            pass
         return decision.should_charge, decision.reason, decision.mode
 
     async def evaluate(self, current_price_cents: Optional[float]) -> None:
@@ -11588,6 +11730,7 @@ class PriceLevelChargingExecutor:
             self._state.last_decision = "charging" if self._state.is_charging else "waiting"
             self._state.last_decision_reason = reason
 
+    @_observe_price_decision
     async def get_charging_decision_for_vehicle(
         self,
         vehicle_vin: str,
@@ -11667,6 +11810,17 @@ class PriceLevelChargingExecutor:
             "wants_charge" if decision.should_charge else "waiting"
         )
         vehicle_state.last_decision_reason = decision.reason
+        try:
+            observer = self.hass.data.get('power_sync', {}).get(self.config_entry.entry_id, {}).get('decision_diagnostics')
+            if observer is not None:
+                observer.emit('ev', {'event': 'price_level_decision',
+                                     'price_cents': current_price_cents, 'ev_soc': ev_soc,
+                                     'recovery_soc': settings.get('recovery_soc', 40),
+                                     'recovery_price_cents': settings.get('recovery_price_cents', 30),
+                                     'opportunity_price_cents': settings.get('opportunity_price_cents', 10),
+                                     'should_charge': decision.should_charge, 'owner_mode': decision.mode})
+        except Exception:
+            pass
         return decision.should_charge, decision.reason, decision.mode
 
     async def evaluate_all_vehicles(
@@ -12167,6 +12321,39 @@ class ScheduledChargingState:
     last_decision_reason: str = ""
 
 
+def _observe_scheduled_decision(function):
+    """Observe the Scheduled Charging result without changing its policy."""
+    from functools import wraps
+    @wraps(function)
+    async def wrapped(self, current_price_cents):
+        observer = None
+        settings = {}
+        try:
+            observer = self.hass.data.get('power_sync', {}).get(self.config_entry.entry_id, {}).get('decision_diagnostics')
+            if observer is not None:
+                settings = dict(self._get_settings())
+        except Exception:
+            observer = None
+        result = await function(self, current_price_cents)
+        try:
+            if observer is not None:
+                reason = result[1]
+                code = ('scheduled_disabled' if reason == 'Scheduled charging is disabled' else
+                        'outside_schedule' if reason.startswith('Outside schedule') else
+                        'unplugged' if reason == 'Vehicle not plugged in' else
+                        'away' if reason.startswith('Vehicle not at home') else
+                        'price_unavailable' if 'current retail price unavailable' in reason else
+                        'price_policy')
+                observer.emit('ev', {'event': 'scheduled_policy', 'reason': code,
+                    'price_cents': current_price_cents, 'max_price_cents': settings.get('max_price_cents', 30),
+                    'start_time': settings.get('start_time', '00:00'), 'end_time': settings.get('end_time', '06:00'),
+                    'should_charge': result[0], 'owner_mode': 'scheduled'})
+        except Exception:
+            pass
+        return result
+    return wrapped
+
+
 class ScheduledChargingExecutor:
     """
     Executes scheduled charging based on time window and max price.
@@ -12624,6 +12811,7 @@ class ScheduledChargingExecutor:
         self._clear_preserve_home_battery_intent(reason)
         return True
 
+    @_observe_scheduled_decision
     async def get_charging_decision(self, current_price_cents: Optional[float]) -> Tuple[bool, str, str]:
         """
         Get charging decision without taking action.
@@ -12671,6 +12859,7 @@ class ScheduledChargingExecutor:
         # provider-specific current value.  When that value is unavailable,
         # resolve only the timestamp-aligned retail slot from the optimizer;
         # never treat an unknown price as permission to start.
+        price_was_missing = current_price_cents is None
         if current_price_cents is None:
             from .ev_pricing import get_current_retail_price
 
@@ -12686,6 +12875,13 @@ class ScheduledChargingExecutor:
                 self._state.last_decision_reason = reason
                 return False, reason, ""
 
+        try:
+            observer = self.hass.data.get('power_sync', {}).get(self.config_entry.entry_id, {}).get('decision_diagnostics')
+            if observer is not None:
+                observer.emit('ev', {'event': 'scheduled_price', 'price_cents': current_price_cents,
+                    'max_price_cents': max_price, 'price_fallback': price_was_missing})
+        except Exception:
+            pass
         if current_price_cents <= max_price:
             reason = f"Scheduled: {start_time}-{end_time}, price {current_price_cents:.1f}c <= {max_price}c"
             self._state.last_decision = "wants_charge"

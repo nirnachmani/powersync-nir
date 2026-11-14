@@ -10,9 +10,32 @@ from test_shared_loadpoint_action_guard import _Entry, _Hass, _generic_params, a
 from test_shared_stop_storage import Store
 
 
-def test_smart_schedule_retains_handover_after_solar_stop(monkeypatch):
+def test_shared_mode_decision_is_persisted(tmp_path):
+    import importlib, json
+    diagnostics = importlib.import_module('power_sync.decision_diagnostics')
+    async def scenario():
+        hass, entry = _Hass(), _Entry()
+        writer = diagnostics.AsyncDecisionWriter(tmp_path)
+        writer.start()
+        hass.data['power_sync'][entry.entry_id]['decision_diagnostics'] = writer
+        actions._begin_automated_shared_loadpoint_cycle(hass, entry)
+        actions._record_automated_shared_loadpoint_decision(
+            hass, entry, allowed=True, responsible_mode='smart_schedule', reason='', source='grid')
+        await writer.close()
+    asyncio.run(scenario())
+    event = json.loads(next(tmp_path.glob('ev-*.jsonl')).read_text())
+    assert event['event'] == 'shared_policy_decision' and event['allowed'] is True
+    assert event['owner_mode'] == 'smart_schedule' and event['profile'] == 'shared_ev_profile_a'
+    assert event['source'] == 'grid'
+
+
+def test_smart_schedule_retains_handover_after_solar_stop(monkeypatch, tmp_path):
+    import importlib, json
     async def scenario():
         hass, entry = _Hass(profile_a_soc='14'), _Entry()
+        writer = importlib.import_module('power_sync.decision_diagnostics').AsyncDecisionWriter(tmp_path)
+        writer.start()
+        hass.data['power_sync'][entry.entry_id]['decision_diagnostics'] = writer
         entry.options = {**entry.options, 'shared_loadpoint_profile_a_soc_entity': 'sensor.tank_soc'}
         hass.states.async_all = lambda: []
         hass.data['power_sync'][entry.entry_id]['automation_store'] = Store()
@@ -56,6 +79,12 @@ def test_smart_schedule_retains_handover_after_solar_stop(monkeypatch):
             hass, entry, allowed=True, responsible_mode='smart_schedule', reason='', source='grid')
         assert await actions._action_start_ev_charging_dynamic(hass, entry, smart)
         assert ownership.get_ev_ownership(hass, entry, 'generic_ev')[1]['owner_mode'] == 'smart_schedule'
+        await writer.close()
+        events = [json.loads(line) for line in next(tmp_path.glob('ev-*.jsonl')).read_text().splitlines()]
+        stop = next(e for e in events if e['event'] == 'dynamic_stop_requested')
+        observed = next(e for e in events if e['event'] == 'stop_observation')
+        command = next(e for e in events if e['event'] == 'command_handler_result' and e['command'] == 'set_amps' and e['requested_amps'] == 0)
+        assert stop['trace_id'] == command['trace_id'] == observed['trace_id']
 
     try:
         asyncio.run(scenario())

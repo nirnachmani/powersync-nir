@@ -66,6 +66,29 @@ def test_smart_schedule_target_false_flag_retains_pending_stop(monkeypatch, back
     assert 'stop unconfirmed' not in state.last_decision_reason
 
 
+def test_smart_schedule_records_reached_target_decision(monkeypatch):
+    hass = _FakeHass(states={'sensor.connected_vehicle': 'tank'})
+    entry = _FakeConfigEntry()
+    entry.options = {'generic_charger_enabled': True,
+                     'shared_loadpoint_connected_vehicle_entity': 'sensor.connected_vehicle',
+                     'shared_loadpoint_profile_a_name': 'Tank', 'shared_loadpoint_profile_a_state': 'tank',
+                     'shared_loadpoint_profile_b_name': 'Future', 'shared_loadpoint_profile_b_state': 'future'}
+    events = []
+    class Observer:
+        def emit(self, stream, event):
+            events.append(event)
+    hass.data['power_sync']['entry-1']['decision_diagnostics'] = Observer()
+    monkeypatch.setattr(ev_planner, 'get_ev_location', AsyncMock(return_value='home'))
+    monkeypatch.setattr(ev_planner, 'is_ev_plugged_in', AsyncMock(return_value=True))
+    executor = ev_planner.AutoScheduleExecutor(hass, entry, ev_planner.ChargingPlanner(hass, entry))
+    executor._get_vehicle_soc = AsyncMock(return_value=80)
+    settings = ev_planner.AutoScheduleSettings(enabled=True, vehicle_id='shared_ev_profile_a', target_soc=80)
+    asyncio.run(executor._evaluate_vehicle('shared_ev_profile_a', settings, {}, 25))
+    event = next(e for e in events if e['event'] == 'smart_schedule_decision')
+    assert event['reported_state'] == 'complete' and event['target_soc'] == 80
+    assert event['price_cents'] == 25
+
+
 @pytest.mark.parametrize('backend,physical', [('generic', 'generic_ev'), ('sigenergy', 'sigenergy_charger')])
 def test_scheduled_false_flag_stops_matching_owner_outside_window(monkeypatch, backend, physical):
     hass = _FakeHass(states={'sensor.connected_vehicle': 'tank'})

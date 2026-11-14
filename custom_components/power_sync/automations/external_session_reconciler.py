@@ -548,6 +548,13 @@ async def reconcile_selected_shared_loadpoint_cycle(
     active_profile_id = resolve_active_shared_profile(hass, config_entry)
     if active_profile_id is None:
         clear_cycle_context()
+        try:
+            observer = entry_data.get('decision_diagnostics') if isinstance(entry_data, dict) else None
+            if observer is not None:
+                observer.emit('ev', {'event': 'shared_observation', 'charging': None,
+                                     'evidence': 'selector_unresolved', 'origin': 'unknown'})
+        except Exception:
+            pass
         return None
     loadpoint_id = canonical_shared_loadpoint_id(config_entry, active_profile_id)
     if loadpoint_id is None:
@@ -656,6 +663,17 @@ async def reconcile_selected_shared_loadpoint_cycle(
     }
     if isinstance(entry_data, dict):
         entry_data["_shared_loadpoint_cycle_context"] = context
+        try:
+            observer = entry_data.get('decision_diagnostics')
+            if observer is not None:
+                observed_at = _as_utc(state.observed_at)
+                sampled_at = _as_utc(now or datetime.now(timezone.utc))
+                age = (sampled_at - observed_at).total_seconds() if observed_at and sampled_at else None
+                observer.emit('ev', {'event': 'shared_observation', 'profile': active_profile_id,
+                                     'charging': state.physical_active, 'evidence': state.evidence,
+                                     'origin': state.origin, 'observation_age_seconds': age})
+        except Exception:
+            pass
     return context
 
 

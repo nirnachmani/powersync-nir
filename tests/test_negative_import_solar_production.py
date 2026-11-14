@@ -525,6 +525,27 @@ def runtime_rig(monkeypatch):
     return runtime,store,states,calls,permission,data
 
 
+def test_pv_stop_reports_separate_confirmed_and_observed_state(runtime_rig, tmp_path):
+    import importlib.util, json
+    path = Path(__file__).resolve().parents[1] / 'custom_components/power_sync/decision_diagnostics.py'
+    spec = importlib.util.spec_from_file_location('pv_diagnostics_test', path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    runtime, _, _, _, _, data = runtime_rig
+    async def scenario():
+        writer = module.AsyncDecisionWriter(tmp_path)
+        writer.start()
+        data['decision_diagnostics'] = writer
+        await runtime.tick()
+        await writer.close()
+    run(scenario())
+    rows = [json.loads(line) for line in next(tmp_path.glob('optimizer-*.jsonl')).read_text().splitlines()]
+    record = next(r for r in rows if r['event'] == 'solar_production_state')
+    assert record['device_limit_confirmed'] is True
+    assert record['physical_converged'] is None and record['price_cents'] == -5
+
+
 def test_runtime_current_retail_stop_expiry_outage_and_disabled_option_recovery(runtime_rig):
     runtime,store,states,calls,permission,data=runtime_rig
     async def scenario():

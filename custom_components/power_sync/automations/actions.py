@@ -5320,6 +5320,44 @@ async def _stop_zaptec_charging(
 _shared_io_owner = ContextVar("shared_io_owner", default=None)
 _direct_shared_stop_owner: ContextVar[Any] = ContextVar("direct_shared_stop_owner", default=None)
 _shared_callback_capability: ContextVar[Any] = ContextVar("shared_callback_capability", default=None)
+_decision_trace_id: ContextVar[Any] = ContextVar("ev_decision_trace_id", default=None)
+
+
+def _diagnostic_elapsed_seconds(value):
+    if not isinstance(value, datetime):
+        return None
+    try:
+        return (datetime.now(value.tzinfo) - value).total_seconds()
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _current_decision_trace():
+    trace = _decision_trace_id.get()
+    return trace[1] if trace is not None and trace[0] is asyncio.current_task() else None
+
+
+def _decision_trace_scope(function):
+    from functools import wraps
+
+    @wraps(function)
+    async def wrapped(hass, config_entry, entry_id, vehicle_id=DEFAULT_VEHICLE_ID):
+        if _current_decision_trace() is not None:
+            return await function(hass, config_entry, entry_id, vehicle_id)
+        token = None
+        try:
+            observer = hass.data.get('power_sync', {}).get(entry_id, {}).get('decision_diagnostics')
+            if observer is not None:
+                from uuid import uuid4
+                token = _decision_trace_id.set((asyncio.current_task(), uuid4().hex))
+        except Exception:
+            pass
+        try:
+            return await function(hass, config_entry, entry_id, vehicle_id)
+        finally:
+            if token is not None:
+                _decision_trace_id.reset(token)
+    return wrapped
 
 
 def _shared_callback_authorized(config_entry, physical):
@@ -5354,6 +5392,60 @@ def _shared_callback_capability_scope(function):
         finally:
             _shared_callback_capability.reset(token)
     return wrapped
+
+
+def _observe_command(command):
+    """Observe handler input and return without equating it to physical state."""
+    from functools import wraps
+    from inspect import signature
+    from uuid import uuid4
+
+    def decorate(function):
+        call_signature = signature(function)
+        @wraps(function)
+        async def wrapped(hass, config_entry, *args, **kwargs):
+            observer = None
+            token = None
+            params = {}
+            amps = None
+            try:
+                observer = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {}).get('decision_diagnostics')
+            except Exception:
+                observer = None
+            if observer is None:
+                return await function(hass, config_entry, *args, **kwargs)
+            try:
+                values = call_signature.bind_partial(hass, config_entry, *args, **kwargs).arguments
+                params = values.get('params') or {}
+                amps = values.get('amps', params.get('amps'))
+                if _current_decision_trace() is None:
+                    token = _decision_trace_id.set((asyncio.current_task(), uuid4().hex))
+            except Exception:
+                observer = None
+            def record(event, outcome=None):
+                try:
+                    if observer is not None:
+                        observer.emit('ev', {'event': event, 'command': command,
+                            'trace_id': _current_decision_trace(),
+                            'charger_type': params.get('charger_type'),
+                            'profile': params.get('active_logical_vehicle_id') or params.get('logical_vehicle_id') or params.get('vehicle_id'),
+                            'owner_mode': params.get('owner_mode') or params.get('dynamic_mode'),
+                            'requested_amps': amps, 'outcome': outcome})
+                except Exception:
+                    pass
+            record('command_handler_requested')
+            try:
+                result = await function(hass, config_entry, *args, **kwargs)
+                record('command_handler_result', 'returned_true' if result is True else 'not_confirmed')
+                return result
+            except BaseException:
+                record('command_handler_result', 'exception')
+                raise
+            finally:
+                if token is not None:
+                    _decision_trace_id.reset(token)
+        return wrapped
+    return decorate
 
 
 def _shared_physical_io(function):
@@ -5416,6 +5508,7 @@ def _shared_physical_io(function):
     return wrapped
 
 
+@_observe_command('start')
 @_shared_physical_io
 async def _action_start_ev_charging(
     hass: HomeAssistant,
@@ -5878,6 +5971,7 @@ async def _stop_external_shared_session_guarded(
     )
 
 
+@_observe_command('stop')
 @_shared_physical_io
 async def _action_stop_ev_charging(
     hass: HomeAssistant,
@@ -6774,6 +6868,32 @@ def _record_automated_shared_loadpoint_decision(
         "reason": reason,
         "source": source,
     }
+    try:
+        observer = entry_data.get('decision_diagnostics')
+        if observer is not None:
+            safe_reasons = {
+                'shared loadpoint cycle context is unavailable': 'cycle_unavailable',
+                'shared loadpoint cycle context does not match the selected profile': 'selector_changed',
+                'shared loadpoint cycle context is unknown or stale': 'telemetry_unknown',
+                'Solar Surplus is disabled': 'solar_disabled',
+                'selected shared profile has no Solar Surplus configuration': 'profile_unconfigured',
+                'Solar Surplus is disabled for the selected shared profile': 'profile_solar_disabled',
+                'selected shared profile backend does not match its physical loadpoint': 'backend_mismatch',
+                'vehicle is not plugged in': 'unplugged',
+                'Solar-only mode - no grid charging': 'solar_only',
+            }
+            reason_code = safe_reasons.get(reason)
+            if reason.startswith('Grid price '):
+                reason_code = 'above_price_cap'
+            elif reason.startswith('In demand peak period'):
+                reason_code = 'demand_window'
+            elif reason.startswith('Opportunistic blocked by price policy:'):
+                reason_code = 'price_policy_blocked'
+            observer.emit('ev', {'event': 'shared_policy_decision', 'profile': active_profile_id,
+                                 'owner_mode': responsible_mode, 'source': source, 'reason': reason_code,
+                                 'allowed': bool(allowed), 'trace_id': _current_decision_trace()})
+    except Exception:
+        pass
 
 
 async def _adopt_observed_solar_surplus_shared_session(
@@ -8973,6 +9093,14 @@ async def _set_vehicle_amps(
                     or lease.get("owner") != "powersync" or lease.get("active_profile_id") != profile
                     or owner_family(lease.get("owner_mode")) != owner_family(params.get("owner_mode") or params.get("dynamic_mode"))):
                 return False
+            try:
+                observer = hass.data.get('power_sync', {}).get(config_entry.entry_id, {}).get('decision_diagnostics')
+                if observer is not None:
+                    observer.emit('ev', {'event': 'shared_pause_requested', 'trace_id': _current_decision_trace(), 'requested_amps': 0,
+                                         'owner_mode': params.get('owner_mode')})
+            except Exception:
+                # Observation must never block a required physical stop.
+                pass
             await _stop_dynamic_under_transition_lock(hass, config_entry, {
                 **params, "vehicle_id": physical, "_expected_state": state,
                 "_shared_runtime_pause": True,
@@ -8985,6 +9113,7 @@ async def _set_vehicle_amps(
     return result
 
 
+@_observe_command('set_amps')
 @_shared_physical_io
 async def _set_vehicle_amps_io(
     hass: HomeAssistant,
@@ -11189,6 +11318,7 @@ async def _refresh_dynamic_tesla_charger_capability(
     return True
 
 
+@_decision_trace_scope
 @_shared_callback_capability_scope
 async def _dynamic_ev_update_surplus(
     hass: HomeAssistant,
@@ -11983,6 +12113,19 @@ async def _dynamic_ev_update_surplus(
                 state["paused_reason"] = None
         else:
             # Normal mode: pause below pause_soc threshold
+            try:
+                observer = hass.data.get('power_sync', {}).get(entry_id, {}).get('decision_diagnostics')
+                if observer is not None:
+                    observer.emit('ev', {
+                        'event': 'solar_battery_floor', 'trace_id': _current_decision_trace(), 'reason': 'battery_below_pause_floor',
+                        'owner_mode': params.get('owner_mode'), 'battery_soc': battery_soc,
+                        'min_battery_soc': min_soc, 'pause_battery_soc': pause_soc,
+                        'battery_power_kw': battery_power_kw, 'grid_power_kw': grid_power_kw,
+                        'available_power_kw': raw_surplus_kw, 'current_amps': current_amps,
+                        'allow_parallel': bool(allow_parallel),
+                    })
+            except Exception:
+                pass
             newly_paused = not state.get("paused")
             if newly_paused:
                 state["paused"] = True
@@ -12378,6 +12521,35 @@ async def _dynamic_ev_update_surplus(
                 new_amps = 0
         else:
             state["high_surplus_start"] = None
+
+    # Record the resolved inputs without changing the rate or stop policy.
+    try:
+        observer = hass.data.get('power_sync', {}).get(entry_id, {}).get('decision_diagnostics')
+        if observer is not None:
+            decision_reason = ('optimizer_zero' if optimizer_ceiling_amps == 0 else
+                               'trial_ended' if load_probe_amps == 0 else
+                               'surplus_stop_delay_elapsed' if executable_available_amps + 1e-9 < min_amps and effective_current_amps > 0 and new_amps == 0 else
+                               'surplus_stop_delay_wait' if executable_available_amps + 1e-9 < min_amps and effective_current_amps > 0 else
+                               'insufficient_surplus' if executable_available_amps + 1e-9 < min_amps else
+                               'sustained_surplus_wait' if effective_current_amps == 0 and new_amps == 0 else
+                               'surplus_available')
+            observer.emit('ev', {
+                'event': 'solar_rate_decision', 'trace_id': _current_decision_trace(), 'reason': decision_reason,
+                'owner_mode': params.get('owner_mode'), 'battery_soc': battery_soc,
+                'battery_power_kw': battery_power_kw, 'grid_power_kw': grid_power_kw,
+                'available_power_kw': raw_surplus_kw, 'solar_surplus_kw': surplus_kw,
+                'allocated_surplus_kw': my_surplus_kw, 'available_amps': available_amps,
+                'executable_amps': executable_available_amps, 'current_amps': effective_current_amps,
+                'requested_amps': new_amps, 'min_amps': min_amps, 'max_amps': max_amps,
+                'planned_ev_kw': planned_ev_charge_kw, 'optimizer_ceiling_amps': optimizer_ceiling_amps,
+                'stop_delay_minutes': stop_delay_minutes, 'sustained_minutes': sustained_minutes,
+                'low_surplus_seconds': _diagnostic_elapsed_seconds(state.get('low_surplus_start')),
+                'high_surplus_seconds': _diagnostic_elapsed_seconds(state.get('high_surplus_start')),
+                'ev_power_kw': observed_current_power_kw,
+                'power_available': current_vehicle_power_available,
+            })
+    except Exception:
+        pass
 
     # Store decision reason
     state["allocated_surplus_kw"] = my_surplus_kw
@@ -13777,6 +13949,7 @@ async def _dynamic_ev_update_sigenergy_evdc_native_solar(
         state["native_solar_grid_import_logged"] = False
 
 
+@_decision_trace_scope
 @_shared_callback_capability_scope
 async def _dynamic_ev_update(
     hass: HomeAssistant,
@@ -14269,6 +14442,23 @@ async def _dynamic_ev_update(
     )
     if optimizer_ceiling_amps is not None:
         new_amps = min(new_amps, optimizer_ceiling_amps)
+
+    try:
+        observer = hass.data.get('power_sync', {}).get(entry_id, {}).get('decision_diagnostics')
+        if observer is not None:
+            observer.emit('ev', {
+                'event': 'battery_target_decision', 'trace_id': _current_decision_trace(), 'owner_mode': owner_mode,
+                'grid_limit_kw': max_grid_import_kw, 'grid_power_kw': grid_power_kw,
+                'battery_target_kw': target_battery_charge_kw,
+                'battery_effective_target_kw': effective_battery_target_kw,
+                'battery_power_kw': battery_power_kw, 'battery_soc': battery_soc,
+                'solar_power_kw': solar_power_kw, 'home_load_kw': home_load_kw,
+                'ev_power_kw': observed_ev_power_kw, 'available_power_kw': available_power_kw,
+                'planned_ev_kw': planned_ev_charge_kw, 'current_amps': current_amps,
+                'requested_amps': new_amps, 'min_amps': min_amps, 'max_amps': max_amps,
+            })
+    except Exception:
+        pass  # Diagnostics must not influence charging decisions.
 
     # In no_grid_import mode, respond immediately to grid imports (don't wait for 1A threshold)
     # Use ev_relevant_grid_kw (excludes battery charging) to avoid throttling due to
@@ -16553,6 +16743,18 @@ async def _settle_pending_shared_stop(hass, config_entry, vid, state, vehicles):
         except Exception:
             _LOGGER.exception("EVAC stop observation failed for %s", vid)
             return False
+    try:
+        observer = hass.data.get('power_sync', {}).get(config_entry.entry_id, {}).get('decision_diagnostics')
+        if observer is not None:
+            observer.emit('ev', {'event': 'stop_observation',
+                                 'trace_id': pending.get('diagnostic_trace_id'),
+                                 'charging': observation.charging,
+                                 'power_kw': observation.power_kw,
+                                 'charger_type': physical_params.get('charger_type'),
+                                 'observation_age_seconds': ((datetime.now(dt_timezone.utc) - observation.observed_at).total_seconds()
+                                                             if observation.observed_at is not None else None)})
+    except Exception:
+        pass
     if current():
         pending["latest_observation"] = observation
     if observation.charging is not False or not current():
@@ -16671,19 +16873,48 @@ async def _stop_dynamic_under_transition_lock(hass, config_entry, params):
         _dynamic_stop_lock_owner.reset(token)
 
 
+@_observe_command('stop')
 async def _action_stop_ev_charging_dynamic(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     params: Dict[str, Any],
 ) -> bool:
     """Serialize stop/reconciliation with dynamic starts and replacements."""
-    if _dynamic_stop_lock_owner.get() is asyncio.current_task():
-        return await _action_stop_ev_charging_dynamic_locked(hass, config_entry, params)
-    from .shared_loadpoint import binding_for_entry
-    if binding_for_entry(config_entry) is None:
-        return await _action_stop_ev_charging_dynamic_locked(hass, config_entry, params)
-    async with _start_dynamic_lock:
-        return await _action_stop_ev_charging_dynamic_locked(hass, config_entry, params)
+    observer = None
+    try:
+        observer = hass.data.get('power_sync', {}).get(config_entry.entry_id, {}).get('decision_diagnostics')
+        if observer is not None:
+            observer.emit('ev', {'event': 'dynamic_stop_requested', 'trace_id': _current_decision_trace(),
+                                 'stop_charging': bool(params.get('stop_charging', True)),
+                                 'runtime_pause': bool(params.get('_shared_runtime_pause')),
+                                 'owner_mode': params.get('owner_mode')})
+    except Exception:
+        observer = None
+    result = None
+    failed = False
+    try:
+        if _dynamic_stop_lock_owner.get() is asyncio.current_task():
+            result = await _action_stop_ev_charging_dynamic_locked(hass, config_entry, params)
+        else:
+            from .shared_loadpoint import binding_for_entry
+            if binding_for_entry(config_entry) is None:
+                result = await _action_stop_ev_charging_dynamic_locked(hass, config_entry, params)
+            else:
+                async with _start_dynamic_lock:
+                    result = await _action_stop_ev_charging_dynamic_locked(hass, config_entry, params)
+        return result
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        try:
+            if observer is not None:
+                observer.emit('ev', {'event': 'dynamic_stop_result', 'trace_id': _current_decision_trace(),
+                                     'outcome': 'exception' if failed else 'returned_true' if result is True else 'not_confirmed',
+                                     'runtime_pause': bool(params.get('_shared_runtime_pause')),
+                                     'owner_mode': params.get('owner_mode')})
+        except Exception:
+            pass
 
 
 @_shared_physical_io
@@ -16839,6 +17070,7 @@ async def _action_stop_ev_charging_dynamic_locked(
         # that wake only after a fast settlement removed pending_stop.
         state["_shared_pause_generation"] = state.get("_shared_pause_generation", 0) + 1
         state["pending_stop"] = {
+            "diagnostic_trace_id": _current_decision_trace(),
             "requested_at": datetime.now(dt_timezone.utc),
             "runtime": state,
             "vehicles": vehicles,

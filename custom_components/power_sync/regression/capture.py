@@ -56,18 +56,22 @@ def expendable(function):
 class CaptureRecorder:
     """Bounded whole-cycle admission; export is explicit and off the solve path."""
 
-    def __init__(self, source, *, currency, max_cycles=4, max_bytes=MAX_BYTES):
+    def __init__(self, source, *, currency, max_cycles=4, max_bytes=MAX_BYTES, local_diagnostics=False):
         if not re.fullmatch(r"[A-Z]{3}", currency):
             raise ContractError("currency_required")
         if not 1 <= max_cycles <= 32 or not 1024 <= max_bytes <= MAX_BYTES:
             raise ContractError("invalid_budget")
-        if set(source) != SOURCE_FIELDS:
-            raise ContractError("invalid_source_binding")
-        for key, value in source.items():
-            pattern = r"[a-f0-9]{64}" if key.endswith("sha256") else r"[a-zA-Z0-9_.+-]{1,64}"
-            if type(value) is not str or not re.fullmatch(pattern, value):
+        if source is None and local_diagnostics:
+            self.source = None  # Not a source-bound replay artifact.
+        else:
+            if not isinstance(source, dict) or set(source) != SOURCE_FIELDS:
                 raise ContractError("invalid_source_binding")
-        self.source, self.currency = dict(source), currency
+            for key, value in source.items():
+                pattern = r"[a-f0-9]{64}" if key.endswith("sha256") else r"[a-zA-Z0-9_.+-]{1,64}"
+                if type(value) is not str or not re.fullmatch(pattern, value):
+                    raise ContractError("invalid_source_binding")
+            self.source = dict(source)
+        self.currency = currency
         self._lock = RLock()
         self.max_cycles, self.max_bytes = max_cycles, max_bytes
         self.cycles = deque()

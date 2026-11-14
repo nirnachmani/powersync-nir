@@ -2364,6 +2364,19 @@ def test_failed_dynamic_replan_keeps_last_accepted_price_timestamp_pair(
         accepted_origin + timedelta(minutes=5 * (idx + 1))
         for idx in range(3)
     ]
+    observations = []
+    class Recorder:
+        def finish_cycle(self, outcome):
+            observations.append(('finish', outcome))
+    class Observer:
+        def new_solver_recorder(self, currency):
+            observations.append(('start', currency))
+            return Recorder()
+        def emit_solver_capture(self, recorder, *, trace_id):
+            observations.append(('emit', trace_id))
+    coordinator.entry_id = 'test-entry'
+    coordinator.hass = SimpleNamespace(data={'power_sync': {'test-entry': {'decision_diagnostics': Observer()}}},
+                                       config=SimpleNamespace(currency='AUD'))
 
     coordinator._optimizer = object()
     coordinator._enabled = True
@@ -2398,6 +2411,8 @@ def test_failed_dynamic_replan_keeps_last_accepted_price_timestamp_pair(
     asyncio.run(coordinator._run_optimization())
 
     assert coordinator._last_price_timestamps == accepted_timestamps
+    assert [event[0] for event in observations] == ['start', 'finish', 'emit']
+    assert observations[1] == ('finish', 'aborted')
     assert coordinator._last_import_prices == accepted_import_prices
     assert coordinator._last_export_prices == accepted_export_prices
     assert coordinator._pending_price_timestamps is None

@@ -81,6 +81,23 @@ class _Entry:
     }
 
 
+def test_cycle_observation_persisted_including_stale_state(tmp_path):
+    import json
+    diagnostics = importlib.import_module('power_sync.decision_diagnostics')
+    hass = _Hass(_Store(), observed_at=NOW - timedelta(seconds=91))
+    async def run():
+        writer = diagnostics.AsyncDecisionWriter(tmp_path)
+        writer.start()
+        hass.data['power_sync']['entry-1']['decision_diagnostics'] = writer
+        await module.reconcile_selected_shared_loadpoint_cycle(hass, _Entry(), now=NOW)
+        await writer.close()
+    asyncio.run(run())
+    row = json.loads(next(tmp_path.glob('ev-*.jsonl')).read_text())
+    assert row['event'] == 'shared_observation' and row['charging'] is None
+    assert row['evidence'] == 'stale_or_missing_power' and row['profile'] == 'shared_ev_profile_a'
+    assert row['observation_age_seconds'] == 91
+
+
 def test_cycle_context_reconciles_selected_generic_loadpoint_as_external():
     store = _Store()
     hass = _Hass(store)

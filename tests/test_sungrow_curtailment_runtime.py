@@ -909,7 +909,7 @@ def test_hybrid_curtailment_handlers_use_tariff_schedule_fallback():
         assert "using feed-in price from tariff schedule" in handler
 
 
-def test_sigenergy_releases_zero_export_for_active_solar_surplus_ev():
+def test_sigenergy_releases_zero_export_for_active_solar_surplus_ev(tmp_path):
     """Ticket #38: zero export must not trap an internally-owned EV at its probe current."""
     handler = _function_source("handle_sigenergy_curtailment")
 
@@ -973,7 +973,24 @@ def test_sigenergy_releases_zero_export_for_active_solar_surplus_ev():
     }
     exec(textwrap.dedent(handler), namespace)
 
-    asyncio.run(namespace["handle_sigenergy_curtailment"](feedin_price=0.0))
+    import importlib.util, json
+    spec = importlib.util.spec_from_file_location('curtail_diagnostics_test', INIT_PATH.parent / 'decision_diagnostics.py')
+    assert spec is not None and spec.loader is not None
+    diag = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(diag)
+    async def run_with_diagnostics():
+        writer = diag.AsyncDecisionWriter(tmp_path)
+        writer.start()
+        entry_data['decision_diagnostics'] = writer
+        await namespace["handle_sigenergy_curtailment"](feedin_price=0.0)
+        await writer.close()
+    asyncio.run(run_with_diagnostics())
+    records = [json.loads(line) for line in next(tmp_path.glob('optimizer-*.jsonl')).read_text().splitlines()]
+    decision = next(r for r in records if r['event'] == 'sigenergy_curtailment_decision')
+    assert decision['export_uneconomic'] is True and decision['ev_headroom'] is True
+    assert decision['reported_state'] == 'curtailed'
+    result = next(r for r in records if r['event'] == 'sigenergy_curtailment_result')
+    assert result['reported_state'] == 'normal'
 
     assert controller.restore_calls == 1
     assert controller.curtail_calls == 0

@@ -70,6 +70,26 @@ def _set_external_policy(hass, vehicle_id, policy):
     return store
 
 
+def test_ownership_transitions_are_persisted_without_vehicle_identifiers(tmp_path):
+    import json
+    diagnostics = importlib.import_module('power_sync.decision_diagnostics')
+    hass = _Hass()
+    async def exercise():
+        writer = diagnostics.AsyncDecisionWriter(tmp_path)
+        writer.start()
+        hass.data['power_sync']['entry-1']['decision_diagnostics'] = writer
+        ev_ownership.claim_ev_ownership(hass, _Entry(), 'generic_ev', owner_mode='solar_surplus',
+                                        extra={'active_profile_id': 'shared_ev_profile_a'})
+        ev_ownership.release_ev_ownership(hass, _Entry(), 'generic_ev', command='stop')
+        await writer.close()
+    asyncio.run(exercise())
+    rows = [json.loads(x) for x in next(tmp_path.glob('ev-*.jsonl')).read_text().splitlines()]
+    assert [(r['event'], r['owner_mode']) for r in rows] == [
+        ('ownership_claimed', 'solar_surplus'), ('ownership_released', 'solar_surplus')]
+    assert rows[0]['profile'] == 'shared_ev_profile_a'
+    assert rows[1]['command'] == 'stop'
+
+
 def test_external_control_policy_defaults_to_override_and_normalizes_yield():
     hass = _Hass()
 

@@ -415,6 +415,59 @@ def _sigenergy_profit_max_coordinator(opt_module, *, export_limit_kw=5.0):
     return coordinator
 
 
+def test_profit_max_disabled_selection_is_explained(opt_module):
+    coordinator = _sigenergy_profit_max_coordinator(opt_module)
+    coordinator._config.profit_max_enabled = False
+    events = []
+    class Observer:
+        def emit(self, stream, event):
+            events.append(event)
+    coordinator.hass.data['power_sync'] = {'entry-1': {'decision_diagnostics': Observer()}}
+    result = coordinator._profit_max_solar_export_slots([.2, .2], [.1, .1], [1, 1], [1, 1], .5, [False, False], [True, True])
+    assert result == [False, False]
+    summary = next(e for e in events if e['event'] == 'solar_export_summary')
+    assert summary['reason'] == 'profit_max_disabled' and summary['selected_slots'] == 0
+
+
+def test_profit_max_records_slot_reasons_and_future_funding(opt_module):
+    coordinator = _sigenergy_profit_max_coordinator(opt_module)
+    observed = []
+    class Recorder:
+        def emit(self, stream, event):
+            observed.append((stream, event))
+            return True
+    coordinator.hass.data['power_sync'] = {'entry-1': {'decision_diagnostics': Recorder()}}
+    coordinator._decision_diagnostic_trace_id = 'c' * 32
+    result = coordinator._profit_max_solar_export_slots(
+        import_prices=[0.40, 0.40, 0.00, 0.40],
+        export_prices=[0.50, 0.20, 0.05, 0.20],
+        solar=[5.0, 0.0, 0.0, 0.0], load=[1.0]*4, current_soc=0.5,
+        hard_charge_blocks=[False]*4, grid_charge_allowed=[True]*4,
+    )
+    assert result == [True, False, False, False]
+    events = [e for s, e in observed if s == 'optimizer' and e.get('event') == 'solar_export_slot']
+    assert len(events) == 3
+    assert events[0]['reason'] == 'selected'
+    assert events[0]['replenishment_slots'] == [2]
+    assert events[0]['replenishment_used_kwh'][0] > 0
+    budget = next(e for s, e in observed if s == 'optimizer' and e.get('event') == 'solar_export_budget')
+    assert budget['trace_id'] == events[0]['trace_id'] == 'c' * 32
+    assert budget['future_cost_per_kwh'][2] == 0
+    assert budget['future_solar_capacity_kwh'][2] == 0
+    assert budget['future_grid_capacity_kwh'][2] > 0
+    import copy
+    status_with_observer = copy.deepcopy(coordinator._solar_export_capability_status)
+    coordinator.hass.data['power_sync']['entry-1']['decision_diagnostics'] = None
+    baseline = coordinator._profit_max_solar_export_slots(
+        import_prices=[0.40, 0.40, 0.00, 0.40],
+        export_prices=[0.50, 0.20, 0.05, 0.20],
+        solar=[5.0, 0.0, 0.0, 0.0], load=[1.0]*4, current_soc=0.5,
+        hard_charge_blocks=[False]*4, grid_charge_allowed=[True]*4,
+    )
+    assert baseline == result
+    assert coordinator._solar_export_capability_status == status_with_observer
+
+
 def test_profit_max_solar_export_requires_cheaper_reachable_recharge(opt_module):
     coordinator = _sigenergy_profit_max_coordinator(opt_module)
 

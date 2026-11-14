@@ -186,6 +186,17 @@ class SolarProductionRuntime:
         self.data["solar_production_stop"]["controls_all_pv"] = bool(self.option(ALL_PV, False))
 
         current = self.data["solar_production_stop"]
+        try:
+            observer = self.data.get('decision_diagnostics')
+            if observer is not None:
+                observer.emit('optimizer', {'event': 'solar_production_state',
+                    'production_state': current.get('state'), 'price_cents': current.get('import_price_cents'),
+                    'enabled': current.get('enabled'), 'grid_connected': current.get('grid_connected'),
+                    'device_limit_confirmed': current.get('device_limit_confirmed'),
+                    'physical_converged': current.get('physical_converged'),
+                    'restore_required': current.get('restore_required')})
+        except Exception:
+            pass
         keys = ("device_limit_confirmed", "physical_converged", "restore_required", "state", "grid_connected")
         if not self.paused and any(before.get(key) != current.get(key) for key in keys):
             coordinator = self.data.get("optimization_coordinator")

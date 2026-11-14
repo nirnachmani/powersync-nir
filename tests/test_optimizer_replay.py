@@ -64,6 +64,72 @@ def resign(bundle):
     return bundle
 
 
+def test_writer_produces_a_local_recorder_without_a_replay_source(api, tmp_path):
+    from power_sync.decision_diagnostics import AsyncDecisionWriter
+    writer = AsyncDecisionWriter(tmp_path)
+    recorder = writer.new_solver_recorder('AUD')
+    assert recorder.source is None
+    assert recorder.currency == 'AUD'
+
+
+def test_local_diagnostic_capture_has_no_fabricated_source(api):
+    module, capture, _ = api
+    recorder = capture.CaptureRecorder(None, currency='AUD', local_diagnostics=True)
+    optimizer = module.BatteryOptimizer(interval_minutes=60, horizon_hours=8)
+    with capture.record_cycle(optimizer, recorder):
+        optimizer.optimize(**inputs())
+    attempt = recorder.export()['cycles'][0]['attempts'][0]
+    assert attempt['source'] is None
+    assert attempt['inputs']['import_prices'] == inputs()['import_prices']
+
+
+def test_diagnostic_capture_matches_a_576_slot_horizon(api, tmp_path):
+    import asyncio
+    from power_sync.decision_diagnostics import AsyncDecisionWriter
+    module, capture, _ = api
+    recorder = capture.CaptureRecorder(None, currency='AUD', local_diagnostics=True)
+    optimizer = module.BatteryOptimizer(interval_minutes=5, horizon_hours=48)
+    values = dict(import_prices=[0.15] * 576, export_prices=[0.05] * 576,
+                  solar_forecast=[0.0] * 576, load_forecast=[0.5] * 576,
+                  current_soc=.5, schedule_timestamps=[NOW + timedelta(minutes=5*i) for i in range(576)])
+    with capture.record_cycle(optimizer, recorder):
+        optimizer.optimize(**values)
+    assert recorder.errors == 0 and recorder.dropped == 0
+    async def run():
+        writer = AsyncDecisionWriter(tmp_path)
+        writer.start()
+        assert writer.emit_solver_capture(recorder)
+        await writer.close()
+        assert writer.errors == 0
+    asyncio.run(run())
+    doc = json.loads(next(tmp_path.glob('optimizer-*.jsonl')).read_text())
+    assert len(doc['capture']['cycles'][0]['attempts'][0]['inputs']['import_prices']) == 576
+
+
+def test_real_solver_capture_is_persisted_locally(api, tmp_path):
+    import asyncio
+    from power_sync.decision_diagnostics import AsyncDecisionWriter
+    module, capture, _ = api
+    binding = {'component_sha256': '0' * 64, 'requirements_sha256': '0' * 64,
+               'installed_dependencies_sha256': '0' * 64, 'python': 'test',
+               'platform': 'test', 'solver': 'test', 'solver_version': 'test'}
+    recorder = capture.CaptureRecorder(binding, currency='AUD')
+    optimizer = module.BatteryOptimizer(interval_minutes=60, horizon_hours=8)
+    with capture.record_cycle(optimizer, recorder):
+        optimizer.optimize(**inputs())
+    async def exercise():
+        writer = AsyncDecisionWriter(tmp_path)
+        writer.start()
+        assert writer.emit_solver_capture(recorder, trace_id='b' * 32)
+        await writer.close()
+    asyncio.run(exercise())
+    report = json.loads(next(tmp_path.glob('optimizer-*.jsonl')).read_text())
+    assert report['trace_id'] == 'b' * 32
+    attempt = report['capture']['cycles'][0]['attempts'][0]
+    assert attempt['inputs']['import_prices'] == inputs()['import_prices']
+    assert attempt['result']['schedule']
+
+
 def test_contract_inventory_catches_new_input_or_attribute(api):
     module, _, contract = api
     assert tuple(inspect.signature(module.BatteryOptimizer.optimize).parameters)[1:] == contract.INPUT_FIELDS

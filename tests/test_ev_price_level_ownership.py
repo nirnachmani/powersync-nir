@@ -157,6 +157,39 @@ def test_missing_import_price_preserves_independent_eligibility(
         assert result[1] == "Current retail price unavailable"
 
 
+def test_smart_schedule_effective_policy_is_recorded(monkeypatch, tmp_path):
+    import importlib, json
+    now = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, 'now', lambda: now)
+    monkeypatch.setattr(ev_planner, 'get_ev_location', AsyncMock(return_value='home'))
+    monkeypatch.setattr(ev_planner, 'is_ev_plugged_in', AsyncMock(return_value=True))
+    hass, entry = _FakeHass(), _FakeConfigEntry()
+    planner = ev_planner.ChargingPlanner(hass, entry)
+    planner._get_solar_surplus_config = AsyncMock(return_value={})
+    executor = ev_planner.AutoScheduleExecutor(hass, entry, planner)
+    executor._get_vehicle_soc = AsyncMock(return_value=54)
+    executor._get_current_price = AsyncMock(return_value=None)
+    executor._start_charging = AsyncMock()
+    executor._restore_curtailment = AsyncMock()
+    monkeypatch.setattr(ev_planner, '_stop_coordinated_charging', AsyncMock(return_value=True))
+    settings = ev_planner.AutoScheduleSettings(enabled=True, vehicle_id=VIN, target_soc=80)
+    state = executor.get_state(VIN)
+    state.current_plan = SimpleNamespace(windows=[], target_time=None)
+    state.last_plan_update = now.replace(tzinfo=None)
+    state.is_charging = True
+    async def run():
+        writer = importlib.import_module('power_sync.decision_diagnostics').AsyncDecisionWriter(tmp_path)
+        writer.start()
+        hass.data['power_sync']['entry-1']['decision_diagnostics'] = writer
+        await executor._evaluate_vehicle(VIN, settings, {'battery_soc': 100, 'solar_power': 0, 'load_power': 1000, 'grid_power': 1000}, None)
+        await writer.close()
+    asyncio.run(run())
+    rows = [json.loads(x) for x in next(tmp_path.glob('ev-*.jsonl')).read_text().splitlines()]
+    decision = next(x for x in rows if x['event'] == 'smart_schedule_policy')
+    assert decision['should_charge'] is False and decision['price_cents'] is None
+    assert decision['battery_soc'] == 100 and decision['reason'] == 'price_unavailable'
+
+
 @pytest.mark.parametrize("stop_succeeds", [False, True])
 def test_missing_import_price_owned_stop_status_and_retry(
     monkeypatch, stop_succeeds,
@@ -3259,7 +3292,25 @@ def test_scheduled_none_price_uses_timestamp_aligned_optimizer_retail_price(monk
     assert "24.3c" in reason
 
 
-def test_scheduled_none_price_starts_when_aligned_retail_price_is_under_cap(monkeypatch):
+def test_scheduled_policy_disabled_recorded(tmp_path):
+    import importlib, json
+    hass = _FakeHass()
+    executor = ev_planner.ScheduledChargingExecutor(hass, _FakeConfigEntry())
+    executor._get_settings = lambda: {'enabled': False, 'start_time': '00:00', 'end_time': '06:00', 'max_price_cents': 30}
+    async def run():
+        writer = importlib.import_module('power_sync.decision_diagnostics').AsyncDecisionWriter(tmp_path)
+        writer.start()
+        hass.data['power_sync']['entry-1']['decision_diagnostics'] = writer
+        result = await executor.get_charging_decision(20)
+        await writer.close()
+        assert result[0] is False
+    asyncio.run(run())
+    row = json.loads(next(tmp_path.glob('ev-*.jsonl')).read_text())
+    assert row['event'] == 'scheduled_policy' and row['reason'] == 'scheduled_disabled'
+    assert row['start_time'] == '00:00' and row['end_time'] == '06:00' and row['max_price_cents'] == 30
+
+
+def test_scheduled_none_price_starts_when_aligned_retail_price_is_under_cap(monkeypatch, tmp_path):
     now = datetime(2026, 8, 5, 12, 7, tzinfo=timezone.utc)
     monkeypatch.setattr(
         ev_planner.dt_util,
@@ -3285,7 +3336,18 @@ def test_scheduled_none_price_starts_when_aligned_retail_price_is_under_cap(monk
         _scheduled_price_hass(schedule), _FakeConfigEntry()
     )
 
-    should_charge, _reason, mode = asyncio.run(executor.get_charging_decision(None))
+    import importlib, json
+    async def evaluate_with_diagnostics():
+        writer = importlib.import_module('power_sync.decision_diagnostics').AsyncDecisionWriter(tmp_path)
+        writer.start()
+        executor.hass.data['power_sync']['entry-1']['decision_diagnostics'] = writer
+        result = await executor.get_charging_decision(None)
+        await writer.close()
+        return result
+    should_charge, _reason, mode = asyncio.run(evaluate_with_diagnostics())
+    records = [json.loads(line) for line in next(tmp_path.glob('ev-*.jsonl')).read_text().splitlines()]
+    price = next(r for r in records if r['event'] == 'scheduled_price')
+    assert price['price_cents'] == 20 and price['price_fallback'] is True
 
     assert should_charge is True
     assert mode == "scheduled"
@@ -3808,18 +3870,26 @@ def test_price_level_leaves_manual_session_alone(monkeypatch, fake_actions):
     assert "manual mode owns" in state.last_decision_reason
 
 
-def test_stop_guard_blocks_other_owner_family():
+def test_stop_guard_blocks_other_owner_family(tmp_path):
     ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
     hass = _FakeHass()
     entry = _FakeConfigEntry()
     ev_ownership.claim_ev_ownership(hass, entry, VIN, owner_mode="manual")
 
-    allowed = ev_planner._can_stop_owned_loadpoint(
-        hass,
-        entry,
-        VIN,
-        expected_owner_mode="price_level_recovery",
-    )
+    import json
+    async def observe_guard():
+        writer = importlib.import_module('power_sync.decision_diagnostics').AsyncDecisionWriter(tmp_path)
+        writer.start()
+        hass.data['power_sync']['entry-1']['decision_diagnostics'] = writer
+        result = ev_planner._can_stop_owned_loadpoint(
+            hass, entry, VIN, expected_owner_mode='price_level_recovery')
+        await writer.close()
+        return result
+    allowed = asyncio.run(observe_guard())
+    rows = [json.loads(line) for line in next(tmp_path.glob('ev-*.jsonl')).read_text().splitlines()]
+    blocked = next(row for row in rows if row['event'] == 'ownership_stop_blocked')
+    assert blocked['reason'] == 'owner_conflict' and blocked['owner_mode'] == 'manual'
+    assert blocked['requested_mode'] == 'price_level_recovery'
 
     assert allowed is False
     last_command = ev_ownership.get_ev_last_commands(hass, entry)[VIN]
@@ -8385,6 +8455,65 @@ def test_unknown_vehicle_soc_uses_recovery_price_fallback(monkeypatch):
     assert mode == "price_level_recovery"
     assert "EV SOC unknown" in reason
     assert state.last_decision == "wants_charge"
+
+
+def test_generic_price_level_disabled_decision_is_recorded(tmp_path):
+    import importlib, json
+    hass = _FakeHass(price_settings={'enabled': False})
+    executor = ev_planner.PriceLevelChargingExecutor(hass, _FakeConfigEntry())
+    async def run():
+        writer = importlib.import_module('power_sync.decision_diagnostics').AsyncDecisionWriter(tmp_path)
+        writer.start()
+        hass.data['power_sync']['entry-1']['decision_diagnostics'] = writer
+        result = await executor.get_charging_decision(25)
+        await writer.close()
+        assert result[0] is False
+    asyncio.run(run())
+    row = json.loads(next(tmp_path.glob('ev-*.jsonl')).read_text())
+    assert row['event'] == 'price_level_result' and row['reason'] == 'price_level_disabled'
+    assert row['price_cents'] == 25 and row['should_charge'] is False
+
+
+def test_generic_price_level_persists_actual_operands(monkeypatch, tmp_path):
+    import importlib, json
+    monkeypatch.setattr(ev_planner, 'get_ev_location', AsyncMock(return_value='home'))
+    monkeypatch.setattr(ev_planner, 'is_ev_plugged_in', AsyncMock(return_value=True))
+    hass = _FakeHass(price_settings={'recovery_soc': 40, 'recovery_price_cents': 30,
+                                    'opportunity_price_cents': 10, 'home_battery_minimum': 0})
+    executor = ev_planner.PriceLevelChargingExecutor(hass, _FakeConfigEntry())
+    executor._get_ev_soc = AsyncMock(return_value=None)
+    async def run():
+        writer = importlib.import_module('power_sync.decision_diagnostics').AsyncDecisionWriter(tmp_path)
+        writer.start()
+        hass.data['power_sync']['entry-1']['decision_diagnostics'] = writer
+        result = await executor.get_charging_decision(25)
+        await writer.close()
+        assert result[0] is True
+    asyncio.run(run())
+    rows = [json.loads(line) for line in next(tmp_path.glob('ev-*.jsonl')).read_text().splitlines()]
+    row = next(row for row in rows if row['event'] == 'price_level_decision')
+    assert row['ev_soc'] is None
+    assert row['price_cents'] == 25 and row['should_charge'] is True
+
+
+def test_price_policy_records_operands_and_outcome(monkeypatch):
+    events = []
+    class Observer:
+        def emit(self, stream, event):
+            events.append(event)
+    monkeypatch.setattr(ev_planner, 'get_ev_location', AsyncMock(return_value='home'))
+    monkeypatch.setattr(ev_planner, 'is_ev_plugged_in', AsyncMock(return_value=True))
+    hass = _FakeHass(price_settings={'recovery_soc': 40, 'recovery_price_cents': 30,
+                                    'opportunity_price_cents': 10, 'home_battery_minimum': 0})
+    hass.data['power_sync']['entry-1']['decision_diagnostics'] = Observer()
+    executor = ev_planner.PriceLevelChargingExecutor(hass, _FakeConfigEntry())
+    executor._get_ev_soc = AsyncMock(return_value=None)
+    result = asyncio.run(executor.get_charging_decision_for_vehicle(VIN, 25))
+    assert result[0] is True
+    event = next(e for e in events if e['event'] == 'price_level_decision')
+    assert event['price_cents'] == 25 and event['ev_soc'] is None
+    assert event['recovery_price_cents'] == 30 and event['opportunity_price_cents'] == 10
+    assert event['should_charge'] is True and event['owner_mode'] == 'price_level_recovery'
 
 
 def _mixed_ble_config_entry():

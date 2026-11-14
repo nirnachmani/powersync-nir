@@ -243,6 +243,43 @@ def _self_consumption_action():
     )
 
 
+def test_optimizer_disabled_action_records_blocked_attempt(opt_module, tmp_path):
+    import importlib, json
+    from unittest.mock import AsyncMock
+    diagnostics = importlib.import_module('power_sync.decision_diagnostics')
+    async def run():
+        battery = SimpleNamespace(set_self_consumption_mode=AsyncMock())
+        coordinator = _execute_coordinator(opt_module, battery, enabled=False)
+        writer = diagnostics.AsyncDecisionWriter(tmp_path)
+        writer.start()
+        coordinator.hass.data = {'power_sync': {'test-entry': {'decision_diagnostics': writer}}}
+        await coordinator._execute_optimizer_action(_self_consumption_action())
+        await writer.close()
+        battery.set_self_consumption_mode.assert_not_awaited()
+    asyncio.run(run())
+    event = json.loads(next(tmp_path.glob('optimizer-*.jsonl')).read_text().splitlines()[0])
+    assert event['event'] == 'optimizer_action' and event['reason'] == 'optimizer_disabled'
+    assert event['planned_action'] == 'self_consumption' and event['power_w'] == 0
+
+
+def test_optimizer_action_reports_handler_return_not_physical_effect(opt_module, tmp_path):
+    import importlib, json
+    from unittest.mock import AsyncMock
+    diagnostics = importlib.import_module('power_sync.decision_diagnostics')
+    async def run():
+        battery = SimpleNamespace(set_self_consumption_mode=AsyncMock(return_value=True))
+        coordinator = _execute_coordinator(opt_module, battery)
+        writer = diagnostics.AsyncDecisionWriter(tmp_path)
+        writer.start()
+        coordinator.hass.data = {'power_sync': {'test-entry': {'decision_diagnostics': writer}}}
+        await coordinator._execute_optimizer_action(_self_consumption_action())
+        await writer.close()
+    asyncio.run(run())
+    rows = [json.loads(line) for line in next(tmp_path.glob('optimizer-*.jsonl')).read_text().splitlines()]
+    result = next(e for e in rows if e['event'] == 'optimizer_action_result')
+    assert result['outcome'] == 'returned' and result['reported_action'] == 'self_consumption'
+
+
 def test_execute_optimizer_action_noop_when_disabled(opt_module):
     """A solve in flight when disable() ran must not command the battery.
 

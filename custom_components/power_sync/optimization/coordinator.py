@@ -7227,6 +7227,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("Optimization in progress — queuing forced re-optimization")
         await self._optimization_lock.acquire()
         regression_recorder = getattr(self, "_regression_recorder", None)
+        diagnostic_recorder = None
+        diagnostic_observer = None
+        if regression_recorder is None:
+            try:
+                diagnostic_observer = self.hass.data.get('power_sync', {}).get(self.entry_id, {}).get('decision_diagnostics')
+                if diagnostic_observer is not None:
+                    from uuid import uuid4
+                    self._decision_diagnostic_trace_id = uuid4().hex
+                    diagnostic_recorder = diagnostic_observer.new_solver_recorder(self.hass.config.currency)
+                    regression_recorder = diagnostic_recorder
+            except Exception:
+                diagnostic_observer = None
+                diagnostic_recorder = None
         try:
             self._pending_price_timestamps = None
             self._pending_amber_forecast_confidence = None
@@ -8354,6 +8367,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 now=solve_timestamp,
             )
             self._current_schedule = result.schedule
+            self._last_diagnostic_plan_trace_id = getattr(self, '_decision_diagnostic_trace_id', None)
             self._last_optimizer_result = result
             if _LOGGER.isEnabledFor(logging.DEBUG):
                 solve_debug_record = self._optimizer_solve_debug_record(
@@ -8606,6 +8620,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     pass
                 if getattr(self._optimizer, "_regression_recorder", None) is regression_recorder:
                     self._optimizer._regression_recorder = None
+            if diagnostic_recorder is not None and diagnostic_observer is not None:
+                try:
+                    diagnostic_observer.emit_solver_capture(diagnostic_recorder, trace_id=getattr(self, '_decision_diagnostic_trace_id', None))
+                except Exception:
+                    pass
+            self._decision_diagnostic_trace_id = None
             self._pending_price_timestamps = None
             self._pending_amber_forecast_confidence = None
             self._optimization_lock.release()
@@ -11250,7 +11270,48 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         *,
         execution_trigger: str | None = None,
     ) -> None:
+        """Observe the existing action handler, including its early returns."""
+        outcome = 'returned'
+        try:
+            return await self._execute_optimizer_action_impl(action, execution_trigger=execution_trigger)
+        except BaseException:
+            outcome = 'exception'
+            raise
+        finally:
+            try:
+                observer = self.hass.data.get('power_sync', {}).get(self.entry_id, {}).get('decision_diagnostics')
+                if observer is not None:
+                    observer.emit('optimizer', {'event': 'optimizer_action_result', 'outcome': outcome,
+                        'trace_id': getattr(self, '_decision_diagnostic_trace_id', None) or getattr(self, '_last_diagnostic_plan_trace_id', None),
+                        'planned_action': getattr(action, 'action', None),
+                        'reported_action': getattr(self, '_last_executed_action', None)})
+            except Exception:
+                pass
+
+    async def _execute_optimizer_action_impl(
+        self,
+        action: Any,
+        *,
+        execution_trigger: str | None = None,
+    ) -> None:
         """Execute an optimizer action on the battery."""
+        try:
+            observer = self.hass.data.get('power_sync', {}).get(self.entry_id, {}).get('decision_diagnostics')
+            if observer is not None:
+                blocked = ('optimizer_disabled' if not getattr(self, '_enabled', True) else
+                           'executor_unavailable' if not self._executor or not self._executor.battery_controller else
+                           'restore_in_progress' if getattr(self, '_optimizer_restore_in_progress', False) else
+                           'evaluation')
+                observer.emit('optimizer', {'event': 'optimizer_action', 'reason': blocked,
+                    'trace_id': getattr(self, '_decision_diagnostic_trace_id', None) or getattr(self, '_last_diagnostic_plan_trace_id', None),
+                    'planned_action': getattr(action, 'action', None),
+                    'power_w': getattr(action, 'power_w', None),
+                    'battery_soc': getattr(action, 'soc', None),
+                    'battery_charge_w': getattr(action, 'battery_charge_w', None),
+                    'battery_discharge_w': getattr(action, 'battery_discharge_w', None),
+                    'source': execution_trigger})
+        except Exception:
+            pass
         # Guard against a solve that was in flight when disable() ran (e.g. an
         # untracked price-triggered re-optimization) completing afterwards and
         # re-commanding the battery. disable() sets _enabled=False before
@@ -14249,6 +14310,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Select profitable solar deferrals with explicitly funded recharge."""
         n = min(len(import_prices), len(export_prices), len(solar), len(load))
         selected = [False] * n
+
+        def observe_early_summary(reason: str) -> None:
+            try:
+                observer = self.hass.data.get('power_sync', {}).get(self.entry_id, {}).get('decision_diagnostics')
+                if observer is not None:
+                    observer.emit('optimizer', {'event': 'solar_export_summary', 'reason': reason,
+                        'selected_slots': 0, 'horizon_slots': n,
+                        'trace_id': getattr(self, '_decision_diagnostic_trace_id', None)})
+            except Exception:
+                pass
+
         if n <= 1 or not self.profit_max_mode:
             reason = (
                 "profit_max_disabled"
@@ -14269,6 +14341,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Nothing here is about the export limit, so drop any standing
             # notice rather than leaving a repair up after Profit Max is off.
             self._sync_solar_export_capability_notice({"reason": reason})
+            observe_early_summary(reason)
             return selected
         capability = self._solar_export_capability()
         if not capability.get("supported"):
@@ -14279,6 +14352,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "current_slot": {"selected": False, "reason": reason},
                 "rejection_counts": {reason: n - 1},
             }
+            observe_early_summary(reason)
             return selected
 
         interval_hours = max(1, int(self._config.interval_minutes or 5)) / 60.0
@@ -14302,6 +14376,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 },
                 "rejection_counts": {"battery_limits_unknown": n - 1},
             }
+            observe_early_summary('battery_limits_unknown')
             return selected
 
         deadline_slot = None
@@ -14315,12 +14390,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # repayment. Consuming this budget prevents multiple high-FIT slots
         # from claiming the same later recharge opportunity.
         future_capacity_kwh = [0.0] * n
+        future_solar_capacity_kwh = [0.0] * n
+        future_grid_capacity_kwh = [0.0] * n
         future_cost_per_input_kwh = [math.inf] * n
         for idx in range(n):
             if idx < len(hard_charge_blocks) and hard_charge_blocks[idx]:
                 continue
             solar_surplus_kw = max(0.0, solar[idx] - load[idx])
             solar_charge_kw = min(max_charge_kw, solar_surplus_kw)
+            future_solar_capacity_kwh[idx] = solar_charge_kw * interval_hours * efficiency
             best_charge_kw = solar_charge_kw
             if (
                 self._config.allow_grid_charge
@@ -14339,6 +14417,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         max_charge_kw,
                         max(0.0, float(max_grid_import_w) / 1000.0 - net_load_kw),
                     )
+                future_grid_capacity_kwh[idx] = grid_headroom_kw * interval_hours * efficiency
                 if grid_headroom_kw > best_charge_kw:
                     best_charge_kw = grid_headroom_kw
                     future_cost_per_input_kwh[idx] = import_prices[idx] / efficiency
@@ -14348,6 +14427,36 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             future_capacity_kwh[idx] = best_charge_kw * interval_hours * efficiency
 
+        try:
+            diagnostic_observer = self.hass.data.get('power_sync', {}).get(self.entry_id, {}).get('decision_diagnostics')
+            if diagnostic_observer is not None:
+                from uuid import uuid4
+                diagnostic_trace_id = getattr(self, '_decision_diagnostic_trace_id', None) or uuid4().hex
+            else:
+                diagnostic_trace_id = None
+        except Exception:
+            diagnostic_observer = None
+            diagnostic_trace_id = None
+        if diagnostic_observer is not None:
+            try:
+                diagnostic_observer.emit('optimizer', {
+                    'event': 'solar_export_budget', 'trace_id': diagnostic_trace_id, 'future_capacity_kwh': list(future_capacity_kwh),
+                    'future_cost_per_kwh': [x if math.isfinite(x) else None for x in future_cost_per_input_kwh],
+                    'future_solar_capacity_kwh': future_solar_capacity_kwh,
+                    'future_grid_capacity_kwh': future_grid_capacity_kwh,
+                    'current_soc': current_soc, 'interval_hours': interval_hours,
+                    'max_charge_kw': max_charge_kw, 'capacity_kwh': capacity_kwh,
+                    'efficiency': efficiency, 'deadline_slot': deadline_slot,
+                    'import_prices': list(import_prices[:n]), 'export_prices': list(export_prices[:n]),
+                    'solar_forecast': list(solar[:n]), 'load_forecast': list(load[:n]),
+                    'hard_charge_blocks': list(hard_charge_blocks[:n]),
+                    'grid_charge_allowed': list(grid_charge_allowed[:n]),
+                    'allow_grid_charge': bool(self._config.allow_grid_charge),
+                    'max_grid_import_w': self._config.max_grid_import_w,
+                    'grid_export_limits_w': list(grid_export_limits_w[:n]) if grid_export_limits_w is not None else None,
+                })
+            except Exception:
+                pass
         remaining_headroom_kwh = capacity_kwh * max(
             0.0, 1.0 - max(0.0, min(1.0, current_soc))
         )
@@ -14382,6 +14491,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         margin = 0.001  # Internal 0.1c/kWh anti-churn margin; not user config.
         current_slot_status: dict[str, Any] | None = None
         rejection_counts: dict[str, int] = {}
+        observed_allocation: dict[str, list] = {}
 
         def _record_slot(
             idx: int,
@@ -14390,6 +14500,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ) -> None:
             nonlocal current_slot_status
             selected_slot = reason == "selected"
+            if diagnostic_observer is not None:
+                try:
+                    diagnostic_observer.emit('optimizer', {
+                        'event': 'solar_export_slot', 'trace_id': diagnostic_trace_id, 'slot_index': idx,
+                        'reason': reason, 'selected': selected_slot, **details,
+                        **(observed_allocation if selected_slot else {}),
+                    })
+                except Exception:
+                    pass
             if not selected_slot:
                 rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
             if idx == 0:
@@ -14500,13 +14619,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                     continue
             remaining = deferred_kwh
+            used_slots: list[int] = []
+            used_amounts: list[float] = []
             for future_idx in candidates:
                 used = min(remaining, future_capacity_kwh[future_idx])
+                if diagnostic_observer is not None:
+                    used_slots.append(future_idx)
+                    used_amounts.append(used)
                 future_capacity_kwh[future_idx] -= used
                 remaining -= used
                 if remaining <= 1e-9:
                     break
             selected[idx] = True
+            if diagnostic_observer is not None:
+                observed_allocation['replenishment_slots'] = used_slots
+                observed_allocation['replenishment_used_kwh'] = used_amounts
             _record_slot(idx, "selected", **funding_details)
             if (
                 deadline_target_kwh is not None

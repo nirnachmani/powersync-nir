@@ -24499,6 +24499,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "_calibration_check_unsub": None,
     }
 
+    # Local retrospective diagnostics are observer-only and default on.
+    # A setup failure must not leave the writer running after the entry unloads.
+    try:
+        from .const import POWER_SYNC_VERSION
+        from .decision_diagnostics import start_entry_diagnostics
+
+        diagnostics = start_entry_diagnostics(hass, entry.entry_id, POWER_SYNC_VERSION)
+        hass.data[DOMAIN][entry.entry_id]["decision_diagnostics"] = diagnostics
+
+        def _close_decision_diagnostics():
+            if not diagnostics._closing:
+                hass.async_create_task(diagnostics.close())
+
+        entry.async_on_unload(_close_decision_diagnostics)
+    except Exception:
+        _LOGGER.warning("PowerSync decision logging could not be started")
+
     # Adapted from upstream 24fcc7d. Production stopping is independent of
     # export-price and battery routes and restores its durable journal first.
     from .solar_production_runtime import SolarProductionRuntime
@@ -28899,6 +28916,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 if hass.data.get(DOMAIN, {}).get(entry.entry_id) is not entry_data:
                     return
+                try:
+                    observer = entry_data.get('decision_diagnostics')
+                    if observer is not None:
+                        try:
+                            from .curtailment_config import get_curtailment_price_thresholds
+                            enter_threshold, exit_threshold = get_curtailment_price_thresholds(entry)
+                        except Exception:
+                            enter_threshold = exit_threshold = None
+                        observer.emit('optimizer', {'event': 'sigenergy_curtailment_decision',
+                            'export_price_cents': export_earnings, 'price_cents': import_price,
+                            'enter_threshold_cents': enter_threshold, 'exit_threshold_cents': exit_threshold,
+                            'export_uneconomic': export_uneconomic, 'ev_headroom': ev_needs_headroom,
+                            'reported_state': current_state,
+                            'export_owner': entry_data.get('sigenergy_export_limit_owner')})
+                except Exception:
+                    pass
                 # Assess the tariff/EV normally, but manual force owns physical 40038.
                 if force_discharge_state.get("active") and force_discharge_state.get("source") != "optimizer":
                     entry_data["sigenergy_export_limit_owner"] = "manual_force"
@@ -29055,6 +29088,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _LOGGER.debug("Sigenergy already in normal mode, no action needed")
             except Exception as e:
                 _LOGGER.error("Sigenergy curtailment error: %s", e, exc_info=True)
+            finally:
+                try:
+                    observer = entry_data.get('decision_diagnostics')
+                    if observer is not None:
+                        observer.emit('optimizer', {'event': 'sigenergy_curtailment_result',
+                            'reported_state': entry_data.get('sigenergy_curtailment_state'),
+                            'export_owner': entry_data.get('sigenergy_export_limit_owner'),
+                            'write_pending': bool(entry_data.get('sigenergy_dc_zero_write_pending'))})
+                except Exception:
+                    pass
 
     _sigenergy_reassert_lock = asyncio.Lock()
 
@@ -48139,6 +48182,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
     if unload_ok:
+        if diagnostics := entry_data.pop("decision_diagnostics", None):
+            await diagnostics.close()
         hass.data[DOMAIN].pop(entry.entry_id)
 
     # Remove services if this is the last entry

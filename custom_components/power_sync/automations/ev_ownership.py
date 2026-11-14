@@ -856,6 +856,24 @@ def release_external_ev_ownership(
     return True
 
 
+def _observe_ownership(hass, config_entry, event, lease, *, command=None, success=None):
+    """Record lease transitions without retaining personal vehicle identifiers."""
+    try:
+        observer = hass.data.get('power_sync', {}).get(config_entry.entry_id, {}).get('decision_diagnostics')
+        if observer is not None:
+            try:
+                from .actions import _current_decision_trace
+                trace_id = _current_decision_trace()
+            except Exception:
+                trace_id = None
+            observer.emit('ev', {'event': event, 'trace_id': trace_id, 'owner_mode': (lease or {}).get('owner_mode'),
+                                 'owner': (lease or {}).get('owner'),
+                                 'profile': (lease or {}).get('active_profile_id'),
+                                 'command': command, 'success': success})
+    except Exception:
+        pass
+
+
 def record_ev_command(
     hass: Any,
     config_entry: Any,
@@ -877,6 +895,13 @@ def record_ev_command(
         "success": bool(success),
         "reason": reason,
     }
+    try:
+        if hass.data.get('power_sync', {}).get(config_entry.entry_id, {}).get('decision_diagnostics') is not None:
+            _, diagnostic_lease = get_ev_ownership(hass, config_entry, vid)
+            _observe_ownership(hass, config_entry, 'ownership_blocked' if record_type == 'ownership_blocked' else 'ev_command',
+                               diagnostic_lease, command=command, success=success)
+    except Exception:
+        pass
     if record_type == "ownership_blocked":
         # This is not a dispatched command. Keep an earlier physical command
         # available to its exact stop-confirmation and alert episode.
@@ -993,6 +1018,7 @@ def claim_ev_ownership(
         get_ev_last_commands(hass, config_entry)[vid] = lease["last_command"]
 
     leases[vid] = lease
+    _observe_ownership(hass, config_entry, 'ownership_claimed', lease, command=command, success=success)
     _schedule_runtime_save(hass, config_entry)
     return lease
 
@@ -1099,6 +1125,8 @@ def release_ev_ownership(
         "reason": reason,
     }
     get_ev_last_commands(hass, config_entry)[vid] = last_command
+    _observe_ownership(hass, config_entry, 'ownership_released', previous if isinstance(previous, dict) else None,
+                       command=command, success=success)
     _schedule_runtime_save(hass, config_entry)
     return previous if isinstance(previous, dict) else None
 

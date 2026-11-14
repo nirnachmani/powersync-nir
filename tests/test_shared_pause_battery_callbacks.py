@@ -44,7 +44,143 @@ def rig(monkeypatch):
     actions._dynamic_ev_state.clear()
 
 
+def test_floor_pause_records_intent_before_dispatch(rig):
+    events = []
+    class Recorder:
+        def emit(self, stream, event):
+            events.append((stream, event))
+            return True
+    rig.hass.data['power_sync'][rig.entry.entry_id]['decision_diagnostics'] = Recorder()
+    asyncio.run(rig.tick())
+    pauses = [e for stream, e in events if stream == 'ev' and e.get('event') == 'shared_pause_requested']
+    assert pauses and pauses[0]['requested_amps'] == 0
+    assert pauses[0]['owner_mode'] == 'solar_surplus'
+    decisions = [e for stream, e in events if stream == 'ev' and e.get('event') == 'solar_battery_floor']
+    assert decisions[0]['battery_soc'] == 20
+    assert decisions[0]['min_battery_soc'] == 50
+    assert decisions[0]['pause_battery_soc'] == 40
+    assert decisions[0]['reason'] == 'battery_below_pause_floor'
+    outcomes = [e for stream, e in events if stream == 'ev' and e.get('event') == 'dynamic_stop_result']
+    assert outcomes and outcomes[0]['outcome'] in {'returned_true', 'not_confirmed'}
+    assert rig.hass.services.async_call.await_count == 1
+
+
+def test_floor_pause_persists_thresholds_and_cause(rig, tmp_path):
+    import importlib.util, json
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location('floor_writer_test', Path(__file__).resolve().parents[1] / 'custom_components/power_sync/decision_diagnostics.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    async def run():
+        writer = module.AsyncDecisionWriter(tmp_path)
+        writer.start()
+        rig.hass.data['power_sync'][rig.entry.entry_id]['decision_diagnostics'] = writer
+        await rig.tick()
+        await writer.close()
+    asyncio.run(run())
+    rows = [json.loads(line) for line in next(tmp_path.glob('ev-*.jsonl')).read_text().splitlines()]
+    decision = next(e for e in rows if e['event'] == 'solar_battery_floor')
+    assert (decision['battery_soc'], decision['min_battery_soc'], decision['pause_battery_soc']) == (20, 50, 40)
+    assert decision['reason'] == 'battery_below_pause_floor'
+    stop_result = next(e for e in rows if e['event'] == 'dynamic_stop_result')
+    assert stop_result['outcome'] in {'returned_true', 'not_confirmed'}
+    assert stop_result['runtime_pause'] is True
+    assert decision['trace_id'] == stop_result['trace_id']
+
+
+def test_battery_target_decision_records_inputs_and_rate(rig, monkeypatch):
+    events = []
+    class Recorder:
+        def emit(self, stream, event):
+            events.append((stream, event))
+            return True
+    rig.hass.data['power_sync'][rig.entry.entry_id]['decision_diagnostics'] = Recorder()
+    rig.runtime['params']['dynamic_mode'] = 'battery_target'
+    rig.runtime['params']['owner_mode'] = 'smart_schedule'
+    monkeypatch.setattr(actions, '_resolve_max_grid_import_kw', AsyncMock(return_value=12.5))
+    monkeypatch.setattr(actions, '_optimizer_planned_battery_charge_kw', lambda *a: 10.0)
+    monkeypatch.setattr(actions, '_optimizer_planned_ev_charge_kw', lambda *a: None)
+    monkeypatch.setattr(actions, '_set_vehicle_amps', AsyncMock(return_value=True))
+    asyncio.run(actions._dynamic_ev_update(rig.hass, rig.entry, rig.entry.entry_id, 'generic_ev'))
+    decisions = [e for stream, e in events if stream == 'ev' and e.get('event') == 'battery_target_decision']
+    assert decisions and decisions[0]['grid_limit_kw'] == 12.5
+    assert decisions[0]['battery_target_kw'] == 10.0
+    assert 'requested_amps' in decisions[0]
+
+
+def test_battery_target_tick_persists_actual_operands(rig, monkeypatch, tmp_path):
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[1] / 'custom_components/power_sync/decision_diagnostics.py'
+    spec = importlib.util.spec_from_file_location('diagnostic_writer_integration', path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    rig.runtime['params']['dynamic_mode'] = 'battery_target'
+    rig.runtime['params']['owner_mode'] = 'smart_schedule'
+    monkeypatch.setattr(actions, '_resolve_max_grid_import_kw', AsyncMock(return_value=12.5))
+    monkeypatch.setattr(actions, '_optimizer_planned_battery_charge_kw', lambda *a: 10.0)
+    monkeypatch.setattr(actions, '_optimizer_planned_ev_charge_kw', lambda *a: None)
+    monkeypatch.setattr(actions, '_set_vehicle_amps', AsyncMock(return_value=True))
+    async def run():
+        writer = module.AsyncDecisionWriter(tmp_path)
+        writer.start()
+        rig.hass.data['power_sync'][rig.entry.entry_id]['decision_diagnostics'] = writer
+        await actions._dynamic_ev_update(rig.hass, rig.entry, rig.entry.entry_id, 'generic_ev')
+        await writer.close()
+    asyncio.run(run())
+    import json
+    records = [json.loads(line) for line in next(tmp_path.glob('ev-*.jsonl')).read_text().splitlines()]
+    decision = next(e for e in records if e['event'] == 'battery_target_decision')
+    assert decision['grid_limit_kw'] == 12.5
+    assert decision['battery_target_kw'] == 10.0
+    assert decision['planned_ev_kw'] is None
+
+
+def test_solar_zero_rate_records_optimizer_ceiling(rig, monkeypatch):
+    events = []
+    class Observer:
+        def emit(self, stream, event):
+            events.append(event)
+    rig.hass.data['power_sync'][rig.entry.entry_id]['decision_diagnostics'] = Observer()
+    rig.live['battery_soc'] = 80
+    monkeypatch.setattr(actions, '_optimizer_planned_ev_charge_kw', lambda *a: 0.0)
+    asyncio.run(rig.tick())
+    decision = next(event for event in events if event.get('event') == 'solar_rate_decision')
+    assert decision['reason'] == 'optimizer_zero'
+    assert decision['planned_ev_kw'] == 0
+    assert decision['current_amps'] == 6 and decision['requested_amps'] == 0
+
+
+def test_solar_zero_rate_persisted(rig, monkeypatch, tmp_path):
+    import importlib.util, json
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location('solar_writer_test', Path(__file__).resolve().parents[1] / 'custom_components/power_sync/decision_diagnostics.py')
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    rig.live['battery_soc'] = 80
+    monkeypatch.setattr(actions, '_optimizer_planned_ev_charge_kw', lambda *a: 0.0)
+    async def run():
+        writer = module.AsyncDecisionWriter(tmp_path)
+        writer.start()
+        rig.hass.data['power_sync'][rig.entry.entry_id]['decision_diagnostics'] = writer
+        await rig.tick()
+        await writer.close()
+    asyncio.run(run())
+    rows = [json.loads(line) for line in next(tmp_path.glob('ev-*.jsonl')).read_text().splitlines()]
+    event = next(e for e in rows if e['event'] == 'solar_rate_decision')
+    assert event['reason'] == 'optimizer_zero'
+    assert event['planned_ev_kw'] == 0 and event['requested_amps'] == 0
+    assert event['optimizer_ceiling_amps'] == 0
+
+
 def test_floor_pause_pending_repeated_ticks_stale_and_fresh_idle(rig):
+    events = []
+    class Observer:
+        def emit(self, stream, event):
+            events.append(event)
+    rig.hass.data['power_sync'][rig.entry.entry_id]['decision_diagnostics'] = Observer()
     async def scenario():
         await rig.tick()
         assert rig.hass.services.async_call.await_count == 1
@@ -64,6 +200,10 @@ def test_floor_pause_pending_repeated_ticks_stale_and_fresh_idle(rig):
         rig.power.last_reported = datetime.now(timezone.utc)
         await actions.async_reconcile_pending_shared_stops(rig.hass, rig.entry)
         assert not actions.is_shared_stop_fenced(rig.hass, rig.entry, 'generic_ev')
+        observed = [event for event in events if event.get('event') == 'stop_observation']
+        assert observed and observed[-1]['charging'] is False
+        assert observed[-1]['power_kw'] == 0
+        assert observed[-1]['trace_id'] == next(e for e in events if e.get('event') == 'solar_battery_floor')['trace_id']
         assert rig.runtime['active']
         rig.live['battery_soc'] = 80
         rig.live['grid_power'] = -5000
