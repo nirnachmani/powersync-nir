@@ -1,3 +1,11 @@
+<!-- release: v2.12.1698-nir.1 -->
+
+## v2.12.1698-nir.1 — reviewed upstream and shared EV compatibility
+- Integrate reviewed upstream changes through v2.12.1698, including EV mode automation actions, energy-flow and tariff displays, and battery charge-origin tracking.
+- Preserve shared logical EV ownership, post-stop confirmation, Sigenergy export control and Android contracts. Reconcile unshared EVAC stop telemetry without bypassing shared stop fences.
+- Add local-only optimizer replay for developer use. Remote diagnostics and fleet sharing remain excluded.
+- Source release only: no Home Assistant deployment, restart or physical hardware operation was performed.
+
 <!-- release: v2.12.1671-nir.4 -->
 
 ## v2.12.1671-nir.4 — Sigenergy 2.0 grid status
