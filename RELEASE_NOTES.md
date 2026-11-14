@@ -1,3 +1,8 @@
+<!-- release: v2.12.1671-nir.4 -->
+
+## v2.12.1671-nir.4 — Sigenergy 2.0 grid status
+- Recognize Sigenergy Local Modbus 2.0's `on_grid` sensor state for negative-import solar production control. Preserve existing grid freshness and off-grid safeguards.
+
 <!-- release: v2.12.1671-nir.3 -->
 
 ## v2.12.1671-nir.3 — shared EV stop bookkeeping

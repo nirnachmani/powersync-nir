@@ -555,21 +555,22 @@ def test_runtime_current_retail_stop_expiry_outage_and_disabled_option_recovery(
     run(scenario())
 
 
-def test_sigenergy_grid_status_allows_fresh_on_grid_and_restores_on_loss(runtime_rig):
+@pytest.mark.parametrize("connected,disconnected", [("On Grid", "Off Grid (Auto)"), ("on_grid", "off_grid_auto"), ("on_grid", "off_grid_manual")])
+def test_sigenergy_grid_status_allows_fresh_on_grid_and_restores_on_loss(runtime_rig, connected, disconnected):
     runtime, _, states, _, _, data = runtime_rig
     entity = "sensor.sigen_plant_grid_connection_status"
     states[entity] = SimpleNamespace(
-        state="On Grid", attributes={}, last_reported=datetime.now(timezone.utc)
+        state=connected, attributes={}, last_reported=datetime.now(timezone.utc)
     )
     runtime.entry.options["solar_production_grid_connected_entity"] = entity
 
     async def scenario():
         await runtime.tick()
         assert states["switch.pv_enable"].state == "off"
-        states[entity].state = "Off Grid"
+        states[entity].state = disconnected
         await runtime.tick()
         assert states["switch.pv_enable"].state == "on"
-        states[entity].state = "On Grid"
+        states[entity].state = connected
         await runtime.tick()
         assert states["switch.pv_enable"].state == "off"
         states[entity].last_reported = datetime.now(timezone.utc) - timedelta(minutes=2)
