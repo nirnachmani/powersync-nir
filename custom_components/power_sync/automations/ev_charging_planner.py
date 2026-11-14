@@ -5469,15 +5469,15 @@ class AutoScheduleExecutor:
         except Exception as e:
             _LOGGER.error(f"Failed to load auto-schedule settings: {e}")
 
-    async def save_settings(self, store) -> None:
+    async def save_settings(self, store, *, raise_errors: bool = False) -> None:
         """Save settings to storage under the EV transaction lock."""
         from .ev_store_lock import run_ev_store_transaction
 
         await run_ev_store_transaction(
-            store, lambda: AutoScheduleExecutor._save_settings_locked(self, store)
+            store, lambda: AutoScheduleExecutor._save_settings_locked(self, store, raise_errors=raise_errors)
         )
 
-    async def _save_settings_locked(self, store) -> None:
+    async def _save_settings_locked(self, store, *, raise_errors: bool = False) -> None:
         try:
             stored_data = await store.async_load() if hasattr(store, 'async_load') else {}
             if not stored_data:
@@ -5499,6 +5499,8 @@ class AutoScheduleExecutor:
             _LOGGER.debug(f"Saved auto-schedule settings for {len(self._settings)} vehicles")
         except Exception as e:
             _LOGGER.error(f"Failed to save auto-schedule settings: {e}")
+            if raise_errors:
+                raise
 
     def get_settings(self, vehicle_id: str) -> AutoScheduleSettings:
         """Get settings for a vehicle, creating defaults if needed."""

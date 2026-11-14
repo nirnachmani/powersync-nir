@@ -12,6 +12,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
@@ -232,7 +233,8 @@ async def async_setup_entry(
     )
 
     entities = []
-    entities.append(SolarSurplusChargingSwitch(hass, entry))
+    if legacy_solar_switch := _legacy_solar_surplus_switch(hass, entry):
+        entities.append(legacy_solar_switch)
 
     entities.append(
         AutoUpdateSwitch(
@@ -439,6 +441,20 @@ async def async_setup_entry(
             _add_capability_gated_switches(),
             name=f"{DOMAIN}_capability_gated_switches",
         )
+
+
+def _legacy_solar_surplus_switch(hass, entry):
+    """Retain an existing entity ID without adding switches on new setups."""
+    registry = er.async_get(hass)
+    entity_id = registry.async_get_entity_id(
+        "switch", DOMAIN, f"{entry.entry_id}_solar_surplus_ev_charging"
+    )
+    if entity_id is None:
+        return None
+    registered = registry.async_get(entity_id)
+    if registered.hidden_by is None:
+        registry.async_update_entity(entity_id, hidden_by=er.RegistryEntryHider.INTEGRATION)
+    return SolarSurplusChargingSwitch(hass, entry)
 
 
 class SolarSurplusChargingSwitch(SwitchEntity):

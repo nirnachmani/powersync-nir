@@ -255,5 +255,5 @@ def test_invalid_setting_does_not_persist_or_change_runtime(control):
 def test_switch_is_registered_without_provider_or_brand_gate():
     tree = ast.parse((ROOT / "switch.py").read_text())
     setup = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "async_setup_entry")
-    assert any(isinstance(n, ast.Expr) and "SolarSurplusChargingSwitch(hass, entry)" in ast.unparse(n)
+    assert any(isinstance(n, ast.If) and "_legacy_solar_surplus_switch(hass, entry)" in ast.unparse(n.test)
                for n in setup.body)

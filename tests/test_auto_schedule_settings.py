@@ -464,6 +464,17 @@ def test_auto_schedule_sync_reads_app_charge_amp_aliases():
     assert settings.phases == 1
 
 
+def test_action_save_settings_propagates_persistence_failure():
+    executor = object.__new__(ev_planner.AutoScheduleExecutor)
+    executor._settings = {"car": ev_planner.AutoScheduleSettings(vehicle_id="car", enabled=True)}
+    executor._cached_soc = {}
+    store = types.SimpleNamespace(async_load=AsyncMock(return_value={}),
+                                  async_save=AsyncMock(side_effect=OSError("disk full")))
+    with pytest.raises(OSError, match="disk full"):
+        asyncio.run(executor.save_settings(store, raise_errors=True))
+    store.async_save.assert_awaited_once()
+
+
 def test_auto_schedule_sync_normalizes_stale_synthetic_backend():
     automation_store = types.SimpleNamespace(
         _data={

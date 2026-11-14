@@ -7,3 +7,4 @@ highspy==1.15.1
 PyJWT==2.10.1
 pytest==8.4.2
 tesla-protocol==4.0.0
+voluptuous==0.16.0
