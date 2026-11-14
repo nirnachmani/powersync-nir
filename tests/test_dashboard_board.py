@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import subprocess
+import pytest
 
 
 FRONTEND = (
@@ -1415,3 +1416,31 @@ def test_today_average_labels_net_home_energy_cost_not_battery_acquisition():
     assert 'Average import cost' not in out['html']
     assert '9.9' in out['html']
     assert 'Month to date 162.0 c' in out['html']
+
+
+@pytest.mark.parametrize("start,expected_left,expected_width", [
+    ("13:30", "56.2500", "10.4167"),
+    ("00:00", "0.0000", "66.6667"),
+])
+def test_tariff_ribbon_uses_clock_positions_for_partial_cosy_day(start, expected_left, expected_width):
+    out = _run_board(r"""
+  const card = new T.PsTariffCard();
+  card._hass = {config: {currency: 'GBP', time_zone: 'UTC'}, states: {
+    tariff: {state: 'off_peak', attributes: {schedule: [
+      {time: 'START', date_label: 'Today', buy: 0.141, sell: 0},
+      {time: '16:00', date_label: 'Today', buy: 0.432, sell: 0},
+      {time: '19:00', date_label: 'Today', buy: 0.288, sell: 0},
+      {time: '22:00', date_label: 'Today', buy: 0.141, sell: 0},
+    ]}}
+  }};
+  card._config = {entities: {tariff: 'tariff'}};
+  card._render();
+  console.log(JSON.stringify({html: card.innerHTML}));
+""".replace("START", start))
+    html = out["html"]
+    assert f"left:{expected_left}%;width:{expected_width}%;" in html
+    assert "left:66.6667%;width:12.5000%;" in html
+    assert "left:79.1667%;width:12.5000%;" in html
+    assert "left:91.6667%;width:8.3333%;" in html
+    assert '<span class="i">14.1</span>' in html
+    assert '<span class="i">43.2</span>' in html
