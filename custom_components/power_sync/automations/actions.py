@@ -14861,11 +14861,21 @@ async def _action_start_ev_charging_dynamic_locked(
                             err,
                         )
                         return False
+                live_lease_id, live_lease = get_ev_ownership(hass, config_entry, vehicle_id)
+                exact_outgoing = (entry_vehicles.get(vehicle_id) is existing_state
+                                  and live_lease_id == vehicle_id
+                                  and stored_lease is not None and live_lease is stored_lease)
                 release_ev_ownership(
                     hass, config_entry, vehicle_id,
                     reason="managed shared charging profile ended at fresh idle",
                     command="release",
                 )
+                snapshot = existing_state.get("executor_stop_snapshot")
+                if exact_outgoing and snapshot:
+                    try:
+                        snapshot["complete"](config_entry, snapshot)
+                    except Exception:
+                        _LOGGER.exception("Could not reconcile outgoing executor at idle handoff")
                 entry_vehicles.pop(vehicle_id, None)
                 reconciliation.active_profile_id = None
                 await persist_reconciliation_state(hass, config_entry, vehicle_id, reconciliation)
@@ -16298,6 +16308,15 @@ async def async_reconcile_pending_shared_stops(hass, config_entry):
         if not vehicles:
             _dynamic_ev_state.pop(config_entry.entry_id, None)
             hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {}).pop("dynamic_ev_state", None)
+    # Hardware/ancillary cleanup must not run while the transition lock is held.
+    import sys
+    planner = sys.modules.get(f"{__package__}.ev_charging_planner")
+    cleanup = getattr(planner, "async_cleanup_settled_shared_executors", None)
+    if cleanup:
+        try:
+            await cleanup(config_entry)
+        except Exception:
+            _LOGGER.exception("Could not clean up settled shared EV executors")
 
 
 async def _retry_pending_evac_stop(hass, config_entry, vid, state, vehicles, pending, store):
@@ -16622,6 +16641,12 @@ async def _settle_pending_shared_stop(hass, config_entry, vid, state, vehicles):
         return True
     release_ev_ownership(hass, config_entry, vid, command="stop", success=True,
                          reason=pending["params"].get("stop_reason", "stopped"))
+    snapshot = pending.get("executor_stop_snapshot")
+    if snapshot:
+        try:
+            snapshot["complete"](config_entry, snapshot)
+        except Exception:
+            _LOGGER.exception("Could not reconcile executor after confirmed shared stop")
     # The replacement diagnostic command is not a new stop dispatch. Prevent
     # ordinary reconciliation from confirming it using a weaker observation.
     commands[vid]["settled_at"] = observation.observed_at.isoformat()
@@ -16773,6 +16798,7 @@ async def _action_stop_ev_charging_dynamic_locked(
                     continue
                 pending["params"]["_shared_runtime_pause"] = False
                 pending["params"]["stop_reason"] = params.get("stop_reason", "stopped")
+                pending["executor_stop_snapshot"] = state.get("executor_stop_snapshot")
                 state["active"] = False
                 for timer_key in ("cancel_timer", "quick_stop_timer"):
                     cancel = state.get(timer_key)
@@ -16848,6 +16874,19 @@ async def _action_stop_ev_charging_dynamic_locked(
             PARAMETER_NAMES, MalformedPendingStop, PendingStopConflict, upsert_pending_stop,
         )
         pending = state["pending_stop"]
+        if not params.get("_shared_runtime_pause"):
+            pending["executor_stop_snapshot"] = state.get("executor_stop_snapshot")
+            if pending["executor_stop_snapshot"] is None and state.get("direct_stop_only"):
+                # Only an already-loaded planner can own an in-memory executor.
+                # Do not make a physical stop depend on importing the planner.
+                import sys
+                planner = sys.modules.get(f"{__package__}.ev_charging_planner")
+                capture = getattr(planner, "_capture_shared_executor_stop", None)
+                if capture:
+                    try:
+                        pending["executor_stop_snapshot"] = capture(config_entry, lease)
+                    except Exception:
+                        _LOGGER.exception("Could not capture executor for shared stop")
         report = params.get("_stop_episode_report")
         if isinstance(report, dict):
             report["pending"] = pending

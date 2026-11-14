@@ -85,7 +85,7 @@ class SolarProductionRuntime:
             state = self.hass.states.get(entity)
             value = str(state.state).lower() if state else ""
             stamp = _datetime(getattr(state, "last_reported", None) or getattr(state, "last_updated", None))
-            connected = value == "on" if str(entity).startswith("binary_sensor.") else value in ("active", "connected", "systemgridconnected", "on-grid", "on grid")
+            connected = value == "on" if str(entity).startswith("binary_sensor.") else value in ("active", "connected", "systemgridconnected", "on-grid", "on grid", "on_grid")
         else:
             return False
         return bool(connected and stamp and timedelta(0) <= now - stamp <= timedelta(seconds=90))

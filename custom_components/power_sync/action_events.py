@@ -145,6 +145,8 @@ def publish_ev_command(hass: Any, config_entry: Any, vehicle_id: str,
         "observed_at": command.get("settled_at") if physical_confirmation else command.get("observed_at"),
     }
     fire_action_event(hass, EVENT_EV_COMMAND, payload)
+    if record_type == "ownership_blocked":
+        return  # A rejected request never reached the physical charger.
     if command["source"] != "powersync":
         return
     name = str(command["command"])
