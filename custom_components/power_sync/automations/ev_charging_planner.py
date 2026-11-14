@@ -4857,6 +4857,7 @@ class AutoScheduleState:
     last_decision: str = "idle"
     last_decision_reason: str = ""
     started_at: Optional[datetime] = None
+    charging_generation: int = 0
 
     # Curtailment override management - track original export rule to restore after charging
     original_export_rule: Optional[str] = None
@@ -5611,10 +5612,12 @@ class AutoScheduleExecutor:
         state = self.get_state(vehicle_id)
         if state.is_charging:
             return False
+        state.charging_generation += 1
         state.is_charging = True
         state.started_at = observed_at or dt_util.now()
         state.last_decision = "charging"
         state.last_decision_reason = "Adopted observed external Smart Schedule session"
+        _bind_shared_executor_runtime(self, state, vehicle_id, "smart_schedule")
         return True
 
     def get_all_states(self, *, enabled_only: bool = False) -> Dict[str, dict]:
@@ -8414,8 +8417,10 @@ class AutoScheduleExecutor:
 
             if success:
                 self._clear_start_failure(vehicle_id)
+                state.charging_generation += 1
                 state.is_charging = True
                 state.started_at = datetime.now()
+                _bind_shared_executor_runtime(self, state, vehicle_id, "smart_schedule")
                 stop_key = vehicle_vin or vehicle_id
                 self._last_external_smart_schedule_stops.pop(stop_key, None)
                 _LOGGER.info(f"Auto-schedule: Started {dynamic_mode} charging for {vehicle_id}")
@@ -8608,6 +8613,8 @@ class AutoScheduleExecutor:
                 return False
 
         loadpoint_id = vehicle_vin or vehicle_id
+        stop_generation = state.charging_generation
+        stop_state = self._state.get(vehicle_id)
         try:
             stopped = await _stop_coordinated_charging(
                 self.hass,
@@ -8620,6 +8627,9 @@ class AutoScheduleExecutor:
                 stop_untracked=False,
                 log_prefix="Auto-schedule",
             )
+            if (state.charging_generation != stop_generation
+                    or (stop_state is not None and self._state.get(vehicle_id) is not stop_state)):
+                return False
             if not stopped:
                 return False
             state.is_charging = False
@@ -8859,6 +8869,7 @@ def _can_stop_loadpoint_for_mode(
             if active_mode else
             "loadpoint is not owned by this mode"
         )
+        from .shared_loadpoint import binding_for_entry
         record_ev_command(
             hass,
             config_entry,
@@ -8866,6 +8877,7 @@ def _can_stop_loadpoint_for_mode(
             command=command,
             success=False,
             reason=reason,
+            record_type="ownership_blocked" if binding_for_entry(config_entry) else "command",
         )
         _LOGGER.info(
             "EV stop blocked for %s: expected %s, found %s",
@@ -11177,6 +11189,8 @@ class PriceLevelChargingExecutor:
         state.charging_mode = "price_level"
         state.last_decision = "charging"
         state.last_decision_reason = "Adopted observed external Price-Level session"
+        if shared:
+            _bind_shared_executor_runtime(self, state, active_profile_id, "price_level")
 
     def _set_preserve_home_battery_intent(self, reason: str) -> None:
         """Publish price-level EV preserve intent for the optimiser to execute."""
@@ -11411,6 +11425,7 @@ class PriceLevelChargingExecutor:
             state.last_decision = "started"
             state.last_decision_reason = reason
             _LOGGER.info(f"Price-level charging: Started ({mode}) - {reason}")
+        _bind_shared_executor_runtime(self, state, vehicle_vin, "price_level")
         await self.apply_preserve_home_battery(True, reason)
         return True
 
@@ -12145,6 +12160,7 @@ def set_price_level_executor(executor: PriceLevelChargingExecutor) -> None:
 class ScheduledChargingState:
     """State for scheduled charging."""
     is_charging: bool = False
+    charging_generation: int = 0
     last_decision: str = "idle"
     last_decision_reason: str = ""
 
@@ -12390,7 +12406,9 @@ class ScheduledChargingExecutor:
                 and previous_profile != selected
             )
             if success and shared:
+                self._state.charging_generation += 1
                 self._active_shared_profile_id = selected
+                _bind_shared_executor_runtime(self, self._state, selected, "scheduled")
             self._state.last_decision = "started" if success else "start_failed"
             self._state.last_decision_reason = reason if success else f"{reason}; start unsuccessful"
         await self.apply_preserve_home_battery(
@@ -12493,6 +12511,9 @@ class ScheduledChargingExecutor:
         from .ev_ownership import owner_family
 
         opts = {**self.config_entry.data, **self.config_entry.options}
+        stop_state = self._state
+        stop_generation = stop_state.charging_generation
+        stop_profile = self._active_shared_profile_id
         if _configured_charger_type(opts) == "tesla":
             groups = self._tesla_owner_groups()
             targets = {vin for vin, modes in groups.items()
@@ -12585,6 +12606,10 @@ class ScheduledChargingExecutor:
                     vehicle_vin=selected,
                     log_prefix="Scheduled charging",
                 )
+        if (self._state is not stop_state or stop_state.charging_generation != stop_generation
+                or (self._active_shared_profile_id is not None
+                    and self._active_shared_profile_id != stop_profile)):
+            return False
         if not success:
             self._state.last_decision = "stop_failed"
             self._state.last_decision_reason = f"{reason}; stop unconfirmed"
@@ -12695,6 +12720,8 @@ class ScheduledChargingExecutor:
 
     def update_charging_state(self, is_charging: bool, reason: str = "") -> None:
         """Update internal state when coordinator controls charging."""
+        if is_charging and not self._state.is_charging:
+            self._state.charging_generation += 1
         self._state.is_charging = is_charging
         if not is_charging:
             self._active_shared_profile_id = None
@@ -13184,3 +13211,117 @@ def set_ev_charging_coordinator(coordinator: EVChargingModeCoordinator) -> None:
     """Set the global EV charging mode coordinator instance."""
     global _ev_charging_coordinator
     _ev_charging_coordinator = coordinator
+
+
+def _bind_shared_executor_runtime(executor: Any, state: Any, profile: str | None, family: str) -> None:
+    """Bind an accepted executor generation to its exact owned runtime."""
+    if not profile:
+        return
+    from .actions import _dynamic_ev_state
+    from .ev_ownership import get_ev_ownership, owner_family
+    from .shared_loadpoint import canonical_shared_loadpoint_id
+
+    physical = canonical_shared_loadpoint_id(executor.config_entry, profile)
+    if not physical:
+        return
+    runtime = _dynamic_ev_state.get(executor.config_entry.entry_id, {}).get(physical)
+    lease_id, lease = get_ev_ownership(executor.hass, executor.config_entry, physical)
+    if (not isinstance(runtime, dict) or runtime.get("active_profile_id") != profile
+            or lease_id != physical or not lease or lease.get("owner") != "powersync"
+            or lease.get("active_profile_id") != profile
+            or owner_family(lease.get("owner_mode")) != family):
+        return
+    runtime["executor_stop_snapshot"] = {
+        "executor": executor, "state": state, "profile": profile,
+        "family": family, "generation": state.charging_generation,
+        "complete": _complete_shared_executor_stop,
+    }
+
+
+def _capture_shared_executor_stop(config_entry: Any, lease: dict) -> dict | None:
+    """Capture only the outgoing executor generation named by the fenced lease."""
+    from .ev_ownership import owner_family
+
+    if lease.get("owner") != "powersync":
+        return None
+    profile = lease.get("active_profile_id")
+    family = owner_family(lease.get("owner_mode"))
+    if not profile:
+        return None
+    if family == "smart_schedule":
+        executor = get_auto_schedule_executor()
+        state = getattr(executor, "_state", {}).get(profile) if executor else None
+    elif family == "scheduled":
+        executor = get_scheduled_charging_executor()
+        state = getattr(executor, "_state", None) if executor else None
+        if getattr(executor, "_active_shared_profile_id", None) != profile:
+            return None
+    elif family == "price_level":
+        executor = get_price_level_executor()
+        state = getattr(executor, "_vehicle_states", {}).get(profile) if executor else None
+    else:
+        return None
+    if (executor is None or state is None or not state.is_charging
+            or getattr(getattr(executor, "config_entry", None), "entry_id", None)
+            != config_entry.entry_id):
+        return None
+    return {"executor": executor, "state": state, "profile": profile,
+            "family": family, "generation": state.charging_generation,
+            "complete": _complete_shared_executor_stop}
+
+
+def _complete_shared_executor_stop(config_entry: Any, snapshot: dict | None) -> None:
+    """Clear bookkeeping for the matching confirmed stop, never another episode."""
+    if not snapshot:
+        return
+    executor, state = snapshot["executor"], snapshot["state"]
+    profile, family = snapshot["profile"], snapshot["family"]
+    if (getattr(getattr(executor, "config_entry", None), "entry_id", None) != config_entry.entry_id
+            or state.charging_generation != snapshot["generation"]):
+        return
+    if family == "smart_schedule":
+        if get_auto_schedule_executor() is not executor or executor._state.get(profile) is not state:
+            return
+        state.is_charging = False
+        state.started_at = None
+        state.current_window = None
+        executor._clear_active_charging_preserve_intent(profile, "Shared stop confirmed")
+        if state.curtailment_override_active:
+            executor.__dict__.setdefault("_settled_curtailment_cleanup", []).append(snapshot)
+    elif family == "scheduled":
+        if (get_scheduled_charging_executor() is not executor or executor._state is not state
+                or executor._active_shared_profile_id != profile):
+            return
+        state.is_charging = False
+        executor._active_shared_profile_id = None
+        executor._clear_preserve_home_battery_intent("Shared stop confirmed")
+        coordinator = get_ev_charging_coordinator()
+        if (coordinator and getattr(coordinator.config_entry, "entry_id", None) == config_entry.entry_id
+                and "Scheduled" in coordinator._active_modes):
+            coordinator._active_modes = [m for m in coordinator._active_modes if m != "Scheduled"]
+            coordinator._is_charging = bool(coordinator._active_modes)
+    elif family == "price_level":
+        if (get_price_level_executor() is not executor
+                or executor._vehicle_states.get(profile) is not state):
+            return
+        state.is_charging = False
+        state.charging_mode = ""
+        state.pending_shared_stop = None
+
+
+async def async_cleanup_settled_shared_executors(config_entry: Any) -> None:
+    """Run deferred ancillary cleanup outside the physical transition lock."""
+    executor = get_auto_schedule_executor()
+    if (executor is None or getattr(executor.config_entry, "entry_id", None) != config_entry.entry_id):
+        return
+    queued = executor.__dict__.pop("_settled_curtailment_cleanup", [])
+    for snapshot in queued:
+        state, profile = snapshot["state"], snapshot["profile"]
+        if (executor._state.get(profile) is not state or state.is_charging
+                or state.charging_generation != snapshot["generation"]):
+            continue
+        from .ev_ownership import get_ev_ownerships
+        if get_ev_ownerships(executor.hass, config_entry):
+            executor.__dict__.setdefault("_settled_curtailment_cleanup", []).append(snapshot)
+            continue
+        await executor._restore_curtailment(state)

@@ -44676,9 +44676,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             scheduled is not None
                             and scheduled.config_entry.entry_id == entry.entry_id
                         ):
+                            scheduled._state.charging_generation += 1
                             scheduled.update_charging_state(
                                 True,
                                 "Adopted observed external Scheduled Charging session",
+                            )
+                            scheduled._active_shared_profile_id = kwargs["active_profile_id"]
+                            from .automations.ev_charging_planner import _bind_shared_executor_runtime
+                            _bind_shared_executor_runtime(
+                                scheduled, scheduled._state, kwargs["active_profile_id"], "scheduled"
                             )
                     return adopted
 

@@ -1,3 +1,10 @@
+<!-- release: v2.12.1671-nir.3 -->
+
+## v2.12.1671-nir.3 — shared EV stop bookkeeping
+- Clear the matching outgoing charging-mode state when a shared Generic Charger or Sigenergy EVAC stop is confirmed, including stops initiated by an incoming mode. Preserve newer sessions and temporary pauses.
+- Record pre-dispatch ownership conflicts separately from physical stop failures, without dismissing existing stop warnings or weakening stop confirmation.
+- Source release only; no Home Assistant installation, restart or physical charging test was performed.
+
 <!-- release: v2.12.1671-nir.2 -->
 
 ## v2.12.1671-nir.2 — negative-price PV stop in self-consumption mode

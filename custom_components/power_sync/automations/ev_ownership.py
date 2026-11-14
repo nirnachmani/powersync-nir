@@ -822,6 +822,7 @@ def record_ev_command(
     success: bool,
     reason: str | None = None,
     source: str = "powersync",
+    record_type: str = "command",
 ) -> dict[str, Any]:
     """Remember an EV command attempt without changing ownership."""
     vid = normalize_vehicle_id(vehicle_id)
@@ -833,6 +834,12 @@ def record_ev_command(
         "success": bool(success),
         "reason": reason,
     }
+    if record_type == "ownership_blocked":
+        # This is not a dispatched command. Keep an earlier physical command
+        # available to its exact stop-confirmation and alert episode.
+        from ..action_events import publish_ev_command
+        publish_ev_command(hass, config_entry, vid, last_command, record_type=record_type)
+        return last_command
     get_ev_last_commands(hass, config_entry)[vid] = last_command
 
     lease_id, lease = get_ev_ownership(hass, config_entry, vid)
