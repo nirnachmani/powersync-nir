@@ -733,6 +733,49 @@ def ensure_external_ev_ownership(
     return True
 
 
+def observe_sigenergy_ev_stop(hass: Any, config_entry: Any, state: Any, *, observed_at: Any) -> None:
+    """Settle an unshared EVAC stop only on a complete, fresh direct read.
+
+    Shared loadpoints use their identity-bound stop transaction instead: this
+    helper must never release a shared lease or dismiss its pending fence.
+    """
+    import math
+    from .shared_loadpoint import binding_for_entry, validate_shared_loadpoint_options
+
+    options = {**getattr(config_entry, "data", {}), **getattr(config_entry, "options", {})}
+    if binding_for_entry(config_entry) is not None or validate_shared_loadpoint_options(options) is not None:
+        return
+    observed = _as_utc_datetime(observed_at)
+    now = datetime.now(timezone.utc)
+    if observed is None or observed > now or (now - observed).total_seconds() > 60:
+        return
+    power_value = getattr(state, "power_kw", None)
+    if power_value is None or isinstance(power_value, bool):
+        return
+    try:
+        power = float(power_value)
+    except (TypeError, ValueError, OverflowError):
+        return
+    if not (math.isfinite(power) and 0 <= power <= 0.05
+            and getattr(state, "charger_type", None) == "evac"
+            and getattr(state, "status", None) in {"a1_a2", "b1", "b2"}
+            and getattr(state, "is_charging", None) is False
+            and getattr(state, "is_discharging", None) is False):
+        return
+    _, lease = get_ev_ownership(hass, config_entry, "sigenergy_charger")
+    if lease is not None:
+        stop_at = _as_utc_datetime(lease.get("stop_command_at"))
+        if not (lease.get("owner") == EXTERNAL_OWNER_MODE and lease.get("stop_settling")
+                and stop_at is not None and stop_at < observed):
+            return
+    else:
+        command = get_ev_last_commands(hass, config_entry).get("sigenergy_charger", {})
+        stop_at = _as_utc_datetime(command.get("at"))
+        if stop_at is None or stop_at >= observed:
+            return
+    confirm_powersync_ev_stop(hass, config_entry, "sigenergy_charger", observed_at=observed)
+
+
 def confirm_powersync_ev_stop(
     hass: Any,
     config_entry: Any,
