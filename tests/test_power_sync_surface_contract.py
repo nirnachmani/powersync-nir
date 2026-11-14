@@ -391,6 +391,10 @@ _BOUNDED_TIME_SHA256 = "24fec92d4332f7298139ee3f7bb1eadb8c236ff23ad33d60e72e4410
 _STEPPED_SOC_SOURCE = "a986af9e0e162d774b4565c29d8c9a7f6c0e9899"
 _STEPPED_SOC_SHA256 = "2cfe46955794f990a4a36c45255dd07dd63430cb53523d5147d1ff9cd2695b0f"
 
+# Upstream 702c6849: preserve measured charge over observed zero-power pauses.
+_IDLE_SOC_SOURCE = "f474865fb5003af23b4dd8ef198695bd69bf850c"
+_IDLE_SOC_SHA256 = "2ad7cea831e0cfc00944e1b3f0dbe4b648021054b66a4918417f8ade35b42660"
+
 # Exact upstream 52465064 plan-schema delta. Legacy no-solar callers remain
 # supported; this digest does not waive changes elsewhere in cost_neutral.py.
 COST_NEUTRAL = OPTIMIZATION / "cost_neutral.py"
@@ -707,6 +711,15 @@ def _stepped_soc_diff_is_allowlisted(actual: str) -> bool:
     return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _STEPPED_SOC_SHA256
 
 
+def _idle_soc_diff_is_allowlisted(actual: str) -> bool:
+    expected = _git_show(_IDLE_SOC_SOURCE, COORDINATOR)
+    diff = "\n".join(difflib.unified_diff(
+        expected.splitlines(), actual.splitlines(), fromfile="private_f474865f",
+        tofile="idle_soc_candidate", lineterm="",
+    ))
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _IDLE_SOC_SHA256
+
+
 def _protected_solar_export_diff_is_allowlisted(actual: str) -> bool:
     """Only the reviewed no-paywall protected-export source delta is allowed."""
     expected = _git_show(_PROTECTED_SOLAR_EXPORT_SOURCE, BATTERY_OPTIMIZER)
@@ -827,7 +840,8 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
             )
             assert _available_solar_diff_is_allowlisted(_git_show(_MEASURED_COST_SOURCE, COORDINATOR))
             assert _measured_cost_diff_is_allowlisted(_git_show(_STEPPED_SOC_SOURCE, COORDINATOR))
-            assert _stepped_soc_diff_is_allowlisted(actual)
+            assert _stepped_soc_diff_is_allowlisted(_git_show(_IDLE_SOC_SOURCE, COORDINATOR))
+            assert _idle_soc_diff_is_allowlisted(actual)
         elif relative_path == BATTERY_OPTIMIZER:
             # Preserve proof that e3c17217 itself contains only the earlier,
             # reviewed solar-refill and reachable-deadline changes before
@@ -877,8 +891,13 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
 
 def test_stepped_soc_allowlist_rejects_unreviewed_change():
     actual = (ROOT / COORDINATOR).read_text(encoding="utf-8")
-    assert _stepped_soc_diff_is_allowlisted(actual)
-    assert not _stepped_soc_diff_is_allowlisted(actual + "\n# unreviewed change\n")
+    predecessor = _git_show(_IDLE_SOC_SOURCE, COORDINATOR)
+    assert _stepped_soc_diff_is_allowlisted(predecessor)
+    assert not _stepped_soc_diff_is_allowlisted(predecessor + "\n# unreviewed change\n")
+    assert _idle_soc_diff_is_allowlisted(actual)
+    assert not _idle_soc_diff_is_allowlisted(actual + "\n# unreviewed change\n")
+    assert not _idle_soc_diff_is_allowlisted(actual.replace(
+        'charge_run["cost"] += grid_cost', 'charge_run["cost"] += 0', 1))
 
 
 def test_amber_optimizer_allowlist_rejects_an_unreviewed_coordinator_change():
@@ -966,11 +985,12 @@ def test_negative_import_solar_allowlist_rejects_a_nearby_policy_mutation():
     assert not _available_solar_diff_is_allowlisted(predecessor.replace(
         "enabled=bool(production and production.can_project()),", "enabled=True,", 1
     ))
-    assert _measured_cost_diff_is_allowlisted(actual)
-    assert not _measured_cost_diff_is_allowlisted(actual.replace(
+    measured_candidate = _git_show(_STEPPED_SOC_SOURCE, COORDINATOR)
+    assert _measured_cost_diff_is_allowlisted(measured_candidate)
+    assert not _measured_cost_diff_is_allowlisted(measured_candidate.replace(
         "self._track_actual_cost(force=True)", "self._track_actual_cost(force=False)", 1
     ))
-    assert not _measured_cost_diff_is_allowlisted(actual.replace(
+    assert not _measured_cost_diff_is_allowlisted(measured_candidate.replace(
         "self._cost_tracking_stopping = True", "self._cost_tracking_stopping = False", 1
     ))
     assert not _solar_fallback_diff_is_allowlisted(
