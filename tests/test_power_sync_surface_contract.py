@@ -395,6 +395,11 @@ _STEPPED_SOC_SHA256 = "2cfe46955794f990a4a36c45255dd07dd63430cb53523d5147d1ff9cd
 _IDLE_SOC_SOURCE = "f474865fb5003af23b4dd8ef198695bd69bf850c"
 _IDLE_SOC_SHA256 = "2ad7cea831e0cfc00944e1b3f0dbe4b648021054b66a4918417f8ade35b42660"
 
+# Upstream 5fb1d9db: default-off local solver capture only, no remote support.
+_REPLAY_SOURCE = "ba2f85e8becbc0ebafa4ed35f121c22b6ad4151a"
+_REPLAY_COORDINATOR_SHA256 = "a0d31859eac41aaa2f660622f8231cc1c56973813afce334cafb79d016a1e2fa"
+_REPLAY_OPTIMIZER_SHA256 = "9f3a79cc1c4c89b3719c38d39d131f8838399cffa33039cc9aa1e7edc5ca925a"
+
 # Exact upstream 52465064 plan-schema delta. Legacy no-solar callers remain
 # supported; this digest does not waive changes elsewhere in cost_neutral.py.
 COST_NEUTRAL = OPTIMIZATION / "cost_neutral.py"
@@ -720,6 +725,17 @@ def _idle_soc_diff_is_allowlisted(actual: str) -> bool:
     return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _IDLE_SOC_SHA256
 
 
+def _local_replay_diff_is_allowlisted(actual: str, path: Path) -> bool:
+    expected = _git_show(_REPLAY_SOURCE, path)
+    label = "replay_coordinator" if path == COORDINATOR else "replay_optimizer"
+    digest = _REPLAY_COORDINATOR_SHA256 if path == COORDINATOR else _REPLAY_OPTIMIZER_SHA256
+    diff = "\n".join(difflib.unified_diff(
+        expected.splitlines(), actual.splitlines(), fromfile="private_ba2f85e8",
+        tofile=f"{label}_candidate", lineterm="",
+    ))
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest() == digest
+
+
 def _protected_solar_export_diff_is_allowlisted(actual: str) -> bool:
     """Only the reviewed no-paywall protected-export source delta is allowed."""
     expected = _git_show(_PROTECTED_SOLAR_EXPORT_SOURCE, BATTERY_OPTIMIZER)
@@ -841,7 +857,8 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
             assert _available_solar_diff_is_allowlisted(_git_show(_MEASURED_COST_SOURCE, COORDINATOR))
             assert _measured_cost_diff_is_allowlisted(_git_show(_STEPPED_SOC_SOURCE, COORDINATOR))
             assert _stepped_soc_diff_is_allowlisted(_git_show(_IDLE_SOC_SOURCE, COORDINATOR))
-            assert _idle_soc_diff_is_allowlisted(actual)
+            assert _idle_soc_diff_is_allowlisted(_git_show(_REPLAY_SOURCE, COORDINATOR))
+            assert _local_replay_diff_is_allowlisted(actual, COORDINATOR)
         elif relative_path == BATTERY_OPTIMIZER:
             # Preserve proof that e3c17217 itself contains only the earlier,
             # reviewed solar-refill and reachable-deadline changes before
@@ -877,7 +894,8 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
             assert _fallback_export_diff_is_allowlisted(
                 _git_show(_BOUNDED_TIME_SOURCE, BATTERY_OPTIMIZER)
             )
-            assert _bounded_time_diff_is_allowlisted(actual)
+            assert _bounded_time_diff_is_allowlisted(_git_show(_REPLAY_SOURCE, BATTERY_OPTIMIZER))
+            assert _local_replay_diff_is_allowlisted(actual, BATTERY_OPTIMIZER)
         elif relative_path == COST_NEUTRAL:
             assert _final_solar_credit_diff_is_allowlisted(actual)
         elif relative_path == LOAD_ESTIMATOR:
@@ -894,10 +912,17 @@ def test_stepped_soc_allowlist_rejects_unreviewed_change():
     predecessor = _git_show(_IDLE_SOC_SOURCE, COORDINATOR)
     assert _stepped_soc_diff_is_allowlisted(predecessor)
     assert not _stepped_soc_diff_is_allowlisted(predecessor + "\n# unreviewed change\n")
-    assert _idle_soc_diff_is_allowlisted(actual)
-    assert not _idle_soc_diff_is_allowlisted(actual + "\n# unreviewed change\n")
-    assert not _idle_soc_diff_is_allowlisted(actual.replace(
+    idle_candidate = _git_show(_REPLAY_SOURCE, COORDINATOR)
+    assert _idle_soc_diff_is_allowlisted(idle_candidate)
+    assert not _idle_soc_diff_is_allowlisted(idle_candidate + "\n# unreviewed change\n")
+    assert not _idle_soc_diff_is_allowlisted(idle_candidate.replace(
         'charge_run["cost"] += grid_cost', 'charge_run["cost"] += 0', 1))
+    assert _local_replay_diff_is_allowlisted(actual, COORDINATOR)
+    assert not _local_replay_diff_is_allowlisted(actual + "\n# unreviewed change\n", COORDINATOR)
+    optimizer = (ROOT / BATTERY_OPTIMIZER).read_text(encoding="utf-8")
+    assert _local_replay_diff_is_allowlisted(optimizer, BATTERY_OPTIMIZER)
+    assert not _local_replay_diff_is_allowlisted(optimizer.replace(
+        "@capture_attempt", "@other_capture", 1), BATTERY_OPTIMIZER)
 
 
 def test_amber_optimizer_allowlist_rejects_an_unreviewed_coordinator_change():
@@ -1171,7 +1196,7 @@ def test_fallback_export_allowlist_rejects_mutations():
 
 
 def test_bounded_time_allowlist_rejects_mutations():
-    actual = (ROOT / BATTERY_OPTIMIZER).read_text(encoding="utf-8").replace("\r\n", "\n")
+    actual = _git_show(_REPLAY_SOURCE, BATTERY_OPTIMIZER)
     assert _bounded_time_diff_is_allowlisted(actual)
     before = 'export_eps /= max(1, p_n)'
     assert before in actual
