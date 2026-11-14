@@ -3351,10 +3351,10 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             else None
         )
 
-        if load_kw is not None or getattr(self, "_additional_solar_enabled", False) is True:
-            self._energy_acc.update(
-                max(0, solar_kw), grid_kw, battery_kw, load_kw, 0.0, 0.0
-            )
+        # Keep energy metering active even when EV attribution withholds load.
+        self._energy_acc.update(
+            max(0, solar_kw), grid_kw, battery_kw, load_kw, 0.0, 0.0
+        )
 
         local_is_off_grid = _grid_status_is_off_grid(
             getattr(snap, "grid_status", None)
@@ -3771,10 +3771,11 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
 
             # Accumulate daily energy from power readings (with cost tracking)
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            if load_kw is not None or getattr(self, "_additional_solar_enabled", False) is True:
-                self._energy_acc.update(
-                    max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell
-                )
+            # Keep metering grid, battery and cost while Home Load is withheld
+            # for an uncertain EV (ticket #336); only the load is skipped.
+            self._energy_acc.update(
+                max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell
+            )
 
             # Fetch site_info periodically to detect firmware updates (every 6 hours)
             _site_info_stale = (
@@ -5986,10 +5987,11 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
 
             # Accumulate daily energy from power readings (with cost tracking)
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            if load_kw is not None or getattr(self, "_additional_solar_enabled", False) is True:
-                self._energy_acc.update(
-                    max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell
-                )
+            # Keep metering grid, battery and cost while Home Load is withheld
+            # for an uncertain EV (ticket #336); only the load is skipped.
+            self._energy_acc.update(
+                max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell
+            )
 
             # Rated charge/discharge power — hardware spec, static. Fetch once
             # from the ESS rated power registers via the controller's internal
