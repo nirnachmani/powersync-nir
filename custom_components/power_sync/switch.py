@@ -451,9 +451,7 @@ def _legacy_solar_surplus_switch(hass, entry):
     )
     if entity_id is None:
         return None
-    registered = registry.async_get(entity_id)
-    if registered.hidden_by is None:
-        registry.async_update_entity(entity_id, hidden_by=er.RegistryEntryHider.INTEGRATION)
+    # Preserve registry visibility and identity for indirect automation targets.
     return SolarSurplusChargingSwitch(hass, entry)
 
 
