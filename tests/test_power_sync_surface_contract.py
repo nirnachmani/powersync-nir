@@ -737,6 +737,23 @@ def _local_replay_diff_is_allowlisted(actual: str, path: Path) -> bool:
     return hashlib.sha256(diff.encode("utf-8")).hexdigest() == digest
 
 
+_MICRO_EXPORT_SOURCE = "3214d11f5d950eda7463980f61343d53f10faab1"
+_MICRO_EXPORT_DIGESTS = {
+    COORDINATOR: "33cd1db68cab5c32de43759f2078d781904fafca0004a7c769da62a0f047644e",
+    BATTERY_OPTIMIZER: "b381057dd1d56f6eeae7e280ebedcd722ef1344b242561aa65b51e1d3ebcedce",
+}
+
+
+def _micro_export_diff_is_allowlisted(actual: str, path: Path) -> bool:
+    expected = _git_show(_MICRO_EXPORT_SOURCE, path)
+    label = "coordinator" if path == COORDINATOR else "battery_optimizer"
+    diff = "\n".join(difflib.unified_diff(
+        expected.splitlines(), actual.splitlines(), fromfile="private_3214d11f",
+        tofile=f"micro_export_{label}_candidate", lineterm="",
+    ))
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _MICRO_EXPORT_DIGESTS[path]
+
+
 def _protected_solar_export_diff_is_allowlisted(actual: str) -> bool:
     """Only the reviewed no-paywall protected-export source delta is allowed."""
     expected = _git_show(_PROTECTED_SOLAR_EXPORT_SOURCE, BATTERY_OPTIMIZER)
@@ -859,7 +876,8 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
             assert _measured_cost_diff_is_allowlisted(_git_show(_STEPPED_SOC_SOURCE, COORDINATOR))
             assert _stepped_soc_diff_is_allowlisted(_git_show(_IDLE_SOC_SOURCE, COORDINATOR))
             assert _idle_soc_diff_is_allowlisted(_git_show(_REPLAY_SOURCE, COORDINATOR))
-            assert _local_replay_diff_is_allowlisted(actual, COORDINATOR)
+            assert _local_replay_diff_is_allowlisted(_git_show(_MICRO_EXPORT_SOURCE, COORDINATOR), COORDINATOR)
+            assert _micro_export_diff_is_allowlisted(actual, COORDINATOR)
         elif relative_path == BATTERY_OPTIMIZER:
             # Preserve proof that e3c17217 itself contains only the earlier,
             # reviewed solar-refill and reachable-deadline changes before
@@ -896,7 +914,8 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
                 _git_show(_BOUNDED_TIME_SOURCE, BATTERY_OPTIMIZER)
             )
             assert _bounded_time_diff_is_allowlisted(_git_show(_REPLAY_SOURCE, BATTERY_OPTIMIZER))
-            assert _local_replay_diff_is_allowlisted(actual, BATTERY_OPTIMIZER)
+            assert _local_replay_diff_is_allowlisted(_git_show(_MICRO_EXPORT_SOURCE, BATTERY_OPTIMIZER), BATTERY_OPTIMIZER)
+            assert _micro_export_diff_is_allowlisted(actual, BATTERY_OPTIMIZER)
         elif relative_path == COST_NEUTRAL:
             assert _final_solar_credit_diff_is_allowlisted(actual)
         elif relative_path == LOAD_ESTIMATOR:
@@ -918,11 +937,18 @@ def test_stepped_soc_allowlist_rejects_unreviewed_change():
     assert not _idle_soc_diff_is_allowlisted(idle_candidate + "\n# unreviewed change\n")
     assert not _idle_soc_diff_is_allowlisted(idle_candidate.replace(
         'charge_run["cost"] += grid_cost', 'charge_run["cost"] += 0', 1))
-    assert _local_replay_diff_is_allowlisted(actual, COORDINATOR)
-    assert not _local_replay_diff_is_allowlisted(actual + "\n# unreviewed change\n", COORDINATOR)
+    coordinator_base = _git_show(_MICRO_EXPORT_SOURCE, COORDINATOR)
+    assert _local_replay_diff_is_allowlisted(coordinator_base, COORDINATOR)
+    assert not _local_replay_diff_is_allowlisted(coordinator_base + "\n# unreviewed change\n", COORDINATOR)
+    assert _micro_export_diff_is_allowlisted(actual, COORDINATOR)
+    assert not _micro_export_diff_is_allowlisted(actual + "\n# unreviewed change\n", COORDINATOR)
     optimizer = (ROOT / BATTERY_OPTIMIZER).read_text(encoding="utf-8")
-    assert _local_replay_diff_is_allowlisted(optimizer, BATTERY_OPTIMIZER)
-    assert not _local_replay_diff_is_allowlisted(optimizer.replace(
+    optimizer_base = _git_show(_MICRO_EXPORT_SOURCE, BATTERY_OPTIMIZER)
+    assert _local_replay_diff_is_allowlisted(optimizer_base, BATTERY_OPTIMIZER)
+    assert not _local_replay_diff_is_allowlisted(optimizer_base.replace(
+        "@capture_attempt", "@other_capture", 1), BATTERY_OPTIMIZER)
+    assert _micro_export_diff_is_allowlisted(optimizer, BATTERY_OPTIMIZER)
+    assert not _micro_export_diff_is_allowlisted(optimizer.replace(
         "@capture_attempt", "@other_capture", 1), BATTERY_OPTIMIZER)
 
 
