@@ -792,6 +792,33 @@ def test_automation_ev_state_prefers_fresh_current_only_second_ble_vehicle():
     assert store.updated == [(36, 7.0)]
 
 
+def test_automation_ev_state_ignores_unrelated_power_monitor_with_switch():
+    prefix = "garage_power_monitor_1pm_ev"
+    entities = {
+        f"sensor.{prefix}_charger_power": SimpleNamespace(
+            entity_id=f"sensor.{prefix}_charger_power", state="4.9",
+            attributes={"unit_of_measurement": "kW"},
+        ),
+        f"switch.{prefix}_charger": SimpleNamespace(
+            entity_id=f"switch.{prefix}_charger", state="on",
+        ),
+    }
+    engine_class = _load_engine_method("_async_get_ev_state", {
+        "Any": Any, "Dict": Dict, "_LOGGER": logging.getLogger(__name__),
+        "__package__": "power_sync.automations",
+    })
+    engine = object.__new__(engine_class)
+    engine._hass = SimpleNamespace(
+        states=SimpleNamespace(async_all=lambda: list(entities.values()), get=entities.get),
+        config_entries=SimpleNamespace(async_entries=lambda _domain: []), data={},
+    )
+    state = asyncio.run(engine._async_get_ev_state())
+    assert state["vehicle_id"] is None
+    assert state["location"] == "unknown"
+    assert state["is_charging"] is False
+
+
+
 def test_automation_ev_state_prefers_targetable_ble_when_activity_ties():
     """A Fleet duplicate must not hide the BLE id needed by the stop action."""
 

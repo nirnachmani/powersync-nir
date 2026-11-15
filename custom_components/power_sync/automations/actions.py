@@ -14491,6 +14491,16 @@ async def _dynamic_ev_update(
     if optimizer_ceiling_amps is not None:
         new_amps = min(new_amps, optimizer_ceiling_amps)
 
+    if params.get("charger_type") == "generic":
+        from .shared_loadpoint import binding_for_entry, shared_physical_charger_fields
+        amps_entity = params.get("charger_amps_entity")
+        if binding_for_entry(config_entry) is not None:
+            amps_entity = shared_physical_charger_fields(config_entry).get("charger_amps_entity")
+        if not amps_entity:
+            # A switch-only EVSE cannot enforce a reduced positive rate. Compare
+            # against its physical full rate, not the inverter-capped maximum.
+            new_amps = uncapped_max_amps if new_amps >= uncapped_max_amps else 0
+
     try:
         observer = hass.data.get('power_sync', {}).get(entry_id, {}).get('decision_diagnostics')
         if observer is not None:
