@@ -17935,7 +17935,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         timestamps = self._price_timestamps(n_intervals)
         ev_load_by_vehicle: dict[str, list[float]] = {}
 
+        from ..automations.shared_loadpoint import (
+            PROFILE_A_ID, PROFILE_B_ID, binding_for_entry,
+            canonical_shared_loadpoint_id, resolve_active_shared_profile,
+        )
+        entry = getattr(executor, "config_entry", None)
+        binding = binding_for_entry(entry) if entry is not None else None
+        selected = resolve_active_shared_profile(self.hass, entry) if binding else None
+        physical = canonical_shared_loadpoint_id(entry, PROFILE_A_ID) if binding else None
         for vehicle_id, state in states.items():
+            if binding and vehicle_id in (PROFILE_A_ID, PROFILE_B_ID, physical) and vehicle_id != selected:
+                continue
             configured_power_w = None
             try:
                 settings = getattr(executor, "_settings", {}).get(vehicle_id)
@@ -18102,6 +18112,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> dict[str, str]:
         """Resolve Fleet/BLE aliases onto one electrical loadpoint key."""
         from ..tesla_ble_mapping import canonical_tesla_vehicle_id
+        from ..automations.shared_loadpoint import canonical_shared_loadpoint_id
 
         opts = {
             **getattr(self._entry, "data", {}),
@@ -18115,7 +18126,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             and not identifier.isdigit()
         ]
         return {
-            identifier: canonical_tesla_vehicle_id(
+            identifier: canonical_shared_loadpoint_id(self._entry, identifier)
+            or canonical_tesla_vehicle_id(
                 opts,
                 identifier,
                 fleet_vins,

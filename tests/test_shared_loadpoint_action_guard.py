@@ -1937,6 +1937,31 @@ def test_live_physical_handoff_ends_only_outgoing_profile_with_its_soc(
     )
 
 
+@pytest.mark.parametrize("charger_type,physical", [("generic", "generic_ev"), ("sigenergy", "sigenergy_charger")])
+def test_shared_free_grid_starts_with_optimizer_zero(monkeypatch, charger_type, physical):
+    hass, entry = _Hass(), _Entry()
+    entry.options = dict(entry.options)
+    if charger_type == "sigenergy":
+        entry.options.update(generic_charger_enabled=False, sigenergy_charger_enabled=True, sigenergy_charger_type="evac")
+    hass.states.get("sensor.connected_vehicle").last_changed = datetime.now(timezone.utc)
+    actions.record_smart_schedule_effective_authorization(
+        entry, "shared_ev_profile_a", allowed=True, source="grid_free", hass=hass
+    )
+    monkeypatch.setattr(actions, "_optimizer_planned_ev_charge_kw", lambda *args: 0.0)
+    set_amps = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", set_amps)
+    monkeypatch.setattr(actions, "_resolve_teslemetry_bt_prefix", lambda _hass: None)
+    result = asyncio.run(actions._action_start_ev_charging_dynamic(
+        hass, entry, {**_generic_params(), "charger_type": charger_type, "vehicle_id": "shared_ev_profile_a",
+                      "owner_mode": "smart_schedule", "dynamic_mode": "battery_target",
+                      "fixed_charge_amps": 8, "min_charge_amps": 6,
+                      "max_charge_amps": 8, "voltage": 230, "phases": 1}))
+    assert result is True
+    assert set_amps.await_count == 1
+    assert set_amps.await_args is not None
+    assert set_amps.await_args.args[2:4] == (physical, 8)
+
+
 def test_shared_dynamic_session_keeps_logical_identity_for_periodic_rate_and_stop(monkeypatch):
     """A shared runtime carries its selected profile through later physical writes."""
     hass = _Hass()

@@ -7544,15 +7544,27 @@ def record_smart_schedule_effective_authorization(
     *,
     allowed: bool,
     source: str,
+    hass: Optional[HomeAssistant] = None,
 ) -> None:
-    """Publish one exact-VIN Smart Schedule execution decision.
+    """Publish one exact-vehicle Smart Schedule execution decision.
 
     The optimizer plan is intentionally separate from the live executor. This
     short-lived record lets dynamic rate control recognize the one case where
     the live executor authorizes free grid charging outside its stored plan.
     """
     normalized_vin = str(vehicle_id or "").upper()
-    if not _is_explicit_tesla_vin(normalized_vin):
+    from .shared_loadpoint import binding_for_entry, resolve_active_shared_profile
+    logical_ids = {"SHARED_EV_PROFILE_A", "SHARED_EV_PROFILE_B"}
+    binding = binding_for_entry(config_entry)
+    selection_changed = None
+    if normalized_vin in logical_ids:
+        if binding is None or hass is None or resolve_active_shared_profile(hass, config_entry) != normalized_vin.lower():
+            return
+        selector = hass.states.get(binding.connected_vehicle_entity)
+        selection_changed = getattr(selector, "last_changed", None)
+        if selection_changed is None:
+            return
+    elif not _is_explicit_tesla_vin(normalized_vin):
         return
     _smart_schedule_effective_authorizations.setdefault(
         config_entry.entry_id, {}
@@ -7560,21 +7572,39 @@ def record_smart_schedule_effective_authorization(
         "allowed": bool(allowed),
         "source": str(source or ""),
         "recorded_at": time.monotonic(),
+        "selection_changed": selection_changed,
     }
 
 
 def _smart_schedule_has_fresh_free_grid_authorization(
     config_entry: ConfigEntry,
     vehicle_id: str,
+    hass: Optional[HomeAssistant] = None,
+    params: Optional[dict] = None,
 ) -> bool:
-    """Return whether the exact VIN has a fresh live free-grid decision."""
+    """Return whether this exact selected vehicle has fresh authorization."""
     normalized_vin = str(vehicle_id or "").upper()
+    selector_changed = None
     if not _is_explicit_tesla_vin(normalized_vin):
-        return False
+        from .shared_loadpoint import binding_for_entry, canonical_shared_loadpoint_id, resolve_active_shared_profile
+        if hass is None:
+            return False
+        selected = resolve_active_shared_profile(hass, config_entry)
+        profile = (params or {}).get("active_logical_vehicle_id") or (params or {}).get("logical_vehicle_id")
+        if not selected or selected != profile or vehicle_id != canonical_shared_loadpoint_id(config_entry, selected):
+            return False
+        binding = binding_for_entry(config_entry)
+        selector = hass.states.get(binding.connected_vehicle_entity) if binding else None
+        selector_changed = getattr(selector, "last_changed", None)
+        if selector_changed is None:
+            return False
+        normalized_vin = selected.upper()
     record = _smart_schedule_effective_authorizations.get(
         config_entry.entry_id, {}
     ).get(normalized_vin)
     if not isinstance(record, dict):
+        return False
+    if selector_changed is not None and record.get("selection_changed") != selector_changed:
         return False
     try:
         age = time.monotonic() - float(record["recorded_at"])
@@ -10157,7 +10187,7 @@ def _optimizer_planned_battery_charge_kw(hass, config_entry) -> Optional[float]:
 
 
 def _optimizer_planned_ev_charge_kw(
-    hass, config_entry, vehicle_id: Optional[str] = None
+    hass, config_entry, vehicle_id: Optional[str] = None, params: Optional[dict] = None
 ) -> Optional[float]:
     """Return the EV charge power the LP planned for this interval.
 
@@ -10169,6 +10199,24 @@ def _optimizer_planned_ev_charge_kw(
     """
     try:
         from ..const import DOMAIN
+        from .shared_loadpoint import (
+            binding_for_entry, canonical_shared_loadpoint_id,
+            resolve_active_shared_profile,
+        )
+        physical = canonical_shared_loadpoint_id(config_entry, "shared_ev_profile_a")
+        if binding_for_entry(config_entry) is not None and vehicle_id in (
+            physical, "shared_ev_profile_a", "shared_ev_profile_b"
+        ):
+            selected = resolve_active_shared_profile(hass, config_entry)
+            if not selected:
+                return None
+            profile = (params or {}).get("active_logical_vehicle_id") or (params or {}).get("logical_vehicle_id")
+            if vehicle_id == physical:
+                if profile != selected:
+                    return None
+                vehicle_id = selected
+            elif vehicle_id != selected:
+                return None
         entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
         coordinator = entry_data.get("optimization_coordinator")
         if not coordinator or not getattr(coordinator, "_enabled", True):
@@ -10945,13 +10993,13 @@ async def _update_smart_schedule_battery_target_group(
     for vehicle_id, state in sessions:
         params = state.get("params") or {}
         planned_kw = _optimizer_planned_ev_charge_kw(
-            hass, config_entry, vehicle_id
+            hass, config_entry, vehicle_id, params
         )
         if (
             planned_kw == 0
             and params.get("owner_mode") == "smart_schedule"
             and _smart_schedule_has_fresh_free_grid_authorization(
-                config_entry, vehicle_id
+                config_entry, vehicle_id, hass, params
             )
         ):
             planned_kw = None
@@ -12288,7 +12336,7 @@ async def _dynamic_ev_update_surplus(
     hardware_min_amps = _hardware_min_charge_amps(params, hass)
     max_amps = _effective_max_charge_amps(params, hass)
     planned_ev_charge_kw = _optimizer_planned_ev_charge_kw(
-        hass, config_entry, vehicle_id
+        hass, config_entry, vehicle_id, params
     )
     optimizer_ceiling_amps = _optimizer_ev_ceiling_amps(
         planned_ev_charge_kw,
@@ -14401,13 +14449,13 @@ async def _dynamic_ev_update(
     # conditions, and a stale or absent plan can never strand a plugged-in car
     # at zero. Start/stop stays with the EV planner.
     planned_ev_charge_kw = _optimizer_planned_ev_charge_kw(
-        hass, config_entry, vehicle_id
+        hass, config_entry, vehicle_id, params
     )
     if (
         planned_ev_charge_kw == 0
         and params.get("owner_mode") == "smart_schedule"
         and _smart_schedule_has_fresh_free_grid_authorization(
-            config_entry, vehicle_id
+            config_entry, vehicle_id, hass, params
         )
     ):
         _LOGGER.debug(
@@ -15644,10 +15692,19 @@ async def _action_start_ev_charging_dynamic_locked(
 
         optimizer_start_ceiling_amps = None
         if owner_mode == "smart_schedule":
+            planned_start_kw = _optimizer_planned_ev_charge_kw(
+                hass, config_entry, vehicle_id, params
+            )
+            if (
+                planned_start_kw == 0
+                and not _is_explicit_tesla_vin(str(vehicle_id or "").upper())
+                and _smart_schedule_has_fresh_free_grid_authorization(
+                    config_entry, vehicle_id, hass, params
+                )
+            ):
+                planned_start_kw = None
             optimizer_start_ceiling_amps = _optimizer_ev_ceiling_amps(
-                _optimizer_planned_ev_charge_kw(
-                    hass, config_entry, vehicle_id
-                ),
+                planned_start_kw,
                 voltage=voltage,
                 phases=resolved_phases,
                 min_amps=min_charge_amps,

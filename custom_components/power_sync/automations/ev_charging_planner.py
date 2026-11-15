@@ -7121,9 +7121,10 @@ class AutoScheduleExecutor:
         if callable(record_authorization):
             record_authorization(
                 self.config_entry,
-                vehicle_vin or vehicle_id,
+                vehicle_id if vehicle_id in ("shared_ev_profile_a", "shared_ev_profile_b") else (vehicle_vin or vehicle_id),
                 allowed=should_charge,
                 source=source,
+                hass=self.hass,
             )
 
         # Find current window (if in one)
@@ -10986,6 +10987,30 @@ class PriceLevelChargingExecutor:
             )
             configs = list(raw_configs)
 
+        from .shared_loadpoint import (
+            PROFILE_A_ID,
+            PROFILE_B_ID,
+            binding_for_entry,
+            canonical_shared_loadpoint_id,
+            resolve_active_shared_profile,
+        )
+        shared_binding = binding_for_entry(self.config_entry)
+        if shared_binding is not None:
+            selected = resolve_active_shared_profile(self.hass, self.config_entry)
+            physical = canonical_shared_loadpoint_id(self.config_entry, PROFILE_A_ID)
+            configs = [
+                config for config in configs
+                if config.get("vehicle_id") not in {PROFILE_A_ID, PROFILE_B_ID, physical}
+                or (selected is not None and config.get("vehicle_id") == selected)
+            ]
+            if selected and physical and not any(
+                config.get("vehicle_id") == selected for config in configs
+            ):
+                configs.append({
+                    "vehicle_id": selected,
+                    "charger_type": "generic" if physical == "generic_ev" else "sigenergy",
+                })
+
         # Preserve discovered vehicles even when the user has not opened the
         # per-vehicle charger editor yet. Their charger capability remains
         # unknown, so they can only produce conditional windows.
@@ -11025,7 +11050,7 @@ class PriceLevelChargingExecutor:
             )
 
         # Standalone non-Tesla chargers may predate vehicle_charging_configs.
-        if not configs:
+        if not configs and shared_binding is None:
             charger_type = _configured_charger_type(opts)
             if charger_type != "tesla":
                 params = _with_configured_charger_entities(

@@ -921,6 +921,54 @@ def test_internal_ev_forecast_suppresses_grid_slots_blocked_by_demand_window():
     assert components == {}
 
 
+@pytest.mark.parametrize("selection,expected", [("a", ["shared_ev_profile_a"]), ("b", ["shared_ev_profile_b"]), ("none", [])])
+@pytest.mark.parametrize("only_legacy", [False, True])
+@pytest.mark.parametrize("backend,physical", [("generic", "generic_ev"), ("sigenergy", "sigenergy_charger")])
+def test_shared_price_projection_collects_only_selected_profile(monkeypatch, selection, expected, only_legacy, backend, physical):
+    entry = SimpleNamespace(entry_id="entry", data={}, options={
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_ev",
+        "shared_loadpoint_profile_a_name": "A", "shared_loadpoint_profile_a_state": "a",
+        "shared_loadpoint_profile_b_name": "B", "shared_loadpoint_profile_b_state": "b",
+        "generic_charger_enabled": backend == "generic",
+        "sigenergy_charger_enabled": backend == "sigenergy", "sigenergy_charger_type": "evac",
+    })
+    configs = [{"vehicle_id": i, "charger_type": backend} for i in
+               (physical, "shared_ev_profile_a", "shared_ev_profile_b")]
+    if only_legacy:
+        configs = configs[:1]
+    hass = SimpleNamespace(data={"power_sync": {"entry": {"automation_store":
+        SimpleNamespace(_data={"vehicle_charging_configs": configs})}}},
+        states=SimpleNamespace(get=lambda _: SimpleNamespace(state=selection)))
+    async def no_vehicles(*args, **kwargs): return []
+    async def home(*args, **kwargs): return "home"
+    async def plugged(*args, **kwargs): return True
+    async def soc(*args, **kwargs): return 30
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", no_vehicles)
+    monkeypatch.setattr(ev_planner, "get_ev_location", home)
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged)
+    monkeypatch.setattr(ev_planner, "_configured_ble_prefixes", lambda *a, **k: [])
+    monkeypatch.setattr(ev_planner, "_get_vehicle_charger_params", lambda *a, **k: {"max_charge_amps": 32, "voltage": 230, "phases": 1})
+    monkeypatch.setattr(ev_planner, "get_auto_schedule_executor", lambda: None)
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    monkeypatch.setattr(executor, "_get_ev_soc", soc)
+    monkeypatch.setattr(executor, "_get_home_battery_soc", soc)
+    snapshots = asyncio.run(executor.collect_projection_snapshots())
+    assert [s.vehicle_id for s in snapshots] == expected
+
+
+def test_shared_optimizer_loadpoint_aliases_are_canonicalized():
+    canonical = _extract_coordinator_method("_canonical_ev_loadpoint_ids")
+    entry = SimpleNamespace(data={}, options={
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_ev",
+        "shared_loadpoint_profile_a_name": "A", "shared_loadpoint_profile_a_state": "a",
+        "shared_loadpoint_profile_b_name": "B", "shared_loadpoint_profile_b_state": "b",
+        "generic_charger_enabled": True,
+    })
+    coordinator = SimpleNamespace(_entry=entry)
+    ids = ["shared_ev_profile_a", "shared_ev_profile_b", "generic_ev"]
+    assert canonical(coordinator, ids) == {key: "generic_ev" for key in ids}
+
+
 def test_internal_ev_arbitration_uses_max_for_one_loadpoint_and_sum_for_distinct():
     """Smart and Price-Level candidates share a charger without stacking."""
     merge = _extract_coordinator_method("_merge_internal_ev_load_components")

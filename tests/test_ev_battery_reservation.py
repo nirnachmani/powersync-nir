@@ -368,6 +368,49 @@ def test_planned_ev_power_is_read_from_the_current_action(monkeypatch):
     ) == pytest.approx(7.0)
 
 
+@pytest.mark.parametrize("backend,physical", [("generic", "generic_ev"), ("sigenergy", "sigenergy_charger")])
+def test_shared_physical_controller_consumes_selected_logical_plan(monkeypatch, backend, physical):
+    now = datetime(2026, 8, 21, 10, 5, tzinfo=timezone.utc)
+    monkeypatch.setattr(actions.dt_util, "now", lambda: now)
+    entry = _Entry()
+    entry.options = {
+        "shared_loadpoint_connected_vehicle_entity": "sensor.connected_ev",
+        "shared_loadpoint_profile_a_name": "Car A", "shared_loadpoint_profile_a_state": "a",
+        "shared_loadpoint_profile_b_name": "Car B", "shared_loadpoint_profile_b_state": "b",
+        "generic_charger_enabled": backend == "generic",
+        "sigenergy_charger_enabled": backend == "sigenergy", "sigenergy_charger_type": "evac",
+    }
+    hass = _hass(_ev_coordinator(now=now, vehicle_id="shared_ev_profile_a", ev_charge_w=3000))
+    hass.states = SimpleNamespace(get=lambda entity: SimpleNamespace(state="a"))
+    params = {"active_logical_vehicle_id": "shared_ev_profile_a", "charger_type": backend}
+    assert actions._optimizer_planned_ev_charge_kw(hass, entry, physical, params) == pytest.approx(3.0)
+
+
+def test_shared_free_grid_authorization_tracks_selected_profile(monkeypatch):
+    now = 1000.0
+    monkeypatch.setattr(actions.time, "monotonic", lambda: now)
+    entry = _Entry()
+    entry.options = {"shared_loadpoint_connected_vehicle_entity": "sensor.connected_ev",
+                     "shared_loadpoint_profile_a_name": "Car A", "shared_loadpoint_profile_a_state": "a",
+                     "shared_loadpoint_profile_b_name": "Car B", "shared_loadpoint_profile_b_state": "b",
+                     "generic_charger_enabled": True}
+    selected = SimpleNamespace(state="a", last_changed=1)
+    hass = _hass()
+    hass.states = SimpleNamespace(get=lambda entity: selected)
+    params = {"active_logical_vehicle_id": "shared_ev_profile_a", "charger_type": "generic"}
+    actions.record_smart_schedule_effective_authorization(entry, "shared_ev_profile_a", allowed=True, source="grid_free", hass=hass)
+    assert actions._smart_schedule_has_fresh_free_grid_authorization(entry, "generic_ev", hass, params)
+    assert not actions._smart_schedule_has_fresh_free_grid_authorization(entry, "generic_ev", hass, {"active_logical_vehicle_id": "shared_ev_profile_b"})
+    monkeypatch.setattr(actions.time, "monotonic", lambda: now + actions._SMART_SCHEDULE_AUTHORIZATION_MAX_AGE_SECONDS + 1)
+    assert not actions._smart_schedule_has_fresh_free_grid_authorization(entry, "generic_ev", hass, params)
+    monkeypatch.setattr(actions.time, "monotonic", lambda: now)
+    selected.state = "b"
+    assert not actions._smart_schedule_has_fresh_free_grid_authorization(entry, "generic_ev", hass, params)
+    selected.state = "a"
+    selected.last_changed = 2
+    assert not actions._smart_schedule_has_fresh_free_grid_authorization(entry, "generic_ev", hass, params)
+
+
 def test_fresh_exact_vehicle_zero_is_an_authoritative_pause(monkeypatch):
     now = datetime(2026, 8, 21, 10, 5, tzinfo=timezone.utc)
     monkeypatch.setattr(actions.dt_util, "now", lambda: now)

@@ -397,8 +397,8 @@ _IDLE_SOC_SHA256 = "2ad7cea831e0cfc00944e1b3f0dbe4b648021054b66a4918417f8ade35b4
 
 # Upstream 5fb1d9db: default-off local solver capture only, no remote support.
 _REPLAY_SOURCE = "ba2f85e8becbc0ebafa4ed35f121c22b6ad4151a"
-# Includes reviewed local decision-diagnostics observer hooks.
-_REPLAY_COORDINATOR_SHA256 = "93089d0267e8ff6adb8e8c0c3c217f609bb5be86fc55943eb05c49446fdfb9dc"
+# Includes reviewed local diagnostics and shared-EV identity handling.
+_REPLAY_COORDINATOR_SHA256 = "fefac7f824e1e06e6c7866954d94b9331cf5023a34c1a6052563fa26f692b024"
 _REPLAY_OPTIMIZER_SHA256 = "9f3a79cc1c4c89b3719c38d39d131f8838399cffa33039cc9aa1e7edc5ca925a"
 
 # Exact upstream 52465064 plan-schema delta. Legacy no-solar callers remain
