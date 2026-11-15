@@ -37233,6 +37233,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Log call context for debugging (helps identify if called by automation)
         context = call.context
         source = _control_call_source(call)
+        if source == "optimizer" and hold_soc_state.get("active"):
+            _LOGGER.info("Optimizer restore skipped while manual Hold SoC owns battery control")
+            if call.data.get("_confirm_restore") or getattr(call, "return_response", False):
+                return {"success": False, "error": "manual Hold SoC is active"}
+            return
+
         solaredge_restore_coordinator = (
             hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("solaredge_coordinator")
         )
