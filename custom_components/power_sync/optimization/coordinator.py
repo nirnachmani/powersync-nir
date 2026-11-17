@@ -8189,8 +8189,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 authoritative_reserve_floor=post_solve_export_floor,
                 manual_control_projection=manual_control_projection,
             )
-            self._last_update_time = dt_util.now()
-
             # Apply off-grid curtailment overlay if enabled — converts
             # eligible SELF_CONSUMPTION/IDLE slots to OFF_GRID during
             # negative export price periods.
@@ -8263,11 +8261,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ).items()
                 if key in reserve_semantic_keys
             }
-            self._current_schedule = result.schedule
-            self._last_optimizer_result = result
-            self._adopt_solved_ev_series(result)
-            self._commit_price_forecast_cache(import_prices, export_prices)
-
+            # Keep the reference plan private until all reruns complete.
             reserve_changed = self._apply_auto_reserve_recommendation(result)
             if reserve_changed or used_reference_override:
                 result = await _run_optimizer_once()
@@ -8361,10 +8355,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     round(applied_reserve_floor * 100)
                 )
                 result.reserve_recommendation = final_recommendation
-                self._current_schedule = result.schedule
-                self._last_optimizer_result = result
-                self._adopt_solved_ev_series(result)
-                self._last_update_time = dt_util.now()
             result = await self._apply_external_energy_plan(
                 result,
                 timestamps=schedule_timestamps,
@@ -8376,6 +8366,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._current_schedule = result.schedule
             self._last_diagnostic_plan_trace_id = getattr(self, '_decision_diagnostic_trace_id', None)
             self._last_optimizer_result = result
+            self._adopt_solved_ev_series(result)
+            self._commit_price_forecast_cache(import_prices, export_prices)
+            self._last_update_time = dt_util.now()
             if _LOGGER.isEnabledFor(logging.DEBUG):
                 solve_debug_record = self._optimizer_solve_debug_record(
                     solve_timestamp=solve_timestamp,
