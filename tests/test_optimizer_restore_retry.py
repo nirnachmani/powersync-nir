@@ -482,6 +482,32 @@ def _ev_preserve_refresh_coordinator(opt_module, *, failure=False):
     return coordinator, intent, calls
 
 
+@pytest.mark.parametrize("failed_reapply", [False, True])
+def test_sigenergy_ev_preserve_reapplies_after_charge_mode(opt_module, failed_reapply):
+    async def run():
+        coordinator, intent, calls = _ev_preserve_refresh_coordinator(opt_module)
+        coordinator.battery_system = "sigenergy"
+        async def hold():
+            calls.append("hold")
+            return not (failed_reapply and len(calls) == 2)
+        coordinator.energy_coordinator.set_no_discharge_mode = hold
+        intent["active"] = True
+        await coordinator._execute_optimizer_action(_self_consumption_action())
+        assert calls == ["hold"]
+        assert coordinator._last_executed_action == "no_discharge"
+        coordinator._last_executed_action = "charge"
+        coordinator._last_executed_planned_action = "charge"
+        await coordinator._execute_optimizer_action(_self_consumption_action())
+        if failed_reapply:
+            assert coordinator._last_executed_action == "charge"
+            await coordinator._execute_optimizer_action(_self_consumption_action())
+        assert coordinator._last_executed_action == "no_discharge"
+        assert len(calls) == (3 if failed_reapply else 2)
+        await coordinator._execute_optimizer_action(_self_consumption_action())
+        assert len(calls) == (3 if failed_reapply else 2)
+    asyncio.run(run())
+
+
 def test_ev_preserve_refresh_handles_repeated_price_stop_restart(opt_module):
     """Each new accepted session holds the battery without a five-minute tick."""
     async def run():
