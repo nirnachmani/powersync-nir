@@ -65,6 +65,10 @@ def discover_sources(hass, entry, identifiers) -> dict[str, EVHistorySources]:
                 result[identifier] = EVHistorySources(soc.entity_id, tracker.entity_id)
             continue
         if identifier in {"generic_ev", "_default", "ev"}:
+            # Shared profiles are distinct vehicle identities, not aliases of
+            # a physical charger or its old anonymous SoC sensor.
+            if binding is not None:
+                continue
             soc_id = opts.get("generic_charger_soc_entity")
             registration = registry.entities.get(soc_id) if soc_id else None
             home_ids = [entity.entity_id for entity in registry.entities.values()

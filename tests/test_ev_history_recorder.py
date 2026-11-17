@@ -133,7 +133,8 @@ def test_shared_sources_bind_exact_soc_to_same_device_presence(monkeypatch):
         monkeypatch.setitem(sys.modules, spec.name, module)
         spec.loader.exec_module(module)
     entry = types.SimpleNamespace(data={}, options={})
-    sources = module.discover_sources(object(), entry, {shared.PROFILE_A_ID: 'x', shared.PROFILE_B_ID: 'x'})
+    sources = module.discover_sources(object(), entry, {shared.PROFILE_A_ID: 'x', shared.PROFILE_B_ID: 'x', 'generic_ev': 'generic_ev'})
+    assert 'generic_ev' not in sources
     assert (sources[shared.PROFILE_A_ID].soc, sources[shared.PROFILE_A_ID].home) == ('sensor.a', 'device_tracker.a')
     assert (sources[shared.PROFILE_B_ID].soc, sources[shared.PROFILE_B_ID].home) == ('sensor.b', 'device_tracker.b')
     entities['device_tracker.a2'] = types.SimpleNamespace(entity_id='device_tracker.a2', device_id='a')
