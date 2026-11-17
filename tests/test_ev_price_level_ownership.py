@@ -8948,6 +8948,21 @@ def test_price_level_generic_soc_uses_fallback_sensor():
     assert asyncio.run(executor._get_ev_soc()) == 68
 
 
+@pytest.mark.parametrize("unit,expected", [(None, 71), ("%", 71), ("percent", 71), ("kWh", 68)])
+def test_generic_soc_rejects_non_percentage_units_and_uses_fallback(unit, expected):
+    from power_sync.automations.generic_charger_soc import resolve_generic_charger_soc
+
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={
+        "generic_charger_enabled": True,
+        "generic_charger_soc_entity": "sensor.primary_ev_soc",
+        "generic_charger_soc_entity_2": "sensor.fallback_ev_soc",
+    })
+    hass = _FakeHass(states={"sensor.primary_ev_soc": "71", "sensor.fallback_ev_soc": "68"}, entries=[entry])
+    if unit is not None:
+        hass.states._states["sensor.primary_ev_soc"].attributes["unit_of_measurement"] = unit
+    assert resolve_generic_charger_soc(hass, entry.options) == expected
+
+
 def test_price_level_ble_soc_uses_vehicle_specific_charge_level_sensor():
     ble_vin = "ble_garage_garage_ble_gateway"
     entry = SimpleNamespace(

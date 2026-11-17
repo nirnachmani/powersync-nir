@@ -39,13 +39,21 @@ def _valid_soc(value: Any) -> float | None:
     return None
 
 
+def _soc_from_state(state: Any) -> float | None:
+    """Accept percentage states, preserving legacy sensors without units."""
+    unit = (getattr(state, "attributes", {}) or {}).get("unit_of_measurement")
+    if unit is not None and str(unit).strip().lower() not in ("", "%", "percent"):
+        return None
+    return _valid_soc(getattr(state, "state", None))
+
+
 def resolve_generic_charger_soc(hass: Any, opts: Mapping[str, Any]) -> float | None:
     """Return the first valid generic charger SOC from primary then fallback."""
     for entity_id in generic_charger_soc_entities(opts):
         state = hass.states.get(entity_id)
         if state is None:
             continue
-        soc = _valid_soc(getattr(state, "state", None))
+        soc = _soc_from_state(state)
         if soc is not None:
             return soc
     return None
