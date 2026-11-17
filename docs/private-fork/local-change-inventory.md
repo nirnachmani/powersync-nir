@@ -207,6 +207,28 @@ canonical identity and ownership checks; they are not API payload bypasses.
 
 ## Reviewed EV safety ports
 
+### Upstream v2.12.1708–1720 compatibility
+
+- Network-envelope solver callbacks are background-owned and cancelled on unload;
+  a late refresh cannot dispatch listeners after shutdown. The export guard and
+  selected shared-EV command/lease/stop handoff are unchanged.
+- EV preserve mode is re-applied after an intervening battery action; optimizer
+  plans, EV series and prices are published only after all planning passes.
+  Battery holds may preserve energy for a later higher-priced home-load peak.
+- Weekday EV history is opt-in and advisory. For shared profiles, use only the
+  profile's own SoC and an unambiguous tracker on the same device; never map
+  anonymous physical charger history or a sibling's SoC onto that profile.
+  Selector, location or SoC changes invalidate speculative plans, and a
+  historical forecast cannot authorize an EV command. Unsupported Tesla
+  schedule forecasting was not imported.
+- Sigenergy off-grid status is read-only from the plant poll. Failed or unknown
+  readings stay unknown; meter connectivity is separate. It does not establish
+  physical protection or change the fork's export-limit ownership.
+- Focused EV, optimizer, Sigenergy ownership and Android route-contract tests
+  exercised these adaptations. The source-continuity gate retains its predecessor
+  and mutation checks and admits only the reviewed exact optimizer deltas.
+
+
 - Upstream `1198830f` is ported only at the Price-Level home-battery read:
   `battery_energy_coordinator` is preferred over the legacy Tesla coordinator,
   and all coordinator/entity SoC values must be finite percentages. This is a
