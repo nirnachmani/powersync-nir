@@ -676,6 +676,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # EV integration persisted flag (loaded from config entry)
         self._ev_integration_enabled = False
+        self._use_historical_ev_data = False
+        self._historical_ev_forecasts = {}
+        self._historical_ev_plans = {}
+        self._historical_ev_status = {"source": "disabled"}
         self._configured_load_entity_id: str | None = None
         self._planned_ev_load_entity_id: str | None = None
         self._warned_dual_ev_overlay = False
@@ -683,6 +687,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._entry:
             from ..const import (
                 CONF_OPTIMIZATION_EV_INTEGRATION,
+                CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA,
                 CONF_OPTIMIZATION_LOAD_ENTITY,
                 CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY,
             )
@@ -694,6 +699,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 CONF_OPTIMIZATION_EV_INTEGRATION,
                 self._entry.data.get(CONF_OPTIMIZATION_EV_INTEGRATION, False),
             )
+            self._use_historical_ev_data = self._entry.options.get(
+                CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA,
+                self._entry.data.get(CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA, False),
+            ) is True
             self._planned_ev_load_entity_id = self._entry.options.get(
                 CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY,
                 self._entry.data.get(CONF_OPTIMIZATION_PLANNED_EV_LOAD_ENTITY),
@@ -6120,6 +6129,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             price_reoptimize_task.cancel()
             self._price_reoptimize_task = None
 
+        history_unsub = getattr(self, "_historical_ev_listener_unsub", None)
+        if history_unsub:
+            history_unsub()
+            self._historical_ev_listener_unsub = None
+            self._historical_ev_listener_entities = ()
+
         if self._price_listener_unsub:
             self._price_listener_unsub()
             self._price_listener_unsub = None
@@ -7310,6 +7325,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             if self._ev_integration_enabled:
                 await self._refresh_ev_forecast_inputs()
+            await self._refresh_historical_ev_forecasts()
+            historical_ev_generation = getattr(self, "_historical_ev_generation", 0)
 
             # Collect forecast data
             self._last_export_boost_allowed_slots = []
@@ -8363,6 +8380,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 avoided_import_prices=cost_neutral_import_prices,
                 now=solve_timestamp,
             )
+            if historical_ev_generation != getattr(self, "_historical_ev_generation", 0):
+                self._schedule_settings_reoptimization()
+                return False
             self._current_schedule = result.schedule
             self._last_diagnostic_plan_trace_id = getattr(self, '_decision_diagnostic_trace_id', None)
             self._last_optimizer_result = result
@@ -9019,9 +9039,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         vehicles in the plan at all. Adopt the solved series for them, and
         keep the per-vehicle split for surfaces that can use identity.
         """
-        self._last_ev_charge_by_vehicle_w = (
-            dict(getattr(result, "ev_charge_by_vehicle_w", None) or {}) or None
-        )
+        speculative = {
+            plan.vehicle_id for plan in (getattr(self, "_pending_ev_charge_plan", None) or ())
+            if getattr(plan, "forecast_only", False)
+        }
+        self._last_ev_charge_by_vehicle_w = {
+            identifier: values for identifier, values in
+            (getattr(result, "ev_charge_by_vehicle_w", None) or {}).items()
+            if identifier not in speculative
+        } or None
         schedule = getattr(result, "schedule", None)
         self._last_ev_charge_schedule_updated = (
             getattr(schedule, "last_updated", None)
@@ -9121,7 +9147,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     # or selector-race state so two logical profiles cannot
                     # reach the LP as one physical Generic/EVAC loadpoint.
                     continue
-                charging_plan = getattr(state, "current_plan", None)
+                historical_plan = ((getattr(self, "_historical_ev_plans", {}) or {}).get(vehicle_id)
+                                   if getattr(self, "_use_historical_ev_data", False) else None)
+                charging_plan = historical_plan or getattr(state, "current_plan", None)
                 if charging_plan is None:
                     continue
                 settings = (getattr(executor, "_settings", {}) or {}).get(vehicle_id)
@@ -9529,6 +9557,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         initially_charging=bool(
                             getattr(state, "is_charging", False)
                         ),
+                        forecast_only=historical_plan is not None,
                     )
                 )
             # Hand the solver one plan per vehicle. Combining them into a
@@ -17671,7 +17700,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         can still opt into per-entity history subtraction. Returning an empty
         list leaves an already-normalized or unconfigured history unchanged.
         """
-        if not getattr(self, "_ev_integration_enabled", False):
+        if not (getattr(self, "_ev_integration_enabled", False)
+                or getattr(self, "_use_historical_ev_data", False)):
             return []
         load_entity_id = getattr(self._load_estimator, "load_entity_id", None)
         load_state = self.hass.states.get(load_entity_id) if load_entity_id else None
@@ -17715,6 +17745,122 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await refresh()
         except Exception as err:
             _LOGGER.debug("Optimizer: EV forecast refresh skipped: %s", err)
+
+    async def _refresh_historical_ev_forecasts(self) -> None:
+        """Build detached, forecast-only EV inputs from local recorded trips."""
+        self._historical_ev_forecasts = {}
+        self._historical_ev_plans = {}
+        self._historical_ev_status = {"source": "disabled"}
+        if not getattr(self, "_use_historical_ev_data", False):
+            return
+        n = self._config.horizon_hours * 60 // self._config.interval_minutes
+        if self._get_planned_ev_load_forecast(n) is not None:
+            self._historical_ev_status = {"source": "external", "reason": "External EV forecast is authoritative"}
+            return
+        if getattr(getattr(self, "_load_estimator", None), "away_mode", False):
+            self._historical_ev_status = {"source": "away", "reason": "Household Away Mode suppresses routine EV predictions"}
+            return
+        try:
+            from ..automations.ev_charging_planner import (
+                AutoScheduleState, get_auto_schedule_executor,
+            )
+            from .ev_history_recorder import EVHistoryRecorder, discover_sources
+
+            generation = getattr(self, "_historical_ev_generation", 0)
+            executor = get_auto_schedule_executor()
+            if executor is not None and getattr(executor, "config_entry", None) is not self._entry:
+                executor = None
+            identifiers = {}
+            if executor and getattr(self, "_ev_integration_enabled", False):
+                identifiers.update({str(key): executor._resolve_vehicle_vin(key) or str(key)
+                                    for key, cfg in executor._settings.items() if cfg.enabled})
+            entry_data = self.hass.data.get("power_sync", {}).get(self._entry.entry_id, {})
+            configs = getattr(entry_data.get("automation_store"), "_data", {}).get("vehicle_charging_configs", [])
+            if isinstance(configs, list):
+                for config in configs:
+                    if isinstance(config, dict) and config.get("vehicle_id"):
+                        key = str(config["vehicle_id"])
+                        identifiers.setdefault(key, key)
+            sources = discover_sources(self.hass, self._entry, identifiers)
+            from ..automations.shared_loadpoint import binding_for_entry
+            binding = binding_for_entry(self._entry)
+            watched = {entity for source in sources.values()
+                       for entity in (source.soc, source.home)}
+            if binding is not None:
+                watched.add(binding.connected_vehicle_entity)
+            entities = tuple(sorted(watched))
+            if entities != getattr(self, "_historical_ev_listener_entities", ()):
+                from homeassistant.helpers.event import async_track_state_change_event
+                previous = getattr(self, "_historical_ev_listener_unsub", None)
+                if previous:
+                    previous()
+                self._historical_ev_listener_entities = entities
+
+                async def _history_input_changed(_event):
+                    if not getattr(self, "_use_historical_ev_data", False):
+                        return
+                    old = _event.data.get("old_state")
+                    new = _event.data.get("new_state")
+                    if old is not None and new is not None and old.state == new.state:
+                        return  # Attribute-only telemetry refreshes do not change the trip.
+                    self._historical_ev_generation = getattr(self, "_historical_ev_generation", 0) + 1
+                    self._historical_ev_forecasts = {}
+                    self._historical_ev_plans = {}
+                    self._last_ev_charge_by_vehicle_w = None
+                    self._last_ev_charge_schedule_updated = None
+                    if getattr(self, "_enabled", False):
+                        self._schedule_settings_reoptimization()
+
+                self._historical_ev_listener_unsub = (
+                    async_track_state_change_event(self.hass, entities, _history_input_changed)
+                    if entities else None
+                )
+            recorder = getattr(self, "_ev_history_recorder", None)
+            if recorder is None:
+                recorder = self._ev_history_recorder = EVHistoryRecorder(self.hass, self._entry.entry_id)
+            forecasts = await recorder.forecasts(sources, dt_util.now())
+            detached = {}
+            if executor and getattr(self, "_ev_integration_enabled", False):
+                for vehicle_id, cfg in executor._settings.items():
+                    forecast = forecasts.get(vehicle_id)
+                    if not cfg.enabled or forecast is None:
+                        continue
+                    # _regenerate_plan updates only the passed state. Supply
+                    # configured capability explicitly to avoid a live read.
+                    state = AutoScheduleState(vehicle_id=vehicle_id)
+                    await executor._regenerate_plan(
+                        vehicle_id, cfg, state, current_soc=forecast.soc,
+                        charger_capability={"capability_known": False},
+                        available_from=forecast.arrival,
+                    )
+                    if state.current_plan is not None:
+                        detached[vehicle_id] = state.current_plan
+            if (not getattr(self, "_use_historical_ev_data", False)
+                    or generation != getattr(self, "_historical_ev_generation", 0)):
+                return
+            self._historical_ev_forecasts = forecasts
+            self._historical_ev_plans = detached
+            self._historical_ev_status = {
+                "source": "history" if forecasts else "live" if any(status.get("source") == "live" for status in recorder.status.values()) else "learning",
+                "vehicles": dict(recorder.status),
+                "reason": None if sources else "No unambiguous vehicle SOC and home-presence history sources",
+            }
+        except Exception as err:
+            self._historical_ev_status = {"source": "unavailable", "reason": "Local EV history unavailable; using existing forecasts"}
+            _LOGGER.debug("Historical EV forecast unavailable: %s", err)
+
+    def _historical_ev_forecast_for(self, identifier):
+        forecasts = getattr(self, "_historical_ev_forecasts", {}) or {}
+        if not getattr(self, "_use_historical_ev_data", False):
+            return None
+        from ..automations.shared_loadpoint import PROFILE_A_ID, PROFILE_B_ID
+        if str(identifier) in (PROFILE_A_ID, PROFILE_B_ID):
+            return forecasts.get(str(identifier))
+        canonical = self._canonical_ev_loadpoint_ids([str(identifier), *forecasts])
+        target = canonical.get(str(identifier), str(identifier))
+        return next((value for key, value in forecasts.items()
+                     if key not in (PROFILE_A_ID, PROFILE_B_ID)
+                     and canonical.get(key, key) == target), None)
 
     def _get_planned_ev_load_forecast(self, n_intervals: int) -> list[float] | None:
         """Read an optional forecast-only EV load overlay from a HA sensor."""
@@ -17775,6 +17921,38 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
 
         if not any(value > 0 for value in ev_load):
+            if getattr(self, "_use_historical_ev_data", False):
+                # An explicitly forecast zero is different from a missing or
+                # expired external forecast. In historical mode it must not
+                # resurrect a learned session the external source ruled out.
+                def _zero(value):
+                    try:
+                        return not isinstance(value, bool) and float(value) == 0
+                    except (TypeError, ValueError):
+                        return False
+
+                if isinstance(planned_load, list):
+                    for window in planned_load:
+                        if not isinstance(window, dict):
+                            continue
+                        raw_power = next((window[key] for key in ("power_w", "power_kw", "power") if key in window), None)
+                        if not _zero(raw_power):
+                            continue
+                        bounds = self._entry_slot_bounds(
+                            {"valid_from": str(window.get("start") or window.get("valid_from") or ""),
+                             "valid_to": str(window.get("end") or window.get("valid_to") or "")},
+                            current_window, interval, n_intervals,
+                        )
+                        if bounds is not None and bounds[1] > bounds[0]:
+                            return ev_load
+                elif isinstance(planned_load, dict):
+                    horizon_end = current_window + timedelta(minutes=interval * n_intervals)
+                    for key, value in planned_load.items():
+                        stamp = self._parse_price_timestamp(key)
+                        if stamp is not None and stamp.tzinfo is None:
+                            stamp = stamp.replace(tzinfo=current_window.tzinfo)
+                        if _zero(value) and stamp is not None and current_window <= stamp < horizon_end:
+                            return ev_load
             return None
 
         peak_kw = max(ev_load) / 1000.0
@@ -17965,7 +18143,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # become household demand in the battery optimiser.
                 continue
 
-            plan = state.current_plan
+            plan = ((getattr(self, "_historical_ev_plans", {}) or {}).get(vehicle_id)
+                    if getattr(self, "_use_historical_ev_data", False) else None) or state.current_plan
             if not plan or not plan.windows:
                 continue
 
@@ -18242,6 +18421,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 demand_blocked=demand_blocked,
                 valid_price_slots=valid_slots,
                 interval_minutes=self._config.interval_minutes,
+                historical_arrivals={snapshot.loadpoint_id: forecast
+                                     for snapshot in snapshots
+                                     if (forecast := getattr(self, "_historical_ev_forecast_for", lambda _: None)(snapshot.loadpoint_id)) is not None},
             )
         except Exception as err:
             _LOGGER.warning(
@@ -21015,6 +21197,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         data = {
             "success": True,
+            "historical_ev_data": dict(getattr(self, "_historical_ev_status", {"source": "disabled"})),
             "solar_forecast_status": dict(getattr(
                 getattr(self, "_solar_forecaster", None), "forecast_status", {}
             )),
@@ -21189,6 +21372,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "planned_ev_load_entity": self._planned_ev_load_entity_id,
             },
             "features": {
+                "use_historical_ev_data": getattr(self, "_use_historical_ev_data", False),
                 "ev_integration": self._ev_integration_enabled or len(self._ev_configs) > 0,
                 "planned_ev_load": bool(self._planned_ev_load_entity_id),
                 "spread_export": self._should_spread_export_schedule(),
@@ -21665,6 +21849,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Update optimization settings from API."""
         settings = dict(settings)
         response = {"success": True, "changes": []}
+        if "use_historical_ev_data" in settings and not isinstance(settings["use_historical_ev_data"], bool):
+            return {"success": False, "error": "use_historical_ev_data must be a boolean", "changes": []}
         if (
             settings.get("profit_max_enabled") is True
             and settings.get("cost_neutral_enabled") is True
@@ -22426,6 +22612,32 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if changed:
                 rerun_after_settings = True
                 charge_by_time_display_changed = True
+
+        if "use_historical_ev_data" in settings:
+            enabled = settings["use_historical_ev_data"]
+            if not isinstance(enabled, bool):
+                return {"success": False, "error": "use_historical_ev_data must be a boolean"}
+            from ..const import CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA
+            self._use_historical_ev_data = enabled
+            self._historical_ev_generation = getattr(self, "_historical_ev_generation", 0) + 1
+            self._historical_ev_forecasts = {}
+            self._historical_ev_plans = {}
+            self._historical_ev_status = {"source": "learning" if enabled else "disabled"}
+            if not enabled:
+                unsubscribe = getattr(self, "_historical_ev_listener_unsub", None)
+                if unsubscribe:
+                    unsubscribe()
+                self._historical_ev_listener_unsub = None
+                self._historical_ev_listener_entities = ()
+            # Discard old directives and recompute; no speculative allocations
+            # may survive a disable/re-enable cycle.
+            self._last_ev_charge_by_vehicle_w = None
+            self._last_ev_charge_schedule_updated = None
+            if self._entry:
+                options = {**self._entry.options, CONF_OPTIMIZATION_USE_HISTORICAL_EV_DATA: enabled}
+                self.hass.config_entries.async_update_entry(self._entry, options=options)
+            response["changes"].append(f"use_historical_ev_data: {enabled}")
+            rerun_after_settings = True
 
         # Handle EV integration toggle
         if "ev_integration" in settings:

@@ -209,7 +209,7 @@ def _publication_pipeline(*, rerun=True):
                      manual_control_projection=None, octopus_revision=None,
                      cost_neutral_cap=None, cost_neutral_forecast_import_cost=None,
                      cost_neutral_fixed_cost_allowance=None, cost_neutral_plan=None,
-                     solve_timestamp=None,
+                     solve_timestamp=None, historical_ev_generation=0,
                      dt_util=SimpleNamespace(now=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc)))
     exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])),
                  str(COORDINATOR_PATH), "exec"), namespace)
