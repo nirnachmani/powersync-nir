@@ -1444,3 +1444,20 @@ def test_tariff_ribbon_uses_clock_positions_for_partial_cosy_day(start, expected
     assert "left:91.6667%;width:8.3333%;" in html
     assert '<span class="i">14.1</span>' in html
     assert '<span class="i">43.2</span>' in html
+
+
+def test_plan_history_selects_charge_level_and_prices_at_the_requested_time():
+    out = _run_board(r"""
+  const now = Date.now(), base = now - 2 * 3600000;
+  const midnight = new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()).getTime();
+  const card = new T.PsPlanCard();
+  card._config = { entities: { soc: 'sensor.soc', importPrice: 'sensor.price' } };
+  card._hass = { states: { 'sensor.soc': {state:'80',attributes:{}}, 'sensor.price': {attributes:{unit_of_measurement:'c/kWh'}} } };
+  card._hist = { 'sensor.soc': [[base,65],[base+300000,0],[base+600000,NaN],[base+900000,40]],
+    'sensor.price': [[base,25],[base+300000,0],[base+600000,-5],[base+900000,35]] };
+  const model = card._buildModel({schedule:{}});
+  const at = offset => (base + offset + 60000 - midnight) / 3600000;
+  console.log(JSON.stringify({soc:[0,300000,600000,900000].map(t=>model.soc(at(t))),
+    prices:[0,300000,600000,900000].map(t=>model.imp(at(t)))}));
+""")
+    assert out == {"soc": [65, 0, None, 40], "prices": [25, 0, -5, 35]}
