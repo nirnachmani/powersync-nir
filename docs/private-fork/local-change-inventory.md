@@ -207,6 +207,20 @@ canonical identity and ownership checks; they are not API payload bypasses.
 
 ## Reviewed EV safety ports
 
+### Upstream v2.12.1726–1744 compatibility
+
+- Profit Max values known export-capped solar as zero-cost replenishment while
+  retaining finite shared recharge budgets, charge-by-time protection and
+  private decision diagnostics. Household peak holds retain their economic
+  reason near reserve; the Sigenergy backup-mode route remains unchanged.
+- The plan card shows live requested battery control separately from measured
+  flow. Tariff display uses major-to-minor conversion for price spikes and the
+  Home Assistant tariff clock rather than the browser clock when supplied.
+- Shared EV selection, lease and stop fencing, Sigenergy export-limit ownership,
+  fork HACS targeting and Android routes were not changed. Remote support,
+  unsupported provider and vendor changes were excluded. Focused solar,
+  Sigenergy, dashboard and Android contract tests and private gates passed.
+
 ### Upstream v2.12.1708–1720 compatibility
 
 - Network-envelope solver callbacks are background-owned and cancelled on unload;
