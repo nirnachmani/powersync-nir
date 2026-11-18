@@ -2468,7 +2468,8 @@ class PsPlanCard extends PsCardBase {
 
   _signature() {
     const data = psApiPeek('power_sync/optimization');
-    return `${data?.last_optimization || ''}|${data?.monitoring_mode}|${this._histAt}|${psState(this._hass, this.ents.soc)?.state}`;
+    const mode = psState(this._hass, this.ents.mode);
+    return `${data?.last_optimization || ''}|${data?.monitoring_mode}|${data?.enabled}|${data?.current_action || ''}|${data?.effective_current_action || ''}|${this._histAt}|${psState(this._hass, this.ents.soc)?.state}|${mode?.state}|${mode?.attributes?.command_status}|${mode?.attributes?.remaining_minutes}|${mode?.attributes?.control_source}`;
   }
 
   _loadHistory() {
@@ -2564,11 +2565,20 @@ class PsPlanCard extends PsCardBase {
     const curKey = psActionKey(data.effective_current_action || data.current_action);
     const nextChange = psNextChange(data, curKey, now);
     const nowRunEnd = psPlannedRunEnd(m.plan, m.interval, curKey, now);
+    const modeState = psState(hass, this.ents.mode);
+    const control = psBatteryControl(modeState);
+    const status = modeState?.attributes?.command_status;
+    const remaining = Number(modeState?.attributes?.remaining_minutes);
+    const controlText = control
+      ? status === 'restore_pending' ? 'Restoring…'
+        : status === 'pending' ? 'Waiting for command acknowledgement'
+        : `${control.message}${Number.isFinite(remaining) ? ` ${psDuration(remaining)} left.` : ''}`
+      : curKey ? `${curKey === 'self' ? 'Self-consumption' : PS_ACT[curKey][0]}${nowRunEnd ? ` until ${psWhen(hass, nowRunEnd)}` : ''}` : '';
     const floor = psPercent(data.reserve_visibility?.active_software_floor_percent);
     const actChip = key => (key === 'charge' ? 'gr' : key === 'export' ? 'rd' : key === 'self' ? 'pu' : '');
     const chips = [
       `<span class="chip ${data.monitoring_mode ? 'cy' : data.enabled ? 'gr' : ''}"><span>Mode</span><b>${data.monitoring_mode ? 'Monitoring' : data.enabled ? 'Optimizing' : 'Off'}</b></span>`,
-      curKey ? `<span class="chip ${actChip(curKey)}"><span>Current control</span><b>${psEsc(curKey === 'self' ? 'Self-consumption' : PS_ACT[curKey][0])}${nowRunEnd ? ` until ${psEsc(psWhen(hass, nowRunEnd))}` : ''}</b></span>` : '',
+      controlText ? `<span class="chip ${control ? 'am' : actChip(curKey)}"><span>Current control</span><b>${psEsc(controlText)}</b></span>` : '',
       nextChange ? `<span class="chip ${actChip(nextChange.key)}"><span>Next control</span><b>${psEsc(PS_ACT[nextChange.key][0])} ${psEsc(psWhen(hass, nextChange.t))}</b></span>` : '',
       data.last_optimization ? `<span class="chip"><span>Optimized</span><b class="num">${psEsc(psTime(hass, data.last_optimization))}</b></span>` : '',
       Number.isFinite(floor) && floor > 0 ? `<span class="chip"><span>Export floor</span><b class="num">${Math.round(floor)}%</b></span>` : '',
