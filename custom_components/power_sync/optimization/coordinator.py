@@ -14419,6 +14419,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # repayment. Consuming this budget prevents multiple high-FIT slots
         # from claiming the same later recharge opportunity.
         future_capacity_kwh = [0.0] * n
+        future_clipped_capacity_kwh = [0.0] * n
+        clipped_funding_slots: set[int] = set()
         future_solar_capacity_kwh = [0.0] * n
         future_grid_capacity_kwh = [0.0] * n
         future_cost_per_input_kwh = [math.inf] * n
@@ -14455,6 +14457,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     future_cost_per_input_kwh[idx], export_prices[idx]
                 )
             future_capacity_kwh[idx] = best_charge_kw * interval_hours * efficiency
+            # Solar above a known export cap has no forgone export revenue.
+            slot_limit_w = (grid_export_limits_w[idx] if grid_export_limits_w is not None
+                            and idx < len(grid_export_limits_w) else None)
+            known_limits_kw = []
+            for value, scale in ((capability.get("export_limit_kw"), 1.0),
+                                 (getattr(self._config, "max_grid_export_w", None), 1000.0),
+                                 (slot_limit_w, 1000.0)):
+                try:
+                    limit_kw = float(value) / scale
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(limit_kw) and limit_kw >= 0:
+                    known_limits_kw.append(limit_kw)
+            if known_limits_kw:
+                clipped_kw = min(solar_charge_kw, max(0.0, solar_surplus_kw - min(known_limits_kw)))
+                future_clipped_capacity_kwh[idx] = clipped_kw * interval_hours * efficiency
 
         try:
             diagnostic_observer = self.hass.data.get('power_sync', {}).get(self.entry_id, {}).get('decision_diagnostics')
@@ -14559,6 +14577,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if idx < len(hard_charge_blocks) and hard_charge_blocks[idx]:
                 _record_slot(idx, "hard_charge_block")
                 continue
+            if idx in clipped_funding_slots:
+                _record_slot(idx, "reserved_clipped_solar_replenishment")
+                continue
             if (
                 grid_export_limits_w is not None
                 and idx < len(grid_export_limits_w)
@@ -14594,20 +14615,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if deadline_slot is not None and idx < deadline_slot
                 else n
             )
-            candidates = [
-                future_idx
-                for future_idx in range(idx + 1, repayment_end)
-                if future_capacity_kwh[future_idx] > 1e-9
-                and future_cost_per_input_kwh[future_idx] + margin
-                < export_prices[idx]
-            ]
-            candidates.sort(key=lambda future_idx: future_cost_per_input_kwh[future_idx])
-            available = sum(future_capacity_kwh[future_idx] for future_idx in candidates)
-            cheapest_cost = (
-                future_cost_per_input_kwh[candidates[0]]
-                if candidates
-                else None
-            )
+            candidates: list[tuple[float, int, bool]] = []
+            for future_idx in range(idx + 1, repayment_end):
+                clipped = future_clipped_capacity_kwh[future_idx]
+                priced = max(0.0, future_capacity_kwh[future_idx] - clipped)
+                if clipped > 1e-9 and margin < export_prices[idx]:
+                    candidates.append((0.0, future_idx, True))
+                cost = future_cost_per_input_kwh[future_idx]
+                if priced > 1e-9 and cost + margin < export_prices[idx]:
+                    candidates.append((cost, future_idx, False))
+            candidates.sort()
+
+            def _candidate_capacity(future_idx: int, clipped: bool) -> float:
+                free = future_clipped_capacity_kwh[future_idx]
+                return free if clipped else max(0.0, future_capacity_kwh[future_idx] - free)
+
+            available = sum(_candidate_capacity(future_idx, clipped)
+                            for _, future_idx, clipped in candidates)
+            cheapest_cost = candidates[0][0] if candidates else None
             funding_details = {
                 **slot_details,
                 "deferred_kwh": round(deferred_kwh, 6),
@@ -14650,12 +14675,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             remaining = deferred_kwh
             used_slots: list[int] = []
             used_amounts: list[float] = []
-            for future_idx in candidates:
-                used = min(remaining, future_capacity_kwh[future_idx])
+            for _, future_idx, clipped in candidates:
+                used = min(remaining, _candidate_capacity(future_idx, clipped))
                 if diagnostic_observer is not None:
                     used_slots.append(future_idx)
                     used_amounts.append(used)
                 future_capacity_kwh[future_idx] -= used
+                if clipped:
+                    future_clipped_capacity_kwh[future_idx] -= used
+                    if used > 1e-9:
+                        clipped_funding_slots.add(future_idx)
                 remaining -= used
                 if remaining <= 1e-9:
                     break
