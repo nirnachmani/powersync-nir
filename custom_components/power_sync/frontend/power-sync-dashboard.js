@@ -2846,7 +2846,7 @@ class PsTariffCard extends PsCardBase {
   _signature() {
     const s = psState(this._hass, this.ents.tariff);
     const minute = Math.floor(Date.now() / 60_000);
-    return `${s?.attributes?.last_sync}|${s?.state}|${minute}`;
+    return `${s?.attributes?.last_sync}|${s?.attributes?.current_time}|${s?.state}|${minute}`;
   }
 
   _render() {
@@ -2893,8 +2893,14 @@ class PsTariffCard extends PsCardBase {
       return [named ? pretty(named) : 'Shoulder', '--cyan', 0.45];
     };
     const now = new Date();
-    const nowMin = now.getHours() * 60 + now.getMinutes();
-    const hm = mins => psTime(hass, new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, mins));
+    const nowMin = /^([01]\d|2[0-3]):[0-5]\d$/.test(attrs.current_time)
+      ? slotMin({time: attrs.current_time}) : now.getHours() * 60 + now.getMinutes();
+    const use12h = psUse12h(hass);
+    const wallClock = new Intl.DateTimeFormat(hass?.locale?.language || undefined, {
+      timeZone: 'UTC', hour: use12h ? 'numeric' : '2-digit', minute: '2-digit',
+      ...(use12h ? {hour12: true} : {hourCycle: 'h23'}),
+    });
+    const hm = mins => wallClock.format(new Date(Date.UTC(2000, 0, 1, 0, mins)));
     const ribbon = periods.map(p => {
       const [, c, op] = label(p);
       return `<span style="position:absolute;left:${(p.start / 1440 * 100).toFixed(4)}%;width:${((p.end - p.start) / 1440 * 100).toFixed(4)}%;height:100%;--c:var(${c});opacity:${op}"></span>`;
