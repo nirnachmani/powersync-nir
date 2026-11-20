@@ -7534,9 +7534,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # dispatch rather than capping it using a hypothetical full battery.
             # The solver accounts for curtailment in its power balance.
 
-            # Adapted from upstream 24fcc7d: project zero PV only while the
-            # explicitly whole-site production stop is currently confirmed.
-            from ..solar_production import planned_solar
+            # Project controlled PV during confirmed negative-import control.
+            # For native Sigenergy the limit is the potential useful PV above
+            # grid capacity; the optimizer decides how much to curtail.
+            from ..solar_production import ENTITIES, planned_solar, potential_pv_limits
 
             production = (
                 self.hass.data.get("power_sync", {})
@@ -7545,10 +7546,30 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if self._entry
                 else None
             )
+            projected = bool(production and production.can_project())
+            limits_w = None
+            if (
+                projected and production.can_stop()
+                and production.option("battery_system") == "sigenergy"
+                and not production.option(ENTITIES, [])
+            ):
+                plans = self._pending_ev_charge_plan or []
+                if not isinstance(plans, (list, tuple)):
+                    plans = [plans]
+                ev_max_kw = [0.0] * len(load_forecast)
+                for plan in plans:
+                    for i, power in enumerate(getattr(plan, "max_power_kw", ())):
+                        if i >= len(ev_max_kw):
+                            break
+                        ev_max_kw[i] += max(0.0, float(power or 0))
+                limits_w = potential_pv_limits(
+                    load_forecast,
+                    max_charge_w=self._config.max_charge_w,
+                    max_grid_import_w=self._config.max_grid_import_w,
+                    ev_max_kw=ev_max_kw,
+                )
             solar_forecast = planned_solar(
-                solar_forecast,
-                import_prices,
-                enabled=bool(production and production.can_project()),
+                solar_forecast, import_prices, enabled=projected, limits_w=limits_w,
             )
 
             solver_solar_forecast = list(solar_forecast)
@@ -7983,6 +8004,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             if self._battery_provenance_is_usable()
                             else 0.0
                         ),
+                        [price < 0 for price in import_prices] if limits_w is not None else None,
                     )
                 finally:
                     if reserve_floor is not None:

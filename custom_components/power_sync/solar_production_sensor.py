@@ -24,6 +24,8 @@ class SolarProductionControlSensor(SensorEntity):
     def native_value(self):
         data = self._data()
         if data.get("state") == "limit_confirmed":
+            if (data.get("target_power_w") or 0) > 0:
+                return "Limited"
             return "Stopped" if data.get("physical_converged") is True else "Stop Pending"
         return {
             "normal": "Normal", "stop_pending": "Stop Pending",

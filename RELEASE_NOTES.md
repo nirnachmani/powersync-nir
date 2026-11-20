@@ -1,3 +1,10 @@
+<!-- release: v2.12.1744-nir.2 -->
+
+## v2.12.1744-nir.2 — useful solar at negative import prices
+- When the existing negative-import solar control is enabled, allow Sigenergy PV above the grid-import limit for planned battery charging, sized with site load and preserving the saved PV limit.
+- Account for potentially useful solar in the optimizer and curtailment in schedule/grid estimates. Preserve the existing import/export controls, Spread Import target and control cadence.
+- Source release only; actual inverter and battery response has not been verified on the installation.
+
 <!-- release: v2.12.1698-nir.1 -->
 
 ## v2.12.1698-nir.1 — reviewed upstream and shared EV compatibility

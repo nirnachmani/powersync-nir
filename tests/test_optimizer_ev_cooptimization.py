@@ -77,6 +77,70 @@ def _optimizer(module, *, max_grid_import_w=16_100):
     )
 
 
+def test_negative_import_plan_uses_useful_pv_above_grid_capacity(optimizer_module):
+    module = optimizer_module
+    start = datetime(2026, 11, 17, 12, tzinfo=timezone.utc)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=100000, max_charge_w=20000, max_discharge_w=10000,
+        max_grid_import_w=14200, max_grid_export_w=0, backup_reserve=.05,
+        interval_minutes=60, horizon_hours=4,
+    )
+    result = optimizer.optimize(
+        import_prices=[-.10] * 4, export_prices=[-.05] * 4,
+        load_forecast=[2] * 4, solar_forecast=[7.8] * 4, current_soc=.1,
+        schedule_timestamps=[start + timedelta(hours=i) for i in range(4)],
+        allow_grid_charge=True, prevent_simultaneous_grid_flow=True,
+        negative_import_pv_slots=[True] * 4,
+    )
+    assert result.feasible
+    assert result.schedule.actions[0].battery_charge_w == pytest.approx(20000)
+    assert result.solar_curtailment_w[0] == pytest.approx(0, abs=1)
+
+
+def test_negative_import_plan_uses_pv_for_battery_and_ev(optimizer_module):
+    module = optimizer_module
+    start = datetime(2026, 11, 17, 12, tzinfo=timezone.utc)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=100000, max_charge_w=20000, max_discharge_w=10000,
+        max_grid_import_w=14200, max_grid_export_w=0, backup_reserve=.05,
+        interval_minutes=60, horizon_hours=4,
+    )
+    ev = module.EVChargePlan(
+        vehicle_id="car", max_power_kw=(7.0,) * 4,
+        energy_needed_kwh=28, charge_efficiency=1, min_power_kw=1.4,
+    )
+    result = optimizer.optimize(
+        import_prices=[-.10] * 4, export_prices=[-.05] * 4,
+        load_forecast=[2] * 4, solar_forecast=[14.8] * 4, current_soc=.1,
+        schedule_timestamps=[start + timedelta(hours=i) for i in range(4)],
+        allow_grid_charge=True, prevent_simultaneous_grid_flow=True, ev_plan=ev,
+    )
+    assert result.feasible
+    assert result.schedule.actions[0].battery_charge_w == pytest.approx(20000)
+    assert result.schedule.actions[0].ev_charge_w == pytest.approx(7000)
+
+
+def test_negative_import_pv_is_curtailed_when_battery_charge_is_blocked(optimizer_module):
+    module = optimizer_module
+    start = datetime(2026, 11, 17, 12, tzinfo=timezone.utc)
+    optimizer = module.BatteryOptimizer(
+        capacity_wh=100000, max_charge_w=20000, max_discharge_w=10000,
+        max_grid_import_w=14200, max_grid_export_w=0, backup_reserve=.05,
+        interval_minutes=60, horizon_hours=4,
+    )
+    result = optimizer.optimize(
+        import_prices=[-.10] * 4, export_prices=[-.05] * 4,
+        load_forecast=[2] * 4, solar_forecast=[7.8] * 4, current_soc=.5,
+        schedule_timestamps=[start + timedelta(hours=i) for i in range(4)],
+        allow_grid_charge=True, prevent_simultaneous_grid_flow=True,
+        block_battery_charge=True, negative_import_pv_slots=[True] * 4,
+    )
+    assert result.feasible
+    assert all(action.battery_charge_w == 0 for action in result.schedule.actions)
+    assert result.solar_curtailment_w == pytest.approx([7800] * 4)
+    assert result.grid_import_w == pytest.approx([2000] * 4)
+
+
 def _ev_plan(module, **overrides):
     kwargs = {
         "vehicle_id": "car",

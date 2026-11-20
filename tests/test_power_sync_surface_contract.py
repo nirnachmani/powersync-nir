@@ -63,11 +63,11 @@ def _historical_ev_diff_is_allowlisted(actual: str, path: Path) -> bool:
     return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _HISTORICAL_EV_DELTAS[path]
 
 
-# Exact reviewed solar-funding and household-hold changes after this release.
+# Exact reviewed solar-funding, household-hold and negative-import PV changes.
 _SOLAR_HOLD_PREDECESSOR = "88679db3cd6e5d0a3a49444184e533bfc1ac78ea"
 _SOLAR_HOLD_DELTAS = {
-    COORDINATOR: "c1f9396f68f4f3217c4b67d18d1a68d390c9b6ac1bc070bf3a165afbf5ade563",
-    BATTERY_OPTIMIZER: "4644d763feeaa68414da86ddb901eac3bfad7a638d6ac28263aca8b4b3031cfd",
+    COORDINATOR: "9d3429177bf37797a48b45065651f9a9413d4bc1da41c8ff5a41b5f4053b2812",
+    BATTERY_OPTIMIZER: "5378caddd3d8ad3d5ffb57c10d33f6b4d987643b720168ea44929d105ef8896c",
 }
 
 

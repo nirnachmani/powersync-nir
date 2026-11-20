@@ -1265,6 +1265,7 @@ class BatteryOptimizer:
         price_valid_slots: list[bool] | None = None,
         acquisition_cost_known_zero: bool = False,
         initial_solar_energy_kwh: float = 0.0,
+        negative_import_pv_slots: list[bool] | None = None,
     ) -> OptimizerResult:
         """
         Run the LP optimization.
@@ -1616,6 +1617,7 @@ class BatteryOptimizer:
                                 manual_required_discharge_kw,
                                 ev_plan,
                                 price_valid_slots,
+                                negative_import_pv_slots,
                             )
                             small_slots = _micro_export_slots(result)
                             if not small_slots or micro_pass == 3:
@@ -3043,6 +3045,7 @@ class BatteryOptimizer:
         manual_required_discharge_kw: list[float] | None = None,
         ev_plan: EVChargePlan | None = None,
         price_valid_slots: list[bool] | None = None,
+        negative_import_pv_slots: list[bool] | None = None,
     ) -> OptimizerResult:
         """
         Solve the LP formulation using the HiGHS solver (highspy).
@@ -3151,6 +3154,7 @@ class BatteryOptimizer:
                     required_discharge_kw=fixed_manual_discharge,
                     ev_plan=ev_plan,
                     price_valid_slots=price_valid_slots,
+                    negative_import_pv_slots=negative_import_pv_slots,
                 )
                 result.lp_stats["mode_iterations"] = iteration + 1
                 if result.solver_used != "highs":
@@ -3446,6 +3450,7 @@ class BatteryOptimizer:
         required_discharge_kw: list[float] | None = None,
         ev_plan: EVChargePlan | None = None,
         price_valid_slots: list[bool] | None = None,
+        negative_import_pv_slots: list[bool] | None = None,
     ) -> OptimizerResult:
         """Inner LP solver (separated for SOC-below-reserve guard in _solve_lp)."""
         formulation_start = time.monotonic()
@@ -6467,6 +6472,15 @@ class BatteryOptimizer:
         solar_curtailment = self._expand_period_values(
             periods, period_solar_curtailment, n
         )
+        if negative_import_pv_slots:
+            # The LP already chose curtailment. The emitted schedule and grid
+            # calculations must use generation remaining after that choice.
+            solar = [
+                (max(0.0, value - solar_curtailment[t]) if battery_charge[t] > 0.001 else 0.0)
+                if t < len(negative_import_pv_slots) and negative_import_pv_slots[t]
+                else value
+                for t, value in enumerate(solar)
+            ]
         battery_to_grid = self._expand_period_values(
             periods, period_battery_to_grid, n
         )

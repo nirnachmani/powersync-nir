@@ -101,6 +101,31 @@ def test_negative_import_independent_of_export_and_soc_restores_exact_prior_limi
     run(scenario())
 
 
+def test_sigenergy_partial_limit_is_bounded_by_original():
+    target = native.NativeProductionTarget(None, {"brand": "sigenergy"})
+    target._pv_limit_effective = True
+    assert target.limit({"pv_limit": 10000}, 7800) == {"pv_limit": 7800}
+    assert target.limit({"pv_limit": 10000}, 15000) == {"pv_limit": 10000}
+
+
+def test_native_partial_limit_tracks_changes_and_restores_original():
+    store = Store()
+    target = Target(store, value=20000)
+    target.limit = lambda original, watts: {"value": min(original["value"], watts)}
+    manager = pv.ProductionStopManager(store, lambda identity: target, lambda: True)
+
+    async def scenario():
+        await manager.update(-5, [{"id": "a"}], power_limit_w=7800)
+        assert target.value == 7800
+        await manager.update(-5, [{"id": "a"}], power_limit_w=5000)
+        assert target.value == 5000
+        await manager.update(1, [{"id": "a"}], power_limit_w=0)
+        assert target.value == 20000
+        assert not manager.owns_control
+
+    run(scenario())
+
+
 def test_storage_failure_prevents_first_stop_and_followup_write():
     manager, store, targets, _ = rig()
     async def scenario():
@@ -261,6 +286,16 @@ def test_current_retail_interval_without_feed_in_and_with_duration_is_sufficient
     assert pv.current_import_price((SimpleNamespace(last_update_success=False, data={"current": [interval()]}),), NOW) is None
 
 
+def test_projection_potential_uses_site_load_and_battery_capacity():
+    assert pv.potential_pv_limits([2, 3], max_charge_w=20000, max_grid_import_w=14200) == [7800, 8800]
+    assert pv.potential_pv_limits([2, 3], max_charge_w=20000, max_grid_import_w=14200, ev_max_kw=[7, 0]) == [14800, 8800]
+
+
+def test_negative_import_projection_caps_forecast_to_planned_pv_ceiling():
+    solar = [8, 8, 8]
+    assert pv.planned_solar(solar, [-0.1, -0.1, 0.1], enabled=True, limits_w=[7800, 0, 0]) == [7.8, 0, 8]
+
+
 def test_planner_zeros_only_explicitly_covered_pv_at_strict_negative_import():
     solar = [5, 6, 7, 8]
     assert pv.planned_solar(solar, [-0.1, 0, 1], enabled=True) == [0, 6, 7, 8]
@@ -310,6 +345,58 @@ def test_number_production_control_requires_zero_and_restores_exact_nondefault_v
         assert pv.validate_production_entities(hass,[identity["entity_id"]])
         await manager.update(-5,[identity])
         assert not manager.device_confirmed
+    run(scenario())
+
+
+def test_sigenergy_modulates_pv_and_restores_original():
+    from contextlib import asynccontextmanager
+    registers = {40029: [1], 40031: [4], 40036: [0, 20000], 40038: [0, 0]}
+    writes = []
+
+    @asynccontextmanager
+    async def transaction():
+        yield
+
+    async def connect():
+        return True
+
+    async def read(address, count=1):
+        return registers[address]
+
+    async def read_pv():
+        return registers[40036][0] * 65536 + registers[40036][1]
+
+    async def write(address, value):
+        writes.append((address, value))
+        registers[address] = value
+        return True
+
+    controller = SimpleNamespace(
+        connect=connect, _modbus_transaction=transaction, _read_holding_registers=read,
+        _get_current_pv_limit=read_pv, _write_holding_registers=write,
+        _from_unsigned32=lambda value: [value >> 16, value & 65535],
+        REG_REMOTE_EMS_ENABLE=40029, REG_REMOTE_EMS_CONTROL_MODE=40031,
+        REG_PV_MAX_POWER_LIMIT=40036,
+    )
+    identity = {"brand": "sigenergy"}
+    store = Store()
+    manager = pv.ProductionStopManager(
+        store, lambda _: native.NativeProductionTarget(controller, identity), lambda: True
+    )
+
+    async def scenario():
+        await manager.update(-5, [identity], power_limit_w=7800)
+        assert registers[40036] == [0, 7800]
+        assert manager.as_dict()["target_power_w"] == 7800
+        await manager.update(-5, [identity], power_limit_w=14800)
+        assert registers[40036] == [0, 14800]
+        await manager.update(-5, [identity], power_limit_w=0)
+        assert registers[40036] == [0, 0]
+        await manager.update(0, [])
+        assert registers[40036] == [0, 20000]
+        assert all(address == 40036 for address, _ in writes)
+        assert registers[40038] == [0, 0]
+
     run(scenario())
 
 
@@ -523,6 +610,73 @@ def runtime_rig(monkeypatch):
     data={};permission={"allowed":True}
     runtime=runtime_module.SolarProductionRuntime(hass,entry,data,lambda:permission["allowed"],None)
     return runtime,store,states,calls,permission,data
+
+
+def test_sensor_reports_partial_limit_as_limited(monkeypatch):
+    components = ModuleType("homeassistant.components")
+    sensor = ModuleType("homeassistant.components.sensor")
+    helpers_entity = ModuleType("homeassistant.helpers.entity")
+    sensor.SensorEntity = object
+    helpers_entity.DeviceInfo = dict
+    monkeypatch.setitem(sys.modules, "homeassistant.components", components)
+    monkeypatch.setitem(sys.modules, "homeassistant.components.sensor", sensor)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.entity", helpers_entity)
+    const = ModuleType("_pvfeature.const")
+    const.DOMAIN = "power_sync"
+    monkeypatch.setitem(sys.modules, "_pvfeature.const", const)
+    module = load("solar_production_sensor")
+    entity = module.SolarProductionControlSensor(SimpleNamespace(entry_id="entry"))
+    entity.hass = SimpleNamespace(data={"power_sync": {"entry": {"solar_production_stop": {
+        "state": "limit_confirmed", "target_power_w": 7800, "physical_converged": None,
+    }}}})
+    assert entity.native_value == "Limited"
+
+
+def test_native_runtime_projects_pv_control_when_negative_import_active(runtime_rig):
+    runtime, _, _, _, _, _ = runtime_rig
+    runtime.entry.options["battery_system"] = "sigenergy"
+    runtime.entry.options[pv.ENTITIES] = []
+    runtime.manager.device_confirmed = True
+    assert runtime.can_stop()
+    assert runtime.can_project()
+
+
+def test_runtime_sizes_native_pv_using_charging_capacity_and_site_load(runtime_rig):
+    runtime, store, states, _, _, data = runtime_rig
+    runtime.entry.options["battery_system"] = "sigenergy"
+    runtime.entry.options[pv.ENTITIES] = []
+    target = Target(store, value=20000)
+    target.limit = lambda original, watts: {"value": min(original["value"], watts)}
+    runtime.identities = lambda: [{"brand": "sigenergy"}]
+    runtime.manager.target_factory = lambda identity: target
+    action = SimpleNamespace(action="charge", power_w=12200)
+    energy = {"site_load_power": 2}
+    optimizer = SimpleNamespace(
+        _enabled=True, _config=SimpleNamespace(max_charge_w=20000, max_grid_import_w=14200),
+        _get_current_action=lambda: action, _should_spread_import_schedule=lambda: False,
+        _get_energy_data=lambda: energy,
+    )
+    data["optimization_coordinator"] = optimizer
+
+    async def scenario():
+        await runtime.tick()
+        assert target.value == 7800
+        energy["site_load_power"] = 9  # Includes EV demand.
+        await runtime.tick()
+        assert target.value == 14800
+        energy["site_load_power"] = 2
+        optimizer._should_spread_import_schedule = lambda: True
+        await runtime.tick()
+        assert target.value == 0
+        optimizer._should_spread_import_schedule = lambda: False
+        action.action = "idle"
+        await runtime.tick()
+        assert target.value == 0
+        states["sensor.import_price"].state = "5"
+        await runtime.tick()
+        assert target.value == 20000
+
+    run(scenario())
 
 
 def test_pv_stop_reports_separate_confirmed_and_observed_state(runtime_rig, tmp_path):

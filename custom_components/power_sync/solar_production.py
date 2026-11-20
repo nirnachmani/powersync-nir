@@ -75,10 +75,28 @@ def current_import_price(coordinators: tuple, now: datetime) -> float | None:
     return None
 
 
-def planned_solar(solar: list[float], imports: list[float], *, enabled: bool) -> list[float]:
-    """Adjust only explicitly covered whole-site PV; prices here are $/kWh."""
+def potential_pv_limits(load_kw, *, max_charge_w, max_grid_import_w, ev_max_kw=None):
+    """Forecast useful PV including separately co-optimized EV capability."""
+    charge = finite_number(max_charge_w)
+    grid = finite_number(max_grid_import_w)
+    if charge is None or grid is None or charge <= 0 or grid <= 0:
+        return [0.0] * len(load_kw)
+    ev_max_kw = ev_max_kw or []
+    limits = []
+    for i, load in enumerate(load_kw):
+        base = max(0.0, finite_number(load) or 0)
+        ev = max(0.0, finite_number(ev_max_kw[i]) or 0) if i < len(ev_max_kw) else 0
+        limits.append(max(0.0, charge + 1000 * (base + ev) - grid))
+    return limits
+
+
+def planned_solar(solar: list[float], imports: list[float], *, enabled: bool, limits_w=None) -> list[float]:
+    """Project controlled PV at its allowed ceiling during negative prices."""
     return [
-        0.0 if enabled and index < len(imports) and (price := finite_number(imports[index])) is not None and price < 0 else value
+        min(value, max(0.0, (finite_number(limits_w[index]) or 0) / 1000))
+        if enabled and index < len(imports) and (price := finite_number(imports[index])) is not None and price < 0 and limits_w is not None and index < len(limits_w)
+        else 0.0 if enabled and index < len(imports) and (price := finite_number(imports[index])) is not None and price < 0
+        else value
         for index, value in enumerate(solar)
     ]
 
@@ -238,7 +256,7 @@ class ProductionStopManager:
             observed = await self._read(target)
             if observed == record["original"]:
                 pass  # Includes a crash before the stop write reached hardware.
-            elif observed == record["stopped"] or getattr(target, "owns_partial", lambda *args: False)(observed, record["original"], record["stopped"]):
+            elif observed == record["stopped"] or observed == record.get("pending") or getattr(target, "owns_partial", lambda *args: False)(observed, record["original"], record["stopped"]):
                 if not await self._write(target, record["original"]):
                     continue
                 if await self._read(target) != record["original"]:
@@ -259,7 +277,7 @@ class ProductionStopManager:
             if self.status != "external_control":
                 self.status = "normal"
 
-    async def update(self, price, identities, *, enabled=True):
+    async def update(self, price, identities, *, enabled=True, power_limit_w=None):
         async with self.lock:
             await self._load()
             if self.stopping:
@@ -315,18 +333,30 @@ class ProductionStopManager:
                     except BaseException:
                         self.records.remove(record)
                         raise
-                elif observed not in (record["original"], record["stopped"]) and not getattr(target, "owns_partial", lambda *args: False)(observed, record["original"], record["stopped"]):
+                elif observed not in (record["original"], record["stopped"], record.get("pending")) and not getattr(target, "owns_partial", lambda *args: False)(observed, record["original"], record["stopped"]):
                     self.suspended = True
                     self.status = "external_control"
                     await self._save()
                     self.device_confirmed = False
                     return
-                if observed != record["stopped"] or target.refresh:
-                    if not await self._write(target, record["stopped"], stop=True):
+                limit = getattr(target, "limit", None)
+                desired = limit(record["original"], power_limit_w) if callable(limit) and power_limit_w is not None else target.stopped(record["original"])
+                if desired is None:
+                    confirmed = False
+                    continue
+                if desired != record["stopped"]:
+                    record["pending"] = desired
+                    await self._save()
+                if observed != desired or target.refresh:
+                    if not await self._write(target, desired, stop=True):
                         confirmed = False
                         continue
                     observed = await self._read(target)
-                if observed != record["stopped"] or not getattr(target, "effective", True):
+                if observed == desired and (desired != record["stopped"] or "pending" in record):
+                    record["stopped"] = desired
+                    record.pop("pending", None)
+                    await self._save()
+                if observed != desired or not getattr(target, "effective", True):
                     confirmed = False
             self.device_confirmed = confirmed
             if confirmed:
@@ -356,9 +386,13 @@ class ProductionStopManager:
         now = datetime.now(timezone.utc)
         self._latest_power = power
         self._latest_power_at = sample
+        stopped_zero = bool(self.records) and all(
+            record.get("stopped", {}).get("pv_limit", record.get("stopped", {}).get("value")) in (0, "off")
+            for record in self.records
+        )
         self.physical_converged = (
             abs(power) <= 100
-            if self.device_confirmed and self._pre_stop_power is not None
+            if stopped_zero and self.device_confirmed and self._pre_stop_power is not None
             and self._pre_stop_power > 100 and power is not None and sample
             and self.last_command_at and self.last_command_at < sample <= now
             and now - sample <= timedelta(seconds=60) else None
@@ -373,7 +407,10 @@ class ProductionStopManager:
             "physical_converged": self.physical_converged,
             "restore_required": self.owns_control,
             "restore_pending": self.owns_control and self.status == "restore_pending",
-            "target_power_w": 0 if self.owns_control else None,
+            "target_power_w": (
+                self.records[0]["stopped"].get("pv_limit", 0)
+                if len(self.records) == 1 else 0 if self.owns_control else None
+            ),
         }
 
 

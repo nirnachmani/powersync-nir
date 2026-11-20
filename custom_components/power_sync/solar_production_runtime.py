@@ -105,6 +105,27 @@ class SolarProductionRuntime:
     def can_stop(self):
         return self.wants_import() and self.grid_connected()
 
+    def useful_pv_limit_w(self):
+        """Size native PV for an optimizer charging action plus site load."""
+        if self.option("battery_system") != "sigenergy" or self.option(ENTITIES, []):
+            return None
+        optimizer = self.data.get("optimization_coordinator")
+        if not optimizer or not getattr(optimizer, "_enabled", False):
+            return 0
+        action = optimizer._get_current_action()
+        if not action or action.action != "charge":
+            return 0
+        config = optimizer._config
+        max_charge = finite_number(config.max_charge_w)
+        grid_limit = finite_number(config.max_grid_import_w)
+        data = optimizer._get_energy_data()
+        load_kw = finite_number(data.get("site_load_power")) if isinstance(data, dict) else None
+        if max_charge is None or grid_limit is None or load_kw is None:
+            return 0
+        if optimizer._should_spread_import_schedule():
+            max_charge = min(max_charge, finite_number(action.power_w) or 0)
+        return max(0, max_charge + max(0, load_kw) * 1000 - grid_limit)
+
     def identities(self):
         entities = self.option(ENTITIES, [])
         if entities:
@@ -156,7 +177,11 @@ class SolarProductionRuntime:
                 power = power * 1000 if unit == "kW" else power if unit == "W" else None
             self.manager.observe_power(power, state.last_updated if state else None)
             was_owned = self.manager.owns_control
-            await self.manager.update(self.price() if self.grid_connected() else None, self.identities(), enabled=self.option(ENABLED, False))
+            await self.manager.update(
+                self.price() if self.grid_connected() else None, self.identities(),
+                enabled=self.option(ENABLED, False),
+                power_limit_w=self.useful_pv_limit_w() if self.can_stop() else None,
+            )
             if self.wants_import() and not self.grid_connected() and not self.manager.owns_control:
                 self.manager.status = "grid_unavailable"
             if was_owned and not self.manager.owns_control and not self.manager.suspended and self.after_restore and self._permission() and self.grid_connected() and self.price() is not None and self.price() >= 0:

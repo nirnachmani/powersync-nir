@@ -60,6 +60,14 @@ class NativeProductionTarget:
         state["pv_limit"] = 0
         return state
 
+    def limit(self, original, watts):
+        """Produce an absolute PV ceiling, never above the saved baseline."""
+        if not self.effective:
+            return None
+        state = deepcopy(original)
+        state["pv_limit"] = min(original["pv_limit"], max(0, int(watts)))
+        return state
+
     async def write(self, state):
         if self.brand != "sigenergy":
             return False
