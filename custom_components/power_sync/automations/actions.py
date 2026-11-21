@@ -9239,6 +9239,7 @@ async def _set_vehicle_amps(
     vehicle_id: str,
     amps: int,
     params: dict,
+    *, headroom_abort_id: str | None = None,
 ) -> bool | None:
     """Route shared runtime pauses through the transition fence before I/O."""
     if (amps == 0 and config_entry is not None
@@ -9274,6 +9275,7 @@ async def _set_vehicle_amps(
             await _stop_dynamic_under_transition_lock(hass, config_entry, {
                 **params, "vehicle_id": physical, "_expected_state": state,
                 "_shared_runtime_pause": True,
+                "_headroom_abort_id": headroom_abort_id,
             })
             return None
     result = await _set_vehicle_amps_io(hass, config_entry, vehicle_id, amps, params)
@@ -16994,7 +16996,7 @@ async def async_load_pending_shared_stops(hass, config_entry):
 async def async_reconcile_pending_shared_stops(hass, config_entry):
     """Observe pending stops and retry only proven pre-dispatch rejections."""
     from .ev_ownership import get_ev_ownerships
-    from .shared_stop_storage import delete_pending_stop, load_pending_stop, upsert_pending_stop
+    from .shared_stop_storage import settle_pending_stop, load_pending_stop, upsert_pending_stop
     from .external_session_reconciler import generic_stop_observation_from_hass, evac_stop_observation_from_reader
     from ..action_events import update_unverified_stop_alert
 
@@ -17052,7 +17054,7 @@ async def async_reconcile_pending_shared_stops(hass, config_entry):
                         try:
                             latest = await load_pending_stop(store, vid)
                             if latest == record and current():
-                                await delete_pending_stop(store, vid, expected_generation=record["generation"], expected_revision=record["revision"])
+                                await settle_pending_stop(store, vid, expected_generation=record["generation"], expected_revision=record["revision"], entry_id=config_entry.entry_id)
                                 if current():
                                     del vehicles[vid]
                                     hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {}).get("_shared_stop_fences", {}).pop(vid, None)
@@ -17395,18 +17397,18 @@ async def _settle_pending_shared_stop(hass, config_entry, vid, state, vehicles):
         _LOGGER.exception("Could not finalize EV charging history for %s", vid)
     if not current():
         return False
-    from .shared_stop_storage import delete_pending_stop
+    from .shared_stop_storage import settle_pending_stop
     record = pending.get("record")
     store = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {}).get("automation_store")
     if record is not None:
         try:
-            await delete_pending_stop(store, vid, expected_generation=record["generation"],
-                                      expected_revision=record["revision"])
+            await settle_pending_stop(store, vid, expected_generation=record["generation"],
+                                      expected_revision=record["revision"], entry_id=config_entry.entry_id)
         except Exception:
             _LOGGER.exception("Could not delete pending EV stop for %s; retaining fence", vid)
             _warn_shared_stop_storage_failure(hass, config_entry, vid, pending)
             return False
-    elif not pending.get("volatile_record"):
+    elif not pending.get("volatile_record") or pending["volatile_record"].get("headroom_abort_id"):
         return False
     if not current():
         _LOGGER.error("EV stop identity changed during durable deletion for %s", vid)
@@ -17745,6 +17747,8 @@ async def _action_stop_ev_charging_dynamic_locked(
                   "first_attempt_at": now, "last_attempt_at": now, "attempt_count": 1,
                   "last_status": "pending", "parameters": durable_params, "alerted": False,
                   "binding_snapshot": _shared_stop_binding_snapshot(config_entry), "dispatch_at": None}
+        if params.get("_headroom_abort_id"):
+            record["headroom_abort_id"] = params["_headroom_abort_id"]
         pending["generation"] = record["generation"]
         if lease.get("owner") == "external":
             direct_request = _direct_shared_stop_owner.get()

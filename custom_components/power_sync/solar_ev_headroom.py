@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
+from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 
 
@@ -146,6 +147,17 @@ class SolarEVHeadroom:
         self.cancel = None
         self.error = None
         self._abort_running = False
+        self.diagnose = None
+        self.receipt = lambda saved: bool(saved.get('ev_abort_id') and
+            saved.get('ev_abort_verified') == saved.get('ev_abort_id'))
+
+    def _diagnostic(self, reason):
+        if self.diagnose is not None:
+            try:
+                self.diagnose({'event': 'solar_headroom', 'reason': reason,
+                               'trace_id': self.saved.get('discovery_id')})
+            except Exception:
+                pass
 
     def permits(self):
         return bool(self.current() and self.lease and self.phase in {"discovery", "trial"}
@@ -159,22 +171,27 @@ class SolarEVHeadroom:
         """Only the EV decision loop may request a lease; price polling cannot."""
         async with self.lock:
             if not self.current() or self.lease or self.saved.get("pending"):
+                self._diagnostic('headroom_busy')
                 return False
             try:
                 not_before = datetime.fromisoformat(self.saved["not_before"])
                 if self.utcnow() < not_before:
+                    self._diagnostic('headroom_cooldown')
                     return False
             except (KeyError, TypeError, ValueError):
                 if self.saved:
                     self.error = "invalid retained headroom budget"
+                    self._diagnostic('headroom_invalid_budget')
                     return False
             if self.saved and self.saved.get("identity") != self.identity:
                 # Only a confirmed closed record may yield to a new source.
                 # Pending mutations were rejected above and remain retained.
                 self.saved = {}
             if not usable_discovery_sample(status, now=self.utcnow()):
+                self._diagnostic('headroom_sample_ineligible')
                 return False
             if not await self.eligible(candidate) or not self.current():
+                self._diagnostic('headroom_policy_ineligible')
                 return False
             # Bootstrap must fit the user's sustained-surplus timer as well as
             # the existing read/command window. This is a software permission
@@ -188,12 +205,14 @@ class SolarEVHeadroom:
             record = {
                 "identity": self.identity, "pending": True,
                 "vehicle_id": candidate[0], "owner_token": list(candidate[2]),
+                "discovery_id": uuid4().hex,
                 "not_before": (self.utcnow() + timedelta(seconds=max(900, duration * 6))).isoformat(),
             }
             try:
                 await self.persist(record)
             except Exception:
                 self.error = "could not persist pending headroom restoration"
+                self._diagnostic('headroom_persist_failed')
                 return False
             self.saved = record
             if (not self.current() or not await self.eligible(candidate)
@@ -216,9 +235,11 @@ class SolarEVHeadroom:
             except Exception:
                 opened = False
             if not opened or not self.permits():
+                self._diagnostic('headroom_open_failed')
                 await self._close_locked(abort=False)
                 return False
             self.lease["released_at"] = self.utcnow()
+            self._diagnostic('headroom_opened')
             return True
 
     async def command_started(self, candidate, target_power_kw=None):
@@ -226,7 +247,8 @@ class SolarEVHeadroom:
         async with self.lock:
             if not self.permits() or self.lease["candidate"] is not candidate or not await self.eligible(candidate):
                 return False
-            record = {**self.saved, "ev_abort_pending": True}
+            record = {**self.saved, "ev_abort_pending": True,
+                      "ev_abort_id": self.saved.get("ev_abort_id") or uuid4().hex}
             try:
                 await self.persist(record)
             except Exception:
@@ -236,6 +258,7 @@ class SolarEVHeadroom:
             if not self.permits() or not await self.eligible(candidate):
                 return False
             self.lease["ev_commanded"] = True
+            self._diagnostic('headroom_commanded')
             self.lease["commanded_at"] = self.utcnow()
             self.lease["target_power_kw"] = target_power_kw
             return True
@@ -276,6 +299,7 @@ class SolarEVHeadroom:
             lease["last_power"] = power_kw
             target = lease.get("target_power_kw")
             if lease["stable"] >= 2 or (target is not None and power_kw >= target * 0.8):
+                self._diagnostic('headroom_accepted')
                 await self._close_locked(abort=False)
 
     async def expire(self, expected_lease=None):
@@ -284,6 +308,7 @@ class SolarEVHeadroom:
             return
         if not self.lease and not self.saved.get("pending"):
             return
+        self._diagnostic('headroom_expired')
         self.phase = "closing"
         async with self.lock:
             if expected_lease is not None and self.lease is not expected_lease:
@@ -321,7 +346,10 @@ class SolarEVHeadroom:
         except Exception:
             closed = False
         abort_ok = True
-        if abort and (self.saved.get("ev_abort_pending") or (self.lease and self.lease.get("ev_commanded"))):
+        receipt_verified = bool(abort and self.receipt(self.saved))
+        if receipt_verified:
+            self._diagnostic('headroom_stop_verified')
+        if abort and (self.saved.get("ev_abort_pending") or (self.lease and self.lease.get("ev_commanded"))) and not receipt_verified:
             # The EV loop owns its command lock before entering this runtime.
             # Timer cleanup must not hold our lock while waiting for that same
             # command lock. Permission is already revoked, admission remains
@@ -344,6 +372,7 @@ class SolarEVHeadroom:
                 return
             if not abort_ok:
                 self.error = "EV trial stop remains unconfirmed"
+                self._diagnostic('headroom_abort_unconfirmed')
                 self.saved = {**self.saved, "ev_abort_pending": True}
                 try:
                     await self.persist(self.saved)
@@ -351,6 +380,7 @@ class SolarEVHeadroom:
                     pass  # The original pending native mutation is retained.
         if not self.current() or not closed:
             self.error = "native export-limit restoration remains pending"
+            self._diagnostic('headroom_restore_unconfirmed')
             return
         if not abort_ok:
             return
@@ -364,3 +394,4 @@ class SolarEVHeadroom:
         self.lease = None
         self.phase = "cooldown"
         self.error = None
+        self._diagnostic('headroom_closed')

@@ -36,6 +36,77 @@ def record():
             'alerted': False}
 
 
+def test_settlement_saves_matching_headroom_receipt_atomically():
+    m = module()
+    async def run():
+        store = Store({'automations': [], 'solar_ev_headroom_recovery': {
+            'entry': {'pending': True, 'ev_abort_pending': True, 'ev_abort_id': 'abort-1',
+                      'vehicle_id': 'generic_ev'}}})
+        rec = dict(record(), binding_id='generic_ev', headroom_abort_id='abort-1')
+        saved = await m.upsert_pending_stop(store, 'generic_ev', rec, expected_generation=None, expected_revision=None)
+        await m.settle_pending_stop(store, 'generic_ev', expected_generation=saved['generation'],
+                                    expected_revision=saved['revision'], entry_id='entry')
+        assert store.saved['_shared_pending_stops'] == {}
+        assert store.saved['solar_ev_headroom_recovery']['entry']['ev_abort_verified'] == 'abort-1'
+        assert await m.load_pending_stop(Store(json.loads(json.dumps(store.saved))), 'generic_ev') is None
+    asyncio.run(run())
+
+
+def test_mismatched_headroom_receipt_retains_stop_fence():
+    m = module()
+    async def run():
+        store = Store({'automations': [], 'solar_ev_headroom_recovery': {
+            'entry': {'pending': True, 'ev_abort_pending': True, 'ev_abort_id': 'newer',
+                      'vehicle_id': 'generic_ev'}}})
+        saved = await m.upsert_pending_stop(store, 'generic_ev',
+            dict(record(), binding_id='generic_ev', headroom_abort_id='old'),
+            expected_generation=None, expected_revision=None)
+        with pytest.raises(m.PendingStopConflict):
+            await m.settle_pending_stop(store, 'generic_ev', expected_generation=saved['generation'],
+                                        expected_revision=saved['revision'], entry_id='entry')
+        assert await m.load_pending_stop(store, 'generic_ev') == saved
+        assert 'ev_abort_verified' not in store._data['solar_ev_headroom_recovery']['entry']
+    asyncio.run(run())
+
+
+def test_headroom_receipt_save_failure_rolls_back_both_records():
+    m = module()
+    class ToggleStore(Store):
+        fail = False
+        async def async_save(self):
+            if self.fail: raise OSError('storage failure')
+            await super().async_save()
+    async def run():
+        store = ToggleStore({'automations': [], 'solar_ev_headroom_recovery': {
+            'entry': {'pending': True, 'ev_abort_pending': True, 'ev_abort_id': 'a', 'vehicle_id': 'generic_ev'}}})
+        saved = await m.upsert_pending_stop(store, 'generic_ev',
+            dict(record(), binding_id='generic_ev', headroom_abort_id='a'), expected_generation=None, expected_revision=None)
+        store.fail = True
+        with pytest.raises(OSError):
+            await m.settle_pending_stop(store, 'generic_ev', expected_generation=saved['generation'],
+                                        expected_revision=saved['revision'], entry_id='entry')
+        assert store._data['_shared_pending_stops']['generic_ev'] == saved
+        assert 'ev_abort_verified' not in store._data['solar_ev_headroom_recovery']['entry']
+        assert (await m.load_pending_stop(Store(store.saved), 'generic_ev')) == saved
+    asyncio.run(run())
+
+
+def test_stale_headroom_write_cannot_erase_verified_receipt():
+    m = module()
+    async def run():
+        store = Store({'automations': [], 'solar_ev_headroom_recovery': {
+            'entry': {'pending': True, 'ev_abort_pending': True, 'ev_abort_id': 'a', 'vehicle_id': 'generic_ev'}}})
+        stale = dict(store._data['solar_ev_headroom_recovery']['entry'])
+        stop = await m.upsert_pending_stop(store, 'generic_ev',
+            dict(record(), binding_id='generic_ev', headroom_abort_id='a'),
+            expected_generation=None, expected_revision=None)
+        await m.settle_pending_stop(store, 'generic_ev', expected_generation=stop['generation'],
+                                    expected_revision=stop['revision'], entry_id='entry')
+        await m.save_headroom(store, 'entry', stale)
+        assert store.saved['solar_ev_headroom_recovery']['entry']['ev_abort_verified'] == 'a'
+    asyncio.run(run())
+
+
 def test_write_ahead_roundtrip():
     m = module()
     async def run():

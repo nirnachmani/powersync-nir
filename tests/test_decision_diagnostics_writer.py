@@ -17,6 +17,30 @@ def load_writer():
     return module
 
 
+def test_headroom_lifecycle_reaches_real_writer(tmp_path):
+    from test_solar_ev_headroom import Site
+    module = load_writer()
+    async def exercise():
+        writer = module.AsyncDecisionWriter(tmp_path)
+        writer.start()
+        site = Site()
+        site.runtime.diagnose = lambda event: writer.emit('ev', event)
+        assert await site.runtime.request(site.candidate, site.status())
+        assert await site.runtime.command_started(site.candidate)
+        site.abort_ok = False
+        await site.runtime.expire()
+        await writer.close()
+    asyncio.run(exercise())
+    rows = [json.loads(x) for x in next(tmp_path.glob('ev-*.jsonl')).read_text().splitlines()]
+    reasons = [x.get('reason') for x in rows]
+    assert 'headroom_opened' in reasons
+    assert 'headroom_commanded' in reasons
+    assert 'headroom_expired' in reasons
+    assert 'headroom_abort_unconfirmed' in reasons
+    trace_ids = {r['trace_id'] for r in rows if r.get('reason', '').startswith('headroom_')}
+    assert len(trace_ids) == 1
+
+
 def test_entry_diagnostics_use_nas_directory(tmp_path):
     from types import SimpleNamespace
     module = load_writer()

@@ -44,6 +44,102 @@ def rig(monkeypatch):
     actions._dynamic_ev_state.clear()
 
 
+@pytest.mark.parametrize('restart', [False, True])
+@pytest.mark.parametrize('backend', ['generic', 'sigenergy'])
+def test_headroom_shared_stop_records_receipt_and_releases_after_observation(rig, monkeypatch, backend, restart):
+    from power_sync.solar_ev_headroom import SolarEVHeadroom, candidate_token
+    physical = 'generic_ev' if backend == 'generic' else 'sigenergy_charger'
+    if backend == 'sigenergy':
+        rig.entry.options = {**rig.entry.options, 'generic_charger_enabled': False,
+            'sigenergy_charger_enabled': True, 'sigenergy_charger_type': 'evac',
+            'sigenergy_charger_host': 'charger.invalid'}
+        rig.runtime['params']['charger_type'] = 'sigenergy'
+        actions._dynamic_ev_state[rig.entry.entry_id] = {physical: rig.runtime}
+        ownership.release_ev_ownership(rig.hass, rig.entry, 'generic_ev', command='stop', success=True)
+        ownership.claim_ev_ownership(rig.hass, rig.entry, physical, owner_mode='solar_surplus',
+                                     extra={'active_profile_id': 'shared_ev_profile_a'})
+        class Controller:
+            async def connect(self): return True
+            async def stop_charging(self): return self._shared_write_authorized()
+            async def disconnect(self): pass
+            _read_input_registers = AsyncMock(return_value=None)
+        controller = Controller()
+        monkeypatch.setattr(actions, '_new_sigenergy_charger', lambda config: controller)
+    async def scenario():
+        store = rig.hass.data['power_sync'][rig.entry.entry_id]['automation_store']
+        clock = datetime.now(timezone.utc)
+        state = rig.runtime
+        candidate = (physical, state, candidate_token(state))
+        async def persist(record):
+            from power_sync.automations.shared_stop_storage import save_headroom
+            await save_headroom(store, rig.entry.entry_id, record)
+        import ast
+        source = (__import__('pathlib').Path(__file__).parents[1] /
+                  'custom_components/power_sync/__init__.py').read_text()
+        callback = next(n for n in ast.walk(ast.parse(source))
+                        if isinstance(n, ast.AsyncFunctionDef) and n.name == '_abort_headroom_trial')
+        scope = {'__package__': 'power_sync', 'hass': rig.hass, 'entry': rig.entry,
+                 '_headroom_current': lambda: True, '_is_monitoring_mode': lambda: False,
+                 'candidate_token': candidate_token, 'dt_util': SimpleNamespace(utcnow=lambda: datetime.now(timezone.utc))}
+        exec(compile(ast.Module(body=[callback], type_ignores=[]), '<headroom-callback>', 'exec'), scope)
+        async def abort(lease):
+            return await scope['_abort_headroom_trial'](lease)
+        async def reconcile(*, opening): return True
+        async def eligible(c): return c is candidate
+        runtime = SolarEVHeadroom(identity=['site'], saved=None, persist=persist,
+            eligible=eligible, reconcile=reconcile, abort=abort,
+            schedule=lambda *args: lambda: None, current=lambda: True, utcnow=lambda: clock)
+        scope['headroom_runtime'] = runtime
+        runtime.receipt = lambda saved: (store._data['solar_ev_headroom_recovery'][rig.entry.entry_id]
+            .get('ev_abort_verified') == saved.get('ev_abort_id'))
+        status = {'battery_soc':100, 'solar_power':1000, 'grid_power':0,
+                  'battery_power':0, 'native_zero_export':True, 'site_observed_at':clock}
+        assert await runtime.request(candidate, status)
+        assert await runtime.command_started(candidate)
+        await runtime.close()
+        assert runtime.saved['pending']
+        pending = state['pending_stop']
+        assert pending['record']['headroom_abort_id'] == runtime.saved['ev_abort_id']
+        original_commands = rig.hass.services.async_call.await_count
+        await runtime.recover()
+        assert rig.hass.services.async_call.await_count == original_commands
+        if restart:
+            import copy
+            rig.hass.data['power_sync'][rig.entry.entry_id]['automation_store'] = store = Store(copy.deepcopy(store.saved))
+            actions._dynamic_ev_state.clear()
+            ownership.release_ev_ownership(rig.hass, rig.entry, physical, command='stop', success=True)
+            await actions.async_load_pending_shared_stops(rig.hass, rig.entry)
+            state = actions._dynamic_ev_state[rig.entry.entry_id][physical]
+            pending = state['pending_stop']
+            runtime = SolarEVHeadroom(identity=['site'],
+                saved=store._data['solar_ev_headroom_recovery'][rig.entry.entry_id],
+                persist=persist, eligible=eligible, reconcile=reconcile, abort=abort,
+                schedule=lambda *args: lambda: None, current=lambda: True, utcnow=lambda: clock)
+            scope['headroom_runtime'] = runtime
+            runtime.receipt = lambda saved: (store._data['solar_ev_headroom_recovery'][rig.entry.entry_id]
+                .get('ev_abort_verified') == saved.get('ev_abort_id'))
+            await runtime.recover()
+            assert runtime.saved['pending']
+            assert rig.hass.services.async_call.await_count == original_commands
+        rig.power.state = '0'
+        rig.power.last_reported = (datetime.fromisoformat(pending['record']['dispatch_at']) if restart
+                                   else pending['dispatch_at'])
+        await actions.async_reconcile_pending_shared_stops(rig.hass, rig.entry)
+        assert state.get('pending_stop') is pending
+        rig.power.last_reported = datetime.now(timezone.utc)
+        if backend == 'sigenergy':
+            controller._read_input_registers.return_value = [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        await actions.async_reconcile_pending_shared_stops(rig.hass, rig.entry)
+        if restart:
+            assert physical not in actions._dynamic_ev_state.get(rig.entry.entry_id, {})
+        else:
+            assert not state.get('pending_stop')
+        assert store.saved['solar_ev_headroom_recovery'][rig.entry.entry_id]['ev_abort_verified'] == runtime.saved['ev_abort_id']
+        await runtime.recover()
+        assert not runtime.saved['pending']
+    asyncio.run(scenario())
+
+
 def test_live_solar_surplus_enters_optimizer_even_when_old_window_was_zero(rig, monkeypatch):
     selector = rig.hass.states.get('sensor.connected_vehicle')
     selector.last_changed = datetime.now(timezone.utc) - timedelta(minutes=1)

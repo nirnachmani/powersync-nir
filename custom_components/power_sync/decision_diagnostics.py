@@ -144,7 +144,7 @@ class AsyncDecisionWriter:
         if self._closing or self._task is None:
             self.dropped += 1
             return False
-        if stream not in {'ev', 'optimizer'} or event.get('event') not in {'shared_opportunity_adoption', 'shared_opportunity_decision', 'smart_schedule_plan', 'pause', 'solve', 'first', 'lost', 'shared_pause_requested', 'battery_target_decision', 'solar_export_slot', 'solar_export_budget', 'solar_battery_floor', 'solar_rate_decision', 'dynamic_stop_requested', 'dynamic_stop_result', 'stop_observation', 'price_level_decision', 'smart_schedule_decision', 'ownership_claimed', 'ownership_released', 'ev_command', 'ownership_blocked', 'shared_policy_decision', 'shared_observation', 'optimizer_action', 'optimizer_action_result', 'command_handler_requested', 'command_handler_result', 'price_level_result', 'smart_schedule_policy', 'solar_production_state', 'sigenergy_curtailment_decision', 'sigenergy_curtailment_result', 'scheduled_policy', 'scheduled_price', 'solar_export_summary', 'smart_schedule_window', 'ownership_stop_blocked'}:
+        if stream not in {'ev', 'optimizer'} or event.get('event') not in {'solar_headroom', 'shared_opportunity_adoption', 'shared_opportunity_decision', 'smart_schedule_plan', 'pause', 'solve', 'first', 'lost', 'shared_pause_requested', 'battery_target_decision', 'solar_export_slot', 'solar_export_budget', 'solar_battery_floor', 'solar_rate_decision', 'dynamic_stop_requested', 'dynamic_stop_result', 'stop_observation', 'price_level_decision', 'smart_schedule_decision', 'ownership_claimed', 'ownership_released', 'ev_command', 'ownership_blocked', 'shared_policy_decision', 'shared_observation', 'optimizer_action', 'optimizer_action_result', 'command_handler_requested', 'command_handler_result', 'price_level_result', 'smart_schedule_policy', 'solar_production_state', 'sigenergy_curtailment_decision', 'sigenergy_curtailment_result', 'scheduled_policy', 'scheduled_price', 'solar_export_summary', 'smart_schedule_window', 'ownership_stop_blocked'}:
             self.dropped += 1
             self._warn_health()
             return False
@@ -290,6 +290,12 @@ class AsyncDecisionWriter:
             snapshot['requested_mode'] = event['requested_mode']
         if event.get('owner_mode') in {'solar_surplus', 'smart_schedule', 'smart_schedule_solar_surplus', 'price_level_recovery', 'price_level_opportunity', 'scheduled', 'price_level', 'manual', 'external', 'dynamic'}:
             snapshot['owner_mode'] = event['owner_mode']
+        if event.get('event') == 'solar_headroom' and event.get('reason') in {
+            'headroom_busy', 'headroom_cooldown', 'headroom_invalid_budget', 'headroom_sample_ineligible',
+            'headroom_policy_ineligible', 'headroom_persist_failed', 'headroom_open_failed',
+            'headroom_opened', 'headroom_commanded', 'headroom_accepted', 'headroom_expired',
+            'headroom_abort_unconfirmed', 'headroom_restore_unconfirmed', 'headroom_stop_verified', 'headroom_closed'}:
+            snapshot['reason'] = event['reason']
         if event.get('reason') in {'selected', 'grid_export_limit_blocked', 'insufficient_solar_surplus',
                                     'battery_headroom_exhausted', 'hard_charge_block',
                                     'non_positive_export_price', 'insufficient_cheaper_replenishment',

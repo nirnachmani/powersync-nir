@@ -29,7 +29,7 @@ _FIELDS = frozenset({"generation", "binding_id", "profile_id", "owner_mode", "se
                      "first_attempt_at", "attempt_count", "last_status", "last_attempt_at",
                      "parameters", "alerted", "revision"})
 _OPTIONAL_FIELDS = frozenset({"binding_snapshot", "dispatch_at", "owner_kind",
-                              "observed_session_token", "resolver_stop_lease_token"})
+                              "observed_session_token", "resolver_stop_lease_token", "headroom_abort_id"})
 _IMMUTABLE = ("generation", "binding_id", "profile_id", "owner_mode", "session_id",
               "first_attempt_at", "parameters")
 _LOCK_ATTR = "_shared_pending_stop_lock"
@@ -80,7 +80,7 @@ def _validate(record: Any) -> None:
         raise MalformedPendingStop("invalid binding snapshot")
     if record.get("owner_kind") not in (None, "external", "powersync"):
         raise MalformedPendingStop("invalid owner kind")
-    for name in ("observed_session_token", "resolver_stop_lease_token"):
+    for name in ("observed_session_token", "resolver_stop_lease_token", "headroom_abort_id"):
         if record.get(name) is not None and (not isinstance(record[name], str) or not record[name] or record[name] != record[name].strip()):
             raise MalformedPendingStop(f"invalid {name}")
 
@@ -191,7 +191,7 @@ async def upsert_pending_stop(store: Any, physical_id: str, record: dict, *,
                 raise PendingStopConflict("episode identity or original parameters changed")
             if candidate.get("binding_snapshot") != current.get("binding_snapshot") or (current.get("dispatch_at") is not None and candidate.get("dispatch_at") != current.get("dispatch_at")):
                 raise PendingStopConflict("binding or dispatch timestamp changed")
-            if any(candidate.get(name) != current.get(name) for name in ("owner_kind", "observed_session_token", "resolver_stop_lease_token")):
+            if any(candidate.get(name) != current.get(name) for name in ("owner_kind", "observed_session_token", "resolver_stop_lease_token", "headroom_abort_id")):
                 raise PendingStopConflict("external episode identity changed")
             if candidate["attempt_count"] < current["attempt_count"] or datetime.fromisoformat(candidate["last_attempt_at"]) < datetime.fromisoformat(current["last_attempt_at"]):
                 raise PendingStopConflict("attempt history moved backwards")
@@ -215,3 +215,74 @@ async def delete_pending_stop(store: Any, physical_id: str, *, expected_generati
         replacement = dict(records)
         del replacement[physical_id]
         await _save(store, True, store._data[STORAGE_KEY], replacement)
+
+
+async def save_headroom(store: Any, entry_id: str, record: dict) -> None:
+    """Serialize headroom updates with pending-stop receipt settlement."""
+    async with _store_parts(store):
+        _store_parts(store)
+        old_present = 'solar_ev_headroom_recovery' in store._data
+        old = store._data.get('solar_ev_headroom_recovery', {})
+        if not isinstance(old, dict):
+            raise PendingStopError('invalid headroom namespace')
+        previous = old.get(entry_id)
+        value = dict(record)
+        if (isinstance(previous, dict) and previous.get('ev_abort_id')
+                and previous.get('ev_abort_id') == value.get('ev_abort_id')
+                and previous.get('ev_abort_verified') == value.get('ev_abort_id')):
+            value['ev_abort_verified'] = value['ev_abort_id']
+        replacement = dict(old)
+        replacement[entry_id] = value
+        store._data['solar_ev_headroom_recovery'] = replacement
+        try:
+            await store.async_save()
+        except BaseException:
+            if store._data.get('solar_ev_headroom_recovery') is replacement:
+                if old_present:
+                    store._data['solar_ev_headroom_recovery'] = old
+                else:
+                    store._data.pop('solar_ev_headroom_recovery', None)
+            setattr(store, _POISON_ATTR, True)
+            raise
+
+
+async def settle_pending_stop(store: Any, physical_id: str, *, expected_generation: str,
+                              expected_revision: int, entry_id: str) -> None:
+    """Atomically retain a matching headroom receipt before deleting a stop."""
+    _id(physical_id)
+    async with _store_parts(store):
+        _store_parts(store)
+        records = _records(store)
+        current = records.get(physical_id)
+        if (current is None or current['generation'] != expected_generation
+                or type(expected_revision) is not int or current['revision'] != expected_revision):
+            raise PendingStopConflict('stale or missing episode')
+        abort_id = current.get('headroom_abort_id')
+        if not abort_id:
+            replacement = dict(records)
+            del replacement[physical_id]
+            await _save(store, True, store._data[STORAGE_KEY], replacement)
+            return
+        old_headrooms = store._data.get('solar_ev_headroom_recovery')
+        headroom = old_headrooms.get(entry_id) if isinstance(old_headrooms, dict) else None
+        if (not isinstance(headroom, dict) or not headroom.get('pending')
+                or not headroom.get('ev_abort_pending')
+                or headroom.get('ev_abort_id') != abort_id
+                or headroom.get('vehicle_id') != physical_id):
+            raise PendingStopConflict('headroom episode does not match stop')
+        old_stops = store._data[STORAGE_KEY]
+        new_stops = dict(records)
+        del new_stops[physical_id]
+        new_headrooms = dict(old_headrooms)
+        new_headrooms[entry_id] = {**headroom, 'ev_abort_verified': abort_id}
+        store._data[STORAGE_KEY] = new_stops
+        store._data['solar_ev_headroom_recovery'] = new_headrooms
+        try:
+            await store.async_save()
+        except BaseException:
+            if store._data.get(STORAGE_KEY) is new_stops:
+                store._data[STORAGE_KEY] = old_stops
+            if store._data.get('solar_ev_headroom_recovery') is new_headrooms:
+                store._data['solar_ev_headroom_recovery'] = old_headrooms
+            setattr(store, _POISON_ATTR, True)
+            raise

@@ -273,6 +273,24 @@ def test_failed_closure_survives_restart_without_resuming_permission():
     asyncio.run(scenario())
 
 
+def test_matching_receipt_retires_pending_abort_after_restart_without_stop():
+    site = Site()
+    async def scenario():
+        site.abort_ok = False
+        assert await site.runtime.request(site.candidate, site.status())
+        assert await site.runtime.command_started(site.candidate)
+        await site.runtime.close()
+        abort_id = site.saved['ev_abort_id']
+        site.saved['ev_abort_verified'] = abort_id
+        restarted = site.make_runtime()
+        restarted.receipt = lambda saved: site.saved.get('ev_abort_verified') == saved.get('ev_abort_id')
+        before = site.calls.count('trial-cleanup')
+        await restarted.recover()
+        assert site.calls.count('trial-cleanup') == before
+        assert not site.saved['pending']
+    asyncio.run(scenario())
+
+
 def test_unconfirmed_trial_cleanup_remains_pending_after_native_closure():
     site = Site()
 

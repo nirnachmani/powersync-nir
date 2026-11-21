@@ -43290,18 +43290,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async def _persist_headroom(record):
             if not _headroom_current():
                 raise RuntimeError("Headroom entry was replaced")
-            records = automation_store._data.setdefault(_headroom_key, {})
-            previous = records.get(entry.entry_id)
-            records[entry.entry_id] = record
-            try:
-                await automation_store.async_save()
-            except Exception:
-                if records.get(entry.entry_id) is record:
-                    if previous is None:
-                        records.pop(entry.entry_id, None)
-                    else:
-                        records[entry.entry_id] = previous
-                raise
+            from .automations.shared_stop_storage import save_headroom
+            await save_headroom(automation_store, entry.entry_id, record)
 
         async def _headroom_eligible(candidate):
             from .automations.actions import _dynamic_ev_state
@@ -43371,13 +43361,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if _is_monitoring_mode():
                 return False
             if state is None:
-                # Session teardown retains any uncertain command in its existing
-                # recovery journal. This path never retires that EV evidence.
-                return not lease.get("candidate")
+                # Absence of a runtime is not proof a dispatched stop settled.
+                return False
             if (candidate and state is not candidate[1]) or candidate_token(state) != token:
                 return False
             if not state.get("active"):
-                return not state.get("stop_outcome")
+                return False
+            if state.get("pending_stop"):
+                return False
             safe_amps = max(0, min(int(lease.get("baseline_amps", 0)), int(lease.get("safe_amps", 0))))
             from .automations.actions import _effective_min_charge_amps
             if 0 < safe_amps < _effective_min_charge_amps(state.get("params") or {}, hass):
@@ -43385,7 +43376,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             state["target_amps"] = safe_amps
             state["stop_outcome"] = {"status": "pending", "requested_at": dt_util.utcnow(),
                                      "reason": "Solar headroom trial ended; awaiting result"}
-            success = await _set_vehicle_amps(hass, entry, vehicle_id, safe_amps, state.get("params") or {})
+            _abort_id = (headroom_runtime.saved.get("ev_abort_id") if headroom_runtime else None)
+            if safe_amps == 0 and (state.get("params") or {}).get("shared_loadpoint_binding"):
+                if not _abort_id:
+                    return False  # Legacy recovery lacks an exact receipt identity.
+                success = await _set_vehicle_amps(hass, entry, vehicle_id, safe_amps,
+                    state.get("params") or {}, headroom_abort_id=_abort_id)
+            else:
+                success = await _set_vehicle_amps(hass, entry, vehicle_id, safe_amps, state.get("params") or {})
             if not _headroom_current() or (_dynamic_ev_state.get(entry.entry_id) or {}).get(vehicle_id) is not state:
                 return False
             if success:
@@ -43407,6 +43405,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 reconcile=_headroom_reconcile, abort=_abort_headroom_trial,
                 schedule=_schedule_headroom_expiry, current=_headroom_current,
             )
+            def _headroom_receipt(saved):
+                recorded = (automation_store._data.get(_headroom_key) or {}).get(entry.entry_id) or {}
+                abort_id = saved.get('ev_abort_id')
+                return bool(abort_id and recorded.get('pending') and
+                            recorded.get('vehicle_id') == saved.get('vehicle_id') and
+                            recorded.get('ev_abort_id') == abort_id and
+                            recorded.get('ev_abort_verified') == abort_id)
+            headroom_runtime.receipt = _headroom_receipt
+            _headroom_observer = _headroom_entry.get('decision_diagnostics')
+            if _headroom_observer is not None:
+                headroom_runtime.diagnose = lambda event: _headroom_observer.emit('ev', event)
             _headroom_entry["solar_ev_headroom"] = headroom_runtime
             await headroom_runtime.recover()
 
