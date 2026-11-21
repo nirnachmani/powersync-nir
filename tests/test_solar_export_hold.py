@@ -99,6 +99,73 @@ class _Adapter:
         }
 
 
+import pytest
+
+
+@pytest.mark.parametrize('limit,expected', [(5.0, True), (0.0, False), (None, False), (float('nan'), False)])
+def test_sigenergy_hold_write_refuses_zero_export_limit_at_hardware_boundary(limit, expected):
+    class Controller:
+        def __init__(self):
+            self.writes = []
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            pass
+        async def get_grid_export_limit_kw(self):
+            return limit
+        async def set_charge_rate_limit(self, value):
+            self.writes.append(value)
+            return True
+    device = Controller()
+    adapter = _MODULE.SolarExportChargeHoldAdapter('sigenergy', SimpleNamespace(_controller=device))
+    assert asyncio.run(adapter._write_target({'id': 'battery', 'value': 5.0}, hold=True)) is expected
+    assert device.writes == ([0.0] if expected else [])
+
+
+def test_sigenergy_hold_rechecks_dc_owner_after_live_limit_read():
+    state = {'sigenergy_export_limit_owner': 'normal'}
+    class Controller:
+        writes = []
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get_grid_export_limit_kw(self):
+            state['sigenergy_export_limit_owner'] = 'dc_zero'
+            return 5.0
+        async def set_charge_rate_limit(self, value):
+            self.writes.append(value)
+            return True
+    device = Controller()
+    coordinator = SimpleNamespace(_controller=device, _entry_id='entry',
+        hass=SimpleNamespace(data={'power_sync': {'entry': state}}))
+    adapter = _MODULE.SolarExportChargeHoldAdapter('sigenergy', coordinator)
+    assert not asyncio.run(adapter._write_target({'id': 'ess', 'value': 5.0}, hold=True))
+    assert device.writes == []
+
+
+def test_real_sigenergy_hold_lifecycle_compensates_when_export_closes_before_write():
+    class Device:
+        def __init__(self):
+            self.charge = 5.0
+            self.writes = []
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def get_grid_export_limit_kw(self): return None
+        async def get_charge_rate_limit_kw(self): return self.charge
+        async def set_charge_rate_limit(self, value):
+            self.writes.append(value)
+            self.charge = value
+            return True
+    device = Device()
+    coordinator = SimpleNamespace(_controller=device, data={'export_limit_kw': 5.0})
+    adapter = _MODULE.SolarExportChargeHoldAdapter('sigenergy', coordinator)
+    store = _Store()
+    hold = SolarExportHoldController(store, adapter)
+    assert not asyncio.run(hold.apply('entry', 'generation'))
+    assert 0.0 not in device.writes
+    assert device.charge == 5.0
+    assert not hold.active and store.data == {}
+
+
 def test_apply_is_idempotent_and_clear_removes_persisted_owner():
     store = _Store()
     adapter = _Adapter()

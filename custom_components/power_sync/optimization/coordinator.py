@@ -8833,9 +8833,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             planned_action,
             getattr(current_action, "timestamp", None),
         )
-        if not self._cached_solar_export_has_settled_feed_in_price(
+        check_active_hold = bool(
+            action_name == "solar_export"
+            and getattr(getattr(self, "_solar_export_hold", None), "active", False)
+        )
+        if (not self._cached_solar_export_has_settled_feed_in_price(
             current_action, action_name
-        ):
+        ) and not check_active_hold and not (action_name == "solar_export" and self._solar_export_blocked_by_current_export())):
             _LOGGER.info(
                 "Optimizer: deferring cached solar_export until the settled "
                 "feed-in price for its current interval is available"
@@ -8843,6 +8847,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
         if (
             action_name == getattr(self, "_last_executed_action", None)
+            and not check_active_hold
+            and not (action_name == "solar_export" and self._solar_export_blocked_by_current_export())
             and (
                 action_name not in FORCED_ACTIONS
                 or self._boundary_execution_matches_action(current_action, action_name)
@@ -8868,6 +8874,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         async with execute_lock:
             if (
                 action_name == getattr(self, "_last_executed_action", None)
+                and not (action_name == "solar_export" and getattr(getattr(self, "_solar_export_hold", None), "active", False))
+                and not (action_name == "solar_export" and self._solar_export_blocked_by_current_export())
                 and (
                     action_name not in FORCED_ACTIONS
                     or self._boundary_execution_matches_action(current_action, action_name)
@@ -8886,6 +8894,55 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if applied_action == action_name or applied_action != previous_action:
                 self._record_boundary_execution(current_action, applied_action)
 
+    def _solar_export_blocked_by_current_export(self) -> bool:
+        """Recognize an observed zero limit or the active DC-zero owner."""
+        if getattr(self, "battery_system", None) != "sigenergy":
+            return False
+        data = getattr(getattr(self, "hass", None), "data", {}) or {}
+        state = data.get("power_sync", {}).get(getattr(self, "entry_id", None), {})
+        return state.get("sigenergy_export_limit_owner") == "dc_zero"
+
+    async def _solar_export_live_zero(self) -> bool:
+        """Read an active Sigenergy hold's actual export limit without writes."""
+        if getattr(self, "battery_system", None) != "sigenergy":
+            return False
+        coordinator = getattr(self, "energy_coordinator", None)
+        controller = getattr(coordinator, "_controller", None)
+        read = getattr(controller, "_get_current_export_limit", None)
+        if not callable(read):
+            return False
+        try:
+            async with controller:
+                raw = await read()
+                return raw is not None and float(raw) == 0.0
+        except (TypeError, ValueError, OSError):
+            return False
+
+    def _settled_solar_export_earnings_cents(self, action: Any) -> float | None:
+        """Get the current interval's real feed-in earnings, not the forecast."""
+        slot_start = getattr(action, "timestamp", None)
+        if not isinstance(slot_start, datetime) or slot_start.tzinfo is None:
+            return None
+        interval = max(1, int(getattr(self._config, "interval_minutes", 5) or 5))
+        slot_end = slot_start + timedelta(minutes=interval)
+        data = getattr(getattr(self, "price_coordinator", None), "data", None)
+        current = data.get("current") if isinstance(data, dict) else None
+        if not isinstance(current, list):
+            return None
+        for row in current:
+            if not isinstance(row, dict) or row.get("channelType") != "feedIn":
+                continue
+            if row.get("type", "CurrentInterval") != "CurrentInterval":
+                continue
+            try:
+                end = datetime.fromisoformat(str(self._get_entry_end_time(row)).replace("Z", "+00:00"))
+                value = float(str(row.get("perKwh")))
+                if end.tzinfo is not None and end == slot_end and math.isfinite(value):
+                    return -value
+            except (TypeError, ValueError):
+                continue
+        return None
+
     def _cached_solar_export_has_settled_feed_in_price(
         self, action: Any, action_name: str
     ) -> bool:
@@ -8902,31 +8959,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ):
             return True
 
-        slot_start = getattr(action, "timestamp", None)
-        if not isinstance(slot_start, datetime):
-            return False
-        interval = max(1, int(getattr(self._config, "interval_minutes", 5) or 5))
-        slot_end = slot_start + timedelta(minutes=interval)
-        data = getattr(getattr(self, "price_coordinator", None), "data", None)
-        current = data.get("current") if isinstance(data, dict) else None
-        if not isinstance(current, list):
-            return False
-
-        for row in current:
-            if not isinstance(row, dict) or row.get("channelType") != "feedIn":
-                continue
-            if row.get("type", "CurrentInterval") != "CurrentInterval":
-                continue
-            end = self._get_entry_end_time(row)
-            try:
-                settled_end = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
-            except (TypeError, ValueError):
-                continue
-            if settled_end.tzinfo is None or slot_end.tzinfo is None:
-                continue
-            if settled_end == slot_end:
-                return True
-        return False
+        return self._settled_solar_export_earnings_cents(action) is not None
 
     def _boundary_execution_matches_action(
         self,
@@ -11517,6 +11550,41 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         runtime_action = self._effective_runtime_action(
             getattr(action, "action", None),
         )
+        if runtime_action == "self_consumption" and getattr(self, "_is_dynamic_pricing", False):
+            hold = getattr(self, "_solar_export_hold", None)
+            if (hold and hold.active
+                    and not self._monitoring_mode_active()
+                    and not self._cached_solar_export_has_settled_feed_in_price(action, "solar_export")
+                    and not self._solar_export_blocked_by_current_export()):
+                if not await self._solar_export_live_zero():
+                    return
+        if runtime_action == "solar_export":
+            force = self._get_active_force_state()
+            if force and force.get("active") and force.get("source", "user") != "optimizer":
+                return
+            hold = getattr(self, "_solar_export_hold", None)
+            live_zero = bool(hold and hold.active and await self._solar_export_live_zero())
+            force = self._get_active_force_state()
+            if force and force.get("active") and force.get("source", "user") != "optimizer":
+                return
+            if self._solar_export_blocked_by_current_export() or live_zero:
+                runtime_action = "self_consumption"
+            elif not self._cached_solar_export_has_settled_feed_in_price(action, runtime_action):
+                # Do not acknowledge or refresh an unpriced hold; an existing
+                # one remains until export is known blocked or price settles.
+                return
+            elif getattr(self, "battery_system", None) == "sigenergy" and getattr(self, "_is_dynamic_pricing", False):
+                entry = getattr(self, "_entry", None)
+                options = getattr(entry, "options", {}) or {}
+                data = getattr(entry, "data", {}) or {}
+                if options.get("sigenergy_dc_curtailment_enabled", data.get("sigenergy_dc_curtailment_enabled", False)):
+                    from ..curtailment_config import export_earnings_are_uneconomic
+                    state = self.hass.data.get("power_sync", {}).get(self.entry_id, {})
+                    earnings = self._settled_solar_export_earnings_cents(action)
+                    if earnings is not None and export_earnings_are_uneconomic(
+                        earnings, bool(state.get("sigenergy_curtail_export_uneconomic", False)), entry
+                    ):
+                        runtime_action = "self_consumption"
         battery_export_price_blocked = False
         min_export_price = normalize_min_export_price(
             getattr(self._config, "min_export_price", 0.0)
@@ -14490,6 +14558,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Select profitable solar deferrals with explicitly funded recharge."""
         n = min(len(import_prices), len(export_prices), len(solar), len(load))
         selected = [False] * n
+        # Project the same DC price policy over the forecast, carrying its
+        # hysteresis state forward rather than treating each slot independently.
+        dc_curtailment_slots = [False] * n
+        entry = getattr(self, "_entry", None)
+        options = getattr(entry, "options", {}) or {}
+        entry_config = getattr(entry, "data", {}) or {}
+        if (getattr(self, "battery_system", None) == "sigenergy"
+                and options.get("sigenergy_dc_curtailment_enabled",
+                                entry_config.get("sigenergy_dc_curtailment_enabled", False))):
+            from ..curtailment_config import export_earnings_are_uneconomic
+            data = getattr(getattr(self, "hass", None), "data", {}) or {}
+            state = data.get("power_sync", {}).get(getattr(self, "entry_id", None), {})
+            active = bool(state.get("sigenergy_curtail_export_uneconomic", False))
+            settlement = getattr(self, "_last_settlement_export_prices", None)
+            policy_prices = settlement if settlement and len(settlement) >= n else export_prices
+            for index in range(n):
+                active = export_earnings_are_uneconomic(float(policy_prices[index]) * 100, active, entry)
+                dc_curtailment_slots[index] = active
 
         def observe_early_summary(reason: str) -> None:
             try:
@@ -14717,6 +14803,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 }
 
         for idx in range(n - 1):
+            if dc_curtailment_slots[idx]:
+                _record_slot(idx, "dc_curtailment")
+                continue
             if remaining_headroom_kwh <= 1e-9:
                 for blocked_idx in range(idx, n - 1):
                     _record_slot(

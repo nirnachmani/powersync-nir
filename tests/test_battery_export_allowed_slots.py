@@ -51,6 +51,8 @@ _STUB_MODULE_NAMES = (
     "power_sync",
     "power_sync.coordinator",
     "power_sync.const",
+    "power_sync.curtailment_config",
+    "power_sync.tariff_utils",
     "power_sync.optimization",
     "power_sync.optimization.battery_optimizer",
     "power_sync.optimization.coordinator",
@@ -138,6 +140,14 @@ def _install_power_sync_stubs() -> None:
 
     const_module = types.ModuleType("power_sync.const")
     const_module.DOMAIN = "power_sync"
+    const_module.BATTERY_SYSTEM_ALPHAESS = 'alphaess'
+    const_module.BATTERY_SYSTEM_SIGENERGY = 'sigenergy'
+    const_module.BATTERY_SYSTEM_SOLAREDGE = 'solaredge'
+    const_module.CONF_ALPHAESS_DC_CURTAILMENT_ENABLED = 'alphaess_dc_curtailment_enabled'
+    const_module.CONF_SIGENERGY_DC_CURTAILMENT_ENABLED = 'sigenergy_dc_curtailment_enabled'
+    const_module.CONF_SOLAREDGE_DC_CURTAILMENT_ENABLED = 'solaredge_dc_curtailment_enabled'
+    const_module.CONF_BATTERY_CURTAILMENT_ENABLED = 'battery_curtailment_enabled'
+    const_module.CONF_BATTERY_SYSTEM = 'battery_system'
     const_module.CONF_SOLAR_NOWCAST_ENABLED = "solar_nowcast_enabled"
     const_module.DEFAULT_SOLAR_NOWCAST_ENABLED = False
     const_module.TESLA_LOCAL_CONTROL_MAX_AGE_SECONDS = 30
@@ -467,6 +477,31 @@ def test_profit_max_records_slot_reasons_and_future_funding(opt_module):
     )
     assert baseline == result
     assert coordinator._solar_export_capability_status == status_with_observer
+
+
+def test_profit_max_does_not_hold_for_forecast_dc_curtailed_export(opt_module):
+    coordinator = _sigenergy_profit_max_coordinator(opt_module)
+    coordinator._entry.options.update({"sigenergy_dc_curtailment_enabled": True, "curtailment_export_threshold_cents": 2.0})
+    slots = coordinator._profit_max_solar_export_slots(
+        import_prices=[0.40, 0.0, 0.40], export_prices=[0.0087, 0.001, 0.20],
+        solar=[5.0, 0.0, 0.0], load=[1.0]*3, current_soc=0.5,
+        hard_charge_blocks=[False]*3, grid_charge_allowed=[True]*3,
+    )
+    assert slots[0] is False
+    assert coordinator._solar_export_capability_status['current_slot']['reason'] == 'dc_curtailment'
+
+
+def test_forecast_hold_uses_curtailment_release_hysteresis_and_real_prices(opt_module):
+    coordinator = _sigenergy_profit_max_coordinator(opt_module)
+    coordinator._entry.options.update({'sigenergy_dc_curtailment_enabled': True, 'curtailment_export_threshold_cents': 2.0})
+    coordinator.hass.data['power_sync'] = {'entry-1': {'sigenergy_curtail_export_uneconomic': True}}
+    coordinator._last_settlement_export_prices = [0.021, 0.023, 0.001, 0.20]
+    slots = coordinator._profit_max_solar_export_slots(
+        import_prices=[.4, .4, 0., .4], export_prices=[.50, .50, .001, .20],
+        solar=[5., 5., 0., 0.], load=[1.]*4, current_soc=.5,
+        hard_charge_blocks=[False]*4, grid_charge_allowed=[True]*4)
+    assert slots[:2] == [False, True]
+    assert coordinator._solar_export_capability_status['current_slot']['reason'] == 'dc_curtailment'
 
 
 def test_profit_max_solar_export_requires_cheaper_reachable_recharge(opt_module):
@@ -5628,6 +5663,151 @@ def test_solar_export_action_records_effective_only_after_hold_confirmation(opt_
     assert battery.force_discharge_calls == []
 
 
+def test_fresh_solar_export_waits_at_unsettled_dynamic_boundary(opt_module):
+    coordinator = _execution_coordinator(opt_module, _FakeBattery(), soc=0.5)
+    coordinator._is_dynamic_pricing = True
+    coordinator.price_coordinator = SimpleNamespace(data={'current': []})
+    hold = _FakeSolarExportHold()
+    coordinator._solar_export_hold = hold
+    action = SimpleNamespace(action='solar_export', power_w=4000,
+        timestamp=datetime(2026, 9, 12, 21, 35, tzinfo=timezone.utc))
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    assert hold.applied == []
+
+
+def test_confirmed_dc_curtailment_releases_active_solar_export_hold(opt_module):
+    coordinator = _execution_coordinator(opt_module, _FakeBattery(), soc=0.5)
+    coordinator.battery_system = 'sigenergy'
+    coordinator.hass.data['power_sync'] = {'entry-1': {'sigenergy_export_limit_owner': 'dc_zero'}}
+    hold = _FakeSolarExportHold()
+    hold.active = True
+    coordinator._solar_export_hold = hold
+    action = SimpleNamespace(action='solar_export', power_w=4000,
+        timestamp=datetime(2026, 9, 12, 21, 35, tzinfo=timezone.utc))
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    assert hold.cleared and not hold.active
+    assert hold.applied == []
+
+
+def test_unsettled_self_consumption_does_not_drop_active_hold_without_zero(opt_module):
+    coordinator = _execution_coordinator(opt_module, _FakeBattery(), soc=.5)
+    coordinator.battery_system = 'sigenergy'
+    coordinator._is_dynamic_pricing = True
+    coordinator.price_coordinator = SimpleNamespace(data={'current': []})
+    hold = _FakeSolarExportHold()
+    hold.active = True
+    coordinator._solar_export_hold = hold
+    action = SimpleNamespace(action='self_consumption', power_w=0,
+        timestamp=datetime(2026, 9, 12, 21, 35, tzinfo=timezone.utc))
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    assert hold.active and hold.cleared == []
+
+
+def test_unsettled_price_keeps_active_hold_when_live_export_positive(opt_module):
+    coordinator = _execution_coordinator(opt_module, _FakeBattery(), soc=.5)
+    coordinator.battery_system = 'sigenergy'
+    coordinator._is_dynamic_pricing = True
+    coordinator.price_coordinator = SimpleNamespace(data={'current': []})
+    class Controller:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def _get_current_export_limit(self): return 5000
+    coordinator.energy_coordinator = SimpleNamespace(_controller=Controller(), data={})
+    hold = _FakeSolarExportHold()
+    hold.active = True
+    coordinator._solar_export_hold = hold
+    action = SimpleNamespace(action='solar_export', power_w=4000,
+        timestamp=datetime(2026, 9, 12, 21, 35, tzinfo=timezone.utc))
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    assert hold.active and hold.cleared == [] and hold.applied == []
+
+
+def test_active_hold_clears_on_live_zero_even_when_owner_unknown(opt_module):
+    coordinator = _execution_coordinator(opt_module, _FakeBattery(), soc=0.5)
+    coordinator.battery_system = 'sigenergy'
+    class Controller:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def _get_current_export_limit(self): return 0
+    coordinator.energy_coordinator = SimpleNamespace(_controller=Controller(), data={})
+    hold = _FakeSolarExportHold()
+    hold.active = True
+    coordinator._solar_export_hold = hold
+    action = SimpleNamespace(action='solar_export', power_w=4000,
+        timestamp=datetime(2026, 9, 12, 21, 35, tzinfo=timezone.utc))
+    asyncio.run(coordinator._execute_optimizer_action(action))
+    assert hold.cleared and not hold.active
+
+
+def test_cached_unsettled_active_hold_rechecks_live_zero(opt_module):
+    coordinator = _execution_coordinator(opt_module, _FakeBattery(), soc=.5)
+    coordinator._enabled = True
+    coordinator.battery_system = 'sigenergy'
+    coordinator._is_dynamic_pricing = True
+    coordinator.price_coordinator = SimpleNamespace(data={'current': []})
+    coordinator._optimization_lock = asyncio.Lock()
+    coordinator._execute_lock = asyncio.Lock()
+    coordinator._last_executed_action = 'solar_export'
+    class Controller:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def _get_current_export_limit(self): return 0
+    coordinator.energy_coordinator = SimpleNamespace(_controller=Controller(), data={})
+    hold = _FakeSolarExportHold()
+    hold.active = True
+    coordinator._solar_export_hold = hold
+    action = SimpleNamespace(action='solar_export', power_w=4000,
+        timestamp=datetime(2026, 9, 12, 21, 35, tzinfo=timezone.utc))
+    coordinator._get_current_action = lambda: action
+    asyncio.run(coordinator._execute_cached_current_action_if_changed())
+    assert hold.cleared and not hold.active
+
+
+def test_cached_curtailment_releases_already_accepted_hold(opt_module):
+    coordinator = _execution_coordinator(opt_module, _FakeBattery(), soc=0.5)
+    coordinator._enabled = True
+    coordinator.battery_system = 'sigenergy'
+    coordinator._is_dynamic_pricing = True
+    coordinator.price_coordinator = SimpleNamespace(data={'current': []})
+    coordinator.hass.data['power_sync'] = {'entry-1': {'sigenergy_export_limit_owner': 'dc_zero'}}
+    coordinator._optimization_lock = asyncio.Lock()
+    coordinator._execute_lock = asyncio.Lock()
+    coordinator._last_executed_action = 'solar_export'
+    hold = _FakeSolarExportHold()
+    hold.active = True
+    coordinator._solar_export_hold = hold
+    action = SimpleNamespace(action='solar_export', power_w=4000,
+        timestamp=datetime(2026, 9, 12, 21, 35, tzinfo=timezone.utc))
+    coordinator._get_current_action = lambda: action
+    asyncio.run(coordinator._execute_cached_current_action_if_changed())
+    assert hold.cleared and not hold.active
+
+
+def test_fresh_hold_refuses_settled_price_below_dc_threshold_even_before_curtailment(opt_module):
+    coordinator = _execution_coordinator(opt_module, _FakeBattery(), soc=0.5)
+    coordinator.battery_system = 'sigenergy'
+    coordinator._entry.options.update({'sigenergy_dc_curtailment_enabled': True, 'curtailment_export_threshold_cents': 2.0})
+    coordinator._is_dynamic_pricing = True
+    start = datetime(2026, 9, 12, 21, 35, tzinfo=timezone.utc)
+    coordinator.price_coordinator = SimpleNamespace(data={'current': [{'channelType': 'feedIn', 'perKwh': -0.87, 'nemTime': (start + timedelta(minutes=5)).isoformat()}]})
+    hold = _FakeSolarExportHold()
+    coordinator._solar_export_hold = hold
+    asyncio.run(coordinator._execute_optimizer_action(SimpleNamespace(action='solar_export', power_w=4000, timestamp=start)))
+    assert hold.applied == []
+
+
+def test_dynamic_solar_hold_needs_finite_settled_price_not_only_interval(opt_module):
+    coordinator = _execution_coordinator(opt_module, _FakeBattery(), soc=0.5)
+    coordinator._is_dynamic_pricing = True
+    start = datetime(2026, 9, 12, 21, 35, tzinfo=timezone.utc)
+    action = SimpleNamespace(timestamp=start)
+    row = {'channelType': 'feedIn', 'type': 'CurrentInterval', 'nemTime': (start + timedelta(minutes=5)).isoformat()}
+    coordinator.price_coordinator = SimpleNamespace(data={'current': [row]})
+    assert not coordinator._cached_solar_export_has_settled_feed_in_price(action, 'solar_export')
+    row['perKwh'] = 2.5
+    assert coordinator._cached_solar_export_has_settled_feed_in_price(action, 'solar_export')
+
+
 def test_cached_dynamic_solar_export_waits_for_its_settled_feed_in_interval(opt_module):
     """A prior forecast must not block charging at an unpriced tariff boundary."""
     battery = _FakeBattery()
@@ -5645,6 +5825,7 @@ def test_cached_dynamic_solar_export_waits_for_its_settled_feed_in_interval(opt_
                 {
                     "channelType": "feedIn",
                     "type": "CurrentInterval",
+                    "perKwh": -2.5,
                     "nemTime": boundary.isoformat(),
                 }
             ]

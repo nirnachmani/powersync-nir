@@ -66,7 +66,7 @@ def _historical_ev_diff_is_allowlisted(actual: str, path: Path) -> bool:
 # Exact reviewed solar-funding, negative-import and EV opportunity changes.
 _SOLAR_HOLD_PREDECESSOR = "88679db3cd6e5d0a3a49444184e533bfc1ac78ea"
 _SOLAR_HOLD_DELTAS = {
-    COORDINATOR: "7cfe299b31777cde3f962f53459317a4010da31e7c3731f4bb1bb717eef71c33",
+    COORDINATOR: "5301ea2dce2cef6ea7139ef546fe375703a08951338c9a5857cbad224e920460",
     BATTERY_OPTIMIZER: "b8fd411aa7fce192166f59491fff8d1f2e3a65f75ed89d52868450c66a7bea14",
 }
 
@@ -965,6 +965,14 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
         elif relative_path in _HISTORICAL_EV_DELTAS:
             assert _git_show(_HISTORICAL_EV_PREDECESSOR, relative_path) == expected
             assert _historical_ev_diff_is_allowlisted(actual, relative_path)
+        elif relative_path == OPTIMIZATION / "solar_export.py":
+            diff = "\n".join(difflib.unified_diff(
+                expected.splitlines(), actual.splitlines(),
+                fromfile="baseline", tofile="solar_export", lineterm="",
+            ))
+            assert hashlib.sha256(diff.encode("utf-8")).hexdigest() == (
+                "284d3b4c0e64ff83d66965f0901750d4503e3c4b707719bd83ae0b94f91d21d7"
+            )
         elif relative_path == COST_NEUTRAL:
             assert _final_solar_credit_diff_is_allowlisted(actual)
         elif relative_path == LOAD_ESTIMATOR:

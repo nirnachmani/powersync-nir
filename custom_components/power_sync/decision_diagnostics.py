@@ -296,7 +296,7 @@ class AsyncDecisionWriter:
             'headroom_opened', 'headroom_commanded', 'headroom_accepted', 'headroom_expired',
             'headroom_abort_unconfirmed', 'headroom_restore_unconfirmed', 'headroom_stop_verified', 'headroom_closed'}:
             snapshot['reason'] = event['reason']
-        if event.get('reason') in {'selected', 'grid_export_limit_blocked', 'insufficient_solar_surplus',
+        if event.get('reason') in {'selected', 'grid_export_limit_blocked', 'dc_curtailment', 'insufficient_solar_surplus',
                                     'battery_headroom_exhausted', 'hard_charge_block',
                                     'non_positive_export_price', 'insufficient_cheaper_replenishment',
                                     'charge_by_time_target_protection', 'battery_below_pause_floor',

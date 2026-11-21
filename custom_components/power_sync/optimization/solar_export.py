@@ -485,6 +485,16 @@ class SolarExportChargeHoldAdapter:
         target_id = target.get("id")
         if self.system == "sigenergy":
             async with self.coordinator._controller:
+                if hold:
+                    limit = await self.coordinator._controller.get_grid_export_limit_kw()
+                    # Check ownership after the awaited read: the curtailment
+                    # decision can change while device I/O is in flight.
+                    hass_data = getattr(getattr(self.coordinator, "hass", None), "data", {}) or {}
+                    entry_id = getattr(self.coordinator, "_entry_id", None)
+                    state = hass_data.get("power_sync", {}).get(entry_id, {})
+                    if state.get("sigenergy_export_limit_owner") == "dc_zero" or _finite_positive(limit) is None:
+                        _LOGGER.info("Profit Max: refusing charge hold with zero or unavailable live export limit")
+                        return False
                 return bool(await self.coordinator._controller.set_charge_rate_limit(float(value)))
         if self.system == "sungrow":
             if hasattr(self.coordinator, "_coord1"):
