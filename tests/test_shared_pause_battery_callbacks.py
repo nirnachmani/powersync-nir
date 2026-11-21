@@ -660,6 +660,22 @@ def test_callback_started_before_settled_pause_cannot_resume(rig, monkeypatch, m
     asyncio.run(scenario())
 
 
+def test_solar_opt_out_uses_selected_profile_and_fenced_stop(rig):
+    async def scenario():
+        store = rig.hass.data['power_sync'][rig.entry.entry_id]['automation_store']
+        store._data['vehicle_charging_configs'] = [
+            {'vehicle_id': 'shared_ev_profile_a', 'solar_charging_enabled': True},
+            {'vehicle_id': 'shared_ev_profile_b', 'solar_charging_enabled': False},
+        ]
+        assert not actions._solar_surplus_vehicle_opted_out(rig.hass, rig.entry, 'shared_ev_profile_a')
+        assert actions._solar_surplus_vehicle_opted_out(rig.hass, rig.entry, 'shared_ev_profile_b')
+        store._data['vehicle_charging_configs'][0]['solar_charging_enabled'] = False
+        await rig.tick()
+        assert rig.runtime.get('pending_stop') is not None
+        assert ownership.get_ev_ownership(rig.hass, rig.entry, 'generic_ev') is not None
+    asyncio.run(scenario())
+
+
 def test_solar_dip_resets_start_delay_for_shared_vehicle(rig):
     async def scenario():
         rig.runtime['params']['sustained_surplus_minutes'] = 3
