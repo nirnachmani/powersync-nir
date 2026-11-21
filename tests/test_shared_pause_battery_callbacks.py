@@ -660,6 +660,17 @@ def test_callback_started_before_settled_pause_cannot_resume(rig, monkeypatch, m
     asyncio.run(scenario())
 
 
+def test_new_rate_request_discards_old_phase_cap(rig, monkeypatch):
+    async def scenario():
+        params = rig.runtime['params']
+        params['_phase_load_management_applied_amps'] = 6
+        monkeypatch.setattr(actions, '_phase_load_management_applies', lambda *args: False)
+        await actions._set_vehicle_amps(rig.hass, rig.entry, 'generic_ev', 12, params)
+        assert '_phase_load_management_applied_amps' not in params
+        assert actions._phase_applied_amps(params, 12) == 12
+    asyncio.run(scenario())
+
+
 def test_solar_opt_out_uses_selected_profile_and_fenced_stop(rig):
     async def scenario():
         store = rig.hass.data['power_sync'][rig.entry.entry_id]['automation_store']

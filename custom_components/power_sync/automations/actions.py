@@ -9243,6 +9243,9 @@ async def _set_vehicle_amps(
     *, headroom_abort_id: str | None = None,
 ) -> bool | None:
     """Route shared runtime pauses through the transition fence before I/O."""
+    # Each rate request must derive its own applied limit; a previous phase
+    # cap must not be mistaken for the result of a later uncapped command.
+    params.pop("_phase_load_management_applied_amps", None)
     if (amps == 0 and config_entry is not None
             and params.get("shared_loadpoint_binding")
             and _shared_stop_dispatch.get() is None):
