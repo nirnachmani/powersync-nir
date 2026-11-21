@@ -31,7 +31,7 @@ INPUT_FIELDS = (
     "cost_neutral_forecast_import_cost", "cost_neutral_fixed_cost_allowance",
     "cost_neutral_plan", "profit_max_solar_export_slots", "manual_control",
     "ev_plan", "price_valid_slots", "acquisition_cost_known_zero",
-    "initial_solar_energy_kwh",
+    "initial_solar_energy_kwh", "negative_import_pv_slots",
 )
 STATE_FIELDS = (
     "_acquisition_cost_known_zero", "_active_grid_export_limits_w",

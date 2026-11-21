@@ -21,6 +21,23 @@ from .contract import (
 )
 
 
+_SAFE_CAPTURE_ERRORS = frozenset({
+    "unsupported_signature", "missing_decision_clock", "invalid_decision_time",
+    "unsupported_solver_options", "unsupported_stage", "unsupported_cycle_outcome",
+    "unsupported_manual_fields", "unsupported_dataclass", "unsupported_value",
+    "unsupported_key", "unsupported_text", "unsupported_identity", "unsupported_timezone",
+    "nonfinite_value", "naive_timestamp", "array_limit", "capture_limit",
+    "missing_optimizer_state",
+})
+
+
+def _safe_error_reason(error):
+    """Expose only fixed contract codes, never exception payloads."""
+    if type(error) is ContractError and str(error) in _SAFE_CAPTURE_ERRORS:
+        return str(error)
+    return "unexpected_capture_error"
+
+
 def expendable(function):
     """Serialize observation, but NEVER wait for another capture thread.
 
@@ -32,7 +49,7 @@ def expendable(function):
         if getattr(self,'closed',False):
             return None
         if not self._lock.acquire(blocking=False):
-            self.errors += 1
+            self._note_error("capture_lock_contended")
             self._drop(detach=True)
             if function.__name__ == "start_cycle":
                 self.generation += 1
@@ -42,8 +59,8 @@ def expendable(function):
         try:
             try:
                 return function(self, *args, **kwargs)
-            except Exception:
-                self.errors += 1
+            except Exception as error:
+                self._note_error(_safe_error_reason(error))
                 self._drop(cycle)
                 if self.active is not cycle:
                     self._drop()
@@ -78,11 +95,17 @@ class CaptureRecorder:
         self.active = None
         self.generation = 0
         self.errors = 0
+        self.error_reasons = {}
+        self.local_diagnostics = local_diagnostics
         self.dropped = 0
         self.capture_seconds = 0.0
         self._retained_bytes = 0
         self.closed = False
         self.pending = {}
+
+    def _note_error(self, reason):
+        self.errors += 1
+        self.error_reasons[reason] = self.error_reasons.get(reason, 0) + 1
 
     def close(self):
         """Erase retained observation copies without waiting for a solver thread."""
@@ -123,17 +146,37 @@ class CaptureRecorder:
             cycle = self.active
             if cycle is None or not cycle["complete"]:
                 return None
-            if set(arguments) != set(INPUT_FIELDS):
+            unknown = set(arguments) - set(INPUT_FIELDS)
+            missing = set(INPUT_FIELDS) - set(arguments)
+            if (unknown or missing) and not self.local_diagnostics:
                 raise ContractError("unsupported_signature")
+            unsupported = sorted(
+                name if type(name) is str and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", name)
+                else "unrecognized_input" for name in unknown
+            )
+            unsupported.extend(sorted(missing))
             if not isinstance(decision_time, datetime) or decision_time.tzinfo is None or decision_time.utcoffset() is None:
                 raise ContractError("missing_decision_clock")
             clock = {"decision_time": decision_time.isoformat(), "decision_timezone": getattr(decision_time.tzinfo, "key", None)}
             decision_clock(clock)
             provided = list(arguments) if provided_inputs is None else list(provided_inputs)
-            if any(type(name) is not str or name not in INPUT_FIELDS for name in provided) or len(set(provided)) != len(provided):
+            if any(type(name) is not str for name in provided) or len(set(provided)) != len(provided):
                 raise ContractError("unsupported_signature")
+            provided = [name for name in provided if name in INPUT_FIELDS]
             codec = Codec()
-            inputs = {key: codec.encode(arguments[key], key) for key in INPUT_FIELDS}
+            inputs = {}
+            for key in INPUT_FIELDS:
+                if key not in arguments:
+                    continue
+                aliases = dict(codec.aliases)
+                try:
+                    inputs[key] = codec.encode(arguments[key], key)
+                except ContractError as error:
+                    if not self.local_diagnostics or str(error) == "capture_limit":
+                        raise
+                    codec.aliases = aliases
+                    unsupported.append(key)
+                    self._note_error(_safe_error_reason(error))
             state = state_snapshot(optimizer, codec)
             if cycle is not self.active or not cycle["complete"]:
                 return None
@@ -143,7 +186,7 @@ class CaptureRecorder:
             cycle["outstanding"] += 1
             ticket = {"generation": cycle["generation"], "cycle": cycle, "codec": codec, "inputs": inputs,
                     "state": state, **clock, "provided_inputs": provided,
-                    "arguments": arguments}
+                    "unsupported_inputs": unsupported, "arguments": arguments}
             if self.closed or cycle is not self.active or not cycle['complete']:
                 ticket.clear();return None
             self.pending[id(ticket)]=ticket
@@ -167,7 +210,7 @@ class CaptureRecorder:
             check = Codec()
             check.aliases = dict(codec.aliases)
             after = state_snapshot(optimizer, check)
-            now_inputs = {key: check.encode(ticket["arguments"][key], key) for key in INPUT_FIELDS}
+            now_inputs = {key: check.encode(ticket["arguments"][key], key) for key in ticket["inputs"]}
             torn = now_inputs != ticket["inputs"] or any(
                 after.get(key) != value for key, value in ticket["state"].items() if key not in SOLVE_MUTATIONS
             )
@@ -189,8 +232,10 @@ class CaptureRecorder:
                     "decision_timezone": ticket["decision_timezone"], "provided_inputs": ticket["provided_inputs"],
                     "inputs": ticket["inputs"], "state": ticket["state"],
                     "outcome": "exception" if error is not None else ("feasible" if result.feasible else "infeasible"),
-                    "result": output, "coverage": {"complete": not torn and bool(ticket["arguments"].get("schedule_timestamps")),
+                    "result": output, "coverage": {"complete": not torn and not ticket["unsupported_inputs"] and bool(ticket["arguments"].get("schedule_timestamps")),
                         "torn": torn, "stages": ["solver_raw"], "not_covered": ["coordinator", "hardware", "counterfactual"]}}
+            if ticket["unsupported_inputs"]:
+                body["coverage"]["unsupported_inputs"] = ticket["unsupported_inputs"]
             cycle["attempts"].append(body)
             cycle["bytes"] += codec.bytes
         finally:
@@ -232,6 +277,7 @@ class CaptureRecorder:
         with self._lock:
             ready = [cycle for cycle in self.cycles if cycle["complete"]]
             counters = {"errors": self.errors, "dropped_cycles": self.dropped,
+                        "error_reasons": dict(self.error_reasons),
                         "capture_seconds": self.capture_seconds, "estimated_bytes": self._retained_bytes}
         cycles = []
         for cycle in ready:
@@ -264,22 +310,22 @@ def capture_attempt(function):
             bound.apply_defaults()
             ticket = recorder.begin(self, {k: v for k, v in bound.arguments.items() if k != "self"},
                                     provided_inputs=provided, decision_time=function.__globals__["dt_util"].now())
-        except Exception:
-            recorder.errors += 1
+        except Exception as error:
+            recorder._note_error(_safe_error_reason(error))
             recorder._drop()
         try:
             result = function(self, *args, **kwargs)
         except BaseException as error:
             try:
                 recorder.finish(ticket, self, error=error)
-            except Exception:
-                recorder.errors += 1
+            except Exception as capture_error:
+                recorder._note_error(_safe_error_reason(capture_error))
                 recorder._drop()
             raise
         try:
             recorder.finish(ticket, self, result=result)
-        except Exception:
-            recorder.errors += 1
+        except Exception as error:
+            recorder._note_error(_safe_error_reason(error))
             recorder._drop()
         return result
 

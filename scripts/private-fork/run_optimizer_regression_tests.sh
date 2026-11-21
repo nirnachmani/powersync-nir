@@ -40,6 +40,8 @@ core_tests=(
     tests/test_optimization_enabled_switch.py
     tests/test_optimizer_ev_cooptimization.py
     tests/test_optimizer_ev_load_plan.py
+    # Solver changes must keep capture schemas and real diagnostic output aligned.
+    tests/test_optimizer_replay.py
     tests/test_optimizer_hardware_floor_alignment.py
     tests/test_optimizer_restore_retry.py
     tests/test_profit_max_charge_hold_capabilities.py

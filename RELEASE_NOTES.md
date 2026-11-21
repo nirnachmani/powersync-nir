@@ -1,3 +1,10 @@
+<!-- release: v2.12.1744-nir.3 -->
+
+## v2.12.1744-nir.3 — solver decision capture
+- Capture the negative-import PV input introduced in the previous release and record safe error reason codes.
+- Retain partial local diagnostics when an input is unrecognised or cannot be captured, while clearly marking incomplete records; strict solver replay remains unchanged.
+- Include solver capture and contract tests in the private optimizer gate.
+
 <!-- release: v2.12.1744-nir.2 -->
 
 ## v2.12.1744-nir.2 — useful solar at negative import prices

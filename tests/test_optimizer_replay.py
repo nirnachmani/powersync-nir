@@ -72,6 +72,92 @@ def test_writer_produces_a_local_recorder_without_a_replay_source(api, tmp_path)
     assert recorder.currency == 'AUD'
 
 
+def test_local_capture_retains_known_inputs_when_signature_extends(api, monkeypatch):
+    module, capture, _ = api
+    monkeypatch.setattr(capture, 'INPUT_FIELDS', tuple(
+        name for name in capture.INPUT_FIELDS if name != 'initial_solar_energy_kwh'
+    ))
+    recorder = capture.CaptureRecorder(None, currency='AUD', local_diagnostics=True)
+    optimizer = module.BatteryOptimizer(interval_minutes=60, horizon_hours=8)
+    with capture.record_cycle(optimizer, recorder):
+        optimizer.optimize(**inputs())
+    report = recorder.export()
+    attempt = report['cycles'][0]['attempts'][0]
+    assert attempt['inputs']['import_prices'] == inputs()['import_prices']
+    assert attempt['coverage']['complete'] is False
+    assert 'initial_solar_energy_kwh' in attempt['coverage']['unsupported_inputs']
+    assert attempt['result']['schedule']
+
+
+def test_replay_capture_rejects_unreviewed_signature(api, monkeypatch):
+    module, capture, _ = api
+    monkeypatch.setattr(capture, 'INPUT_FIELDS', tuple(
+        name for name in capture.INPUT_FIELDS if name != 'initial_solar_energy_kwh'
+    ))
+    recorder = capture.CaptureRecorder(source_binding(COMPONENT, module), currency='AUD')
+    optimizer = module.BatteryOptimizer(interval_minutes=60, horizon_hours=8)
+    with capture.record_cycle(optimizer, recorder):
+        optimizer.optimize(**inputs())
+    report = recorder.export()
+    assert report['cycles'] == []
+    assert report['error_reasons'] == {'unsupported_signature': 1}
+
+
+def test_local_capture_retains_other_inputs_when_value_is_unsupported(api):
+    module, capture, _ = api
+    recorder = capture.CaptureRecorder(None, currency='AUD', local_diagnostics=True)
+    optimizer = module.BatteryOptimizer(interval_minutes=60, horizon_hours=8)
+    with capture.record_cycle(optimizer, recorder):
+        optimizer.optimize(**{**inputs(), 'manual_control': {'credential': 'CANARY_SECRET'}})
+    report = recorder.export()
+    attempt = report['cycles'][0]['attempts'][0]
+    assert attempt['inputs']['import_prices'] == inputs()['import_prices']
+    assert 'manual_control' not in attempt['inputs']
+    assert attempt['coverage']['unsupported_inputs'] == ['manual_control']
+    assert not attempt['coverage']['complete']
+    assert 'unsupported_manual_fields' in report['error_reasons']
+    assert 'CANARY_SECRET' not in json.dumps(report)
+
+
+def test_capture_reports_safe_failure_reason(api):
+    module, capture, _ = api
+    recorder = capture.CaptureRecorder(source_binding(COMPONENT, module), currency='AUD')
+    optimizer = module.BatteryOptimizer(interval_minutes=60, horizon_hours=8)
+    with capture.record_cycle(optimizer, recorder):
+        optimizer.optimize(**{**inputs(), 'manual_control': {'credential': 'CANARY_SECRET'}})
+    report = recorder.export()
+    assert 'unsupported_manual_fields' in report['error_reasons']
+    assert 'CANARY_SECRET' not in json.dumps(report)
+
+
+def test_negative_import_flags_survive_local_solver_capture(api, tmp_path):
+    import asyncio
+    from power_sync.decision_diagnostics import AsyncDecisionWriter
+    module, capture, _ = api
+    recorder = capture.CaptureRecorder(None, currency='AUD', local_diagnostics=True)
+    optimizer = module.BatteryOptimizer(interval_minutes=60, horizon_hours=8)
+    flags = [True, True, False, False, False, False, False, False]
+    plan = module.EVChargePlan(vehicle_id='CANARY_VIN', max_power_kw=(3.0,) * 8,
+                               energy_needed_kwh=1.0, deadline_requirements=((4, 1.0),))
+    with capture.record_cycle(optimizer, recorder):
+        optimizer.optimize(**{**inputs(), 'negative_import_pv_slots': flags, 'ev_plan': [plan]})
+    report = recorder.export()
+    assert report['errors'] == 0
+    attempt = report['cycles'][0]['attempts'][0]
+    assert attempt['inputs']['negative_import_pv_slots'] == flags
+    assert attempt['coverage']['complete']
+    assert 'CANARY_VIN' not in json.dumps(report)
+    async def persist():
+        writer = AsyncDecisionWriter(tmp_path)
+        writer.start()
+        assert writer.emit_solver_capture(recorder)
+        await writer.close()
+        assert writer.errors == 0
+    asyncio.run(persist())
+    stored = json.loads(next(tmp_path.glob('optimizer-*.jsonl')).read_text())
+    assert stored['capture']['cycles'][0]['attempts'][0]['inputs']['negative_import_pv_slots'] == flags
+
+
 def test_local_diagnostic_capture_has_no_fabricated_source(api):
     module, capture, _ = api
     recorder = capture.CaptureRecorder(None, currency='AUD', local_diagnostics=True)
@@ -798,7 +884,7 @@ async def test_real_coordinator_closure_records_override_and_restores_on_error(a
         "grid_export_limits_w": None, "cost_neutral_cap": None, "cost_neutral_slots": None,
         "cost_neutral_forecast_import_cost": 0.0, "cost_neutral_fixed_cost_allowance": None,
         "cost_neutral_plan": None, "profit_max_solar_export_slots": None,
-        "manual_control_payload": None, "ev_charge_plan": None}
+        "manual_control_payload": None, "ev_charge_plan": None, "limits_w": None}
     exec(compile(ast.Module(body=[method], type_ignores=[]), "coordinator-closure", "exec"), namespace)
     rec = capture.CaptureRecorder(source_binding(COMPONENT, module), currency="AUD")
     with capture.record_cycle(optimizer, rec):
