@@ -1,3 +1,11 @@
+<!-- release: v2.12.1784-nir.1 -->
+
+## v2.12.1784-nir.1 — reviewed upstream and shared EV compatibility
+- Integrate relevant upstream fixes through v2.12.1784: paired battery-efficiency learning, solar and Smart Schedule planning, Cost Neutral EV source checks, live import limits and tariff alerts.
+- Preserve shared logical EV selection and physical stop fences while improving Solar Surplus opt-out, EVAC unplug recovery and optional switch-only Price-Level priority.
+- Keep Sigenergy export ownership, fork-only HACS targeting and Android routes. Exclude remote support, licensing and unsupported provider/vendor features.
+- Source release only; no Home Assistant deployment, restart or physical hardware validation was performed.
+
 <!-- release: v2.12.1744-nir.4 -->
 
 ## v2.12.1744-nir.4 — EV plan diagnostic capture

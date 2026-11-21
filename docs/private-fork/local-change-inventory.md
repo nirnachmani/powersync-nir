@@ -207,6 +207,24 @@ canonical identity and ownership checks; they are not API payload bypasses.
 
 ## Reviewed EV safety ports
 
+### Upstream v2.12.1745–1784 compatibility
+
+- Shared Generic and EVAC controls retain selected logical-profile identity,
+  physical lease, fresh stop confirmation, and Android routes. Solar start
+  debounce resets after a dip; per-profile opt-out uses the fenced stop path.
+  EVAC Price-Level unplug reconciliation requires direct nonfault idle evidence
+  and the same live lease/profile. Import ceilings refresh during sessions.
+- The opt-in switch-only Price-Level priority uses the actual physical charger
+  configuration and cannot bypass phase management, grid limits or stop fencing.
+- Battery efficiency learning uses paired fresh Sigenergy readings, full-depth
+  cycles and non-overlapping integration. Profit Max deadline ties, rolling EV
+  windows, and Cost Neutral EV source verification and rounding are updated.
+- Sigenergy export-limit ownership and fork-only HACS targeting remain unchanged.
+  Unsupported vendors, Localvolts, remote support and licensing are excluded.
+  Targeted Android contracts and private architecture/optimizer gates passed.
+  Physical hardware behavior and HA deployment were not tested.
+
+
 ### Upstream v2.12.1726–1744 compatibility
 
 - Profit Max values known export-capped solar as zero-cost replenishment while
