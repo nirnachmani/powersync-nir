@@ -12282,6 +12282,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 "_optimization_submitted_fields",
                 set(user_input),
             )
+            daily_supply_charge = max(
+                0.0,
+                float(user_input.get(CONF_DAILY_SUPPLY_CHARGE, 0.0) or 0.0),
+            )
+            if CONF_DAILY_SUPPLY_CHARGE in submitted_fields:
+                # Dashboard billing also uses this setting in native mode.
+                new_data[CONF_DAILY_SUPPLY_CHARGE] = daily_supply_charge
+                new_options[CONF_DAILY_SUPPLY_CHARGE] = daily_supply_charge
             if optimization_provider != OPT_PROVIDER_POWERSYNC:
                 new_data[CONF_OPTIMIZATION_DISABLE_IDLE] = False
                 new_options[CONF_OPTIMIZATION_DISABLE_IDLE] = False
@@ -12424,10 +12432,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 )
                 if cost_neutral_enabled:
                     profit_max_enabled = False
-                daily_supply_charge = max(
-                    0.0,
-                    float(user_input.get(CONF_DAILY_SUPPLY_CHARGE, 0.0) or 0.0),
-                )
                 charge_by_time_enabled = bool(
                     user_input.get(CONF_CHARGE_BY_TIME_ENABLED, False)
                 )
@@ -12557,8 +12561,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 new_options[CONF_PROFIT_MAX_ENABLED] = profit_max_enabled
                 new_data[CONF_COST_NEUTRAL_ENABLED] = cost_neutral_enabled
                 new_options[CONF_COST_NEUTRAL_ENABLED] = cost_neutral_enabled
-                new_data[CONF_DAILY_SUPPLY_CHARGE] = daily_supply_charge
-                new_options[CONF_DAILY_SUPPLY_CHARGE] = daily_supply_charge
                 new_data[CONF_CHARGE_BY_TIME_ENABLED] = charge_by_time_enabled
                 new_options[CONF_CHARGE_BY_TIME_ENABLED] = charge_by_time_enabled
                 new_data[CONF_CHARGE_BY_TIME_TARGET_TIME] = charge_by_time_target_time
