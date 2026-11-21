@@ -10995,6 +10995,11 @@ def _has_current_disconnected_sigenergy_evac(
         entry_data.get("observed_sigenergy_charger_state_at")
     ):
         return False
+    return _is_disconnected_sigenergy_evac(observed)
+
+
+def _is_disconnected_sigenergy_evac(observed: Any) -> bool:
+    """Require an explicit, nonfault EVAC disconnect and zero power."""
     try:
         power_kw = float(getattr(observed, "power_kw", None))
     except (TypeError, ValueError):
@@ -11732,6 +11737,15 @@ class PriceLevelChargingExecutor:
         if vehicle_vin not in self._vehicle_states:
             self._vehicle_states[vehicle_vin] = PriceLevelChargingState()
         return self._vehicle_states[vehicle_vin]
+
+    def reconcile_evac_unplug(self, vehicle_id: str) -> None:
+        """Retire only the originating profile after verified EVAC unplug."""
+        state = self._vehicle_states.get(vehicle_id)
+        if state and not getattr(state, "start_pending", False) and not getattr(state, "stop_pending", False):
+            state.is_charging = False
+            state.charging_mode = ""
+            state.last_decision = "unplugged"
+            state.last_decision_reason = "Vehicle not plugged in"
 
     async def adopt_observed_shared_session(
         self,

@@ -660,6 +660,51 @@ def test_callback_started_before_settled_pause_cannot_resume(rig, monkeypatch, m
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize('confirmed, switch_profile', [(True, False), (False, False), (True, True)])
+def test_price_evac_unplug_requires_direct_idle_before_reconciling(rig, monkeypatch, confirmed, switch_profile):
+    async def scenario():
+        rig.entry.options = {**rig.entry.options, 'generic_charger_enabled': False,
+            'sigenergy_charger_enabled': True, 'sigenergy_charger_type': 'evac',
+            'sigenergy_charger_host': 'charger.invalid'}
+        params = rig.runtime['params']
+        params.update(charger_type='sigenergy', vehicle_id='sigenergy_charger', owner_mode='price_level_opportunity')
+        actions._dynamic_ev_state[rig.entry.entry_id] = {'sigenergy_charger': rig.runtime}
+        ownership.release_ev_ownership(rig.hass, rig.entry, 'generic_ev', command='stop', success=True)
+        ownership.claim_ev_ownership(rig.hass, rig.entry, 'sigenergy_charger', owner_mode='price_level_opportunity',
+                                     extra={'active_profile_id': 'shared_ev_profile_a'})
+        observed = SimpleNamespace(charger_type='evac', status='a1_a2', is_connected=False,
+            is_charging=False, is_discharging=False, power_kw=0 if confirmed else None)
+        async def read_state():
+            if switch_profile:
+                rig.hass.states.get('sensor.connected_vehicle').state = 'tesla'
+            return observed
+        controller = SimpleNamespace(read_state=AsyncMock(side_effect=read_state), disconnect=AsyncMock())
+        monkeypatch.setattr(actions, '_new_sigenergy_charger', lambda config: controller)
+        import ast, sys, types
+        from pathlib import Path
+        source = (Path(__file__).parents[1] / 'custom_components/power_sync/automations/ev_charging_planner.py').read_text()
+        fn = next(n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.FunctionDef) and n.name == '_is_disconnected_sigenergy_evac')
+        namespace = {'Any': object, 'math': __import__('math')}
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), '<evac-proof>', 'exec'), namespace)
+        planner = types.ModuleType('power_sync.automations.ev_charging_planner')
+        planner._is_disconnected_sigenergy_evac = namespace['_is_disconnected_sigenergy_evac']
+        reconcile = Mock()
+        executor = SimpleNamespace(hass=rig.hass, config_entry=rig.entry, reconcile_evac_unplug=reconcile)
+        planner.get_price_level_executor = lambda: executor
+        monkeypatch.setitem(sys.modules, planner.__name__, planner)
+        result = await actions._action_stop_ev_charging_dynamic(rig.hass, rig.entry, {
+            **params, 'vehicle_id': 'sigenergy_charger', 'stop_charging': False,
+            '_expected_state': rig.runtime, '_confirm_price_evac_unplug': True})
+        assert bool(result) is (confirmed and not switch_profile)
+        if confirmed and not switch_profile:
+            reconcile.assert_called_once_with('shared_ev_profile_a')
+        else:
+            reconcile.assert_not_called()
+            assert actions._dynamic_ev_state[rig.entry.entry_id]['sigenergy_charger'] is rig.runtime
+        rig.hass.services.async_call.assert_not_awaited()
+    asyncio.run(scenario())
+
+
 def test_grid_import_limit_refreshes_without_overriding_site_cap(rig, monkeypatch):
     async def scenario():
         config = SimpleNamespace(max_grid_import_w=13000)

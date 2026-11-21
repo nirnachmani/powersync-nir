@@ -8846,15 +8846,21 @@ async def _clear_ble_dynamic_session_if_unplugged(
         "plugged in",
         vehicle_id,
     )
-    await _action_stop_ev_charging_dynamic(
-        hass,
-        config_entry,
-        {
-            "vehicle_id": vehicle_id,
-            "stop_charging": False,
-            "stop_reason": "vehicle unplugged",
-        },
+    from .ev_ownership import owner_family
+    price_level_evac = (
+        params.get("charger_type") == "sigenergy"
+        and params.get("sigenergy_charger_type", "evac") == "evac"
+        and owner_family(params.get("owner_mode")) == "price_level"
     )
+    stop_params = {
+        **(params if price_level_evac else {}),
+        "vehicle_id": vehicle_id,
+        "stop_charging": False,
+        "stop_reason": "vehicle unplugged",
+        "_expected_state": state,
+        "_confirm_price_evac_unplug": price_level_evac,
+    }
+    await _action_stop_ev_charging_dynamic(hass, config_entry, stop_params)
     return True
 
 
@@ -17689,6 +17695,45 @@ async def _action_stop_ev_charging_dynamic_locked(
             if vehicles.get(candidate_id) is expected_state
         ]
 
+    if params.get("_confirm_price_evac_unplug"):
+        from .ev_ownership import get_ev_ownership, owner_family
+        from .ev_charging_planner import _is_disconnected_sigenergy_evac
+        from .shared_loadpoint import resolve_active_shared_profile
+        if len(vehicle_ids_to_stop) != 1:
+            return False
+        vid = vehicle_ids_to_stop[0]
+        current = vehicles.get(vid)
+        if not current or current.get("pending_stop") or not current.get("active"):
+            return False
+        current_params = current.get("params", {})
+        lease_id, lease = get_ev_ownership(hass, config_entry, vid)
+        profile = current.get("active_profile_id") or current_params.get("active_logical_vehicle_id")
+        if current_params.get("shared_loadpoint_binding") and (
+            lease_id != vid or lease is None or lease.get("active_profile_id") != profile
+            or resolve_active_shared_profile(hass, config_entry) != profile
+        ):
+            return False
+        if current_params.get("charger_type") != "sigenergy" or owner_family(current_params.get("owner_mode")) != "price_level":
+            return False
+        charger_config = _sigenergy_charger_config(config_entry, current_params)
+        if not charger_config.get("host"):
+            return False
+        controller = _new_sigenergy_charger(charger_config)
+        read_started = datetime.now(dt_timezone.utc)
+        try:
+            observed = await controller.read_state()
+        except Exception:
+            return False
+        finally:
+            await controller.disconnect()
+        if (not is_current_ev_power_observation(read_started)
+                or not _is_disconnected_sigenergy_evac(observed)
+                or vehicles.get(vid) is not current or current.get("pending_stop")
+                or (current_params.get("shared_loadpoint_binding") and (
+                    get_ev_ownership(hass, config_entry, vid)[1] is not lease
+                    or resolve_active_shared_profile(hass, config_entry) != profile))):
+            return False
+
     pending_shared_stop = False
     remaining_vehicle_ids = []
     for vid in vehicle_ids_to_stop:
@@ -17963,6 +18008,13 @@ async def _action_stop_ev_charging_dynamic_locked(
                     away_location,
                 )
 
+        if params.get("_confirm_price_evac_unplug") and (
+            vehicles.get(vid) is not state
+            or (state_params.get("shared_loadpoint_binding") and (
+                get_ev_ownership(hass, config_entry, vid)[1] is not lease
+                or resolve_active_shared_profile(hass, config_entry) != profile))
+        ):
+            return False
         if state is not None and vehicles.get(vid) is not state:
             replaced_vehicle_ids.add(vid)
             continue
@@ -18051,6 +18103,11 @@ async def _action_stop_ev_charging_dynamic_locked(
             )
             released_vehicle_ids.add(vid)
             del vehicles[vid]
+            if params.get("_confirm_price_evac_unplug"):
+                from .ev_charging_planner import get_price_level_executor
+                executor = get_price_level_executor()
+                if executor and executor.hass is hass and executor.config_entry is config_entry:
+                    executor.reconcile_evac_unplug(state.get("active_profile_id") or vid)
             _LOGGER.info(f"⚡ Dynamic EV charging stopped for {vid}")
 
     # Clean up entry if no vehicles remain
