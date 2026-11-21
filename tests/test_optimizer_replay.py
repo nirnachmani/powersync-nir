@@ -130,6 +130,64 @@ def test_capture_reports_safe_failure_reason(api):
     assert 'CANARY_SECRET' not in json.dumps(report)
 
 
+def test_realistic_ev_window_sources_are_persisted_in_complete_capture(api, tmp_path):
+    import asyncio
+    from power_sync.decision_diagnostics import AsyncDecisionWriter
+    module, capture, contract = api
+    sources = ('grid_offpeak', 'solar_surplus', 'grid_free', 'grid_negative',
+               'grid_cheap', 'grid_opportunistic', 'grid_deadline_fallback',
+               'price_blocked', 'demand_blocked', 'grid_peak', 'grid_shoulder',
+               'grid_super_offpeak', 'grid_epex', '')
+    n = 576
+    now = NOW
+    values = dict(import_prices=[0.09] * n, export_prices=[0.0] * n,
+                  solar_forecast=[10.0] * n, load_forecast=[1.1] * n,
+                  current_soc=1.0,
+                  schedule_timestamps=[now + timedelta(minutes=5 * i) for i in range(n)],
+                  negative_import_pv_slots=[False] * n)
+    plan = module.EVChargePlan(vehicle_id='VIN_PRIVATE_CANARY', max_power_kw=(7.36,) * n,
+                               energy_needed_kwh=5.0, deadline_requirements=((100, 5.0),),
+                               window_source=(sources * 53)[:n])
+    values['ev_plan'] = [plan]
+    recorder = capture.CaptureRecorder(None, currency='AUD', local_diagnostics=True)
+    optimizer = module.BatteryOptimizer(interval_minutes=5, horizon_hours=48)
+    with capture.record_cycle(optimizer, recorder):
+        optimizer.optimize(**values)
+    async def persist():
+        writer = AsyncDecisionWriter(tmp_path)
+        writer.start()
+        assert writer.emit_solver_capture(recorder)
+        await writer.close()
+        assert writer.errors == 0
+    asyncio.run(persist())
+    report = json.loads(next(tmp_path.glob('optimizer-*.jsonl')).read_text())['capture']
+    assert report['errors'] == 0, report['error_reasons']
+    attempt = report['cycles'][0]['attempts'][0]
+    assert attempt['coverage']['complete'] is True
+    assert contract.decode(attempt['inputs']['ev_plan'], module)[0].window_source == plan.window_source
+    assert 'VIN_PRIVATE_CANARY' not in json.dumps(report)
+
+
+def test_ev_window_sources_round_trip_in_strict_replay_and_unknown_is_private(api):
+    module, capture, contract = api
+    labels = ('solar_surplus', 'grid_offpeak', 'grid_shoulder', 'grid_peak',
+              'grid_super_offpeak', 'grid_epex', 'price_blocked', 'demand_blocked')
+    plan = module.EVChargePlan(vehicle_id='VIN_PRIVATE', max_power_kw=(3.0,) * 8,
+                               energy_needed_kwh=1.0, window_source=labels)
+    _, bundle, _ = capture_one(api, values={**inputs(), 'ev_plan': [plan]})
+    trusted.validate_bundle(bundle)
+    assert contract.decode(bundle['inputs']['ev_plan'], module)[0].window_source == labels
+    private_plan = module.EVChargePlan(vehicle_id='VIN_PRIVATE', max_power_kw=(3.0,) * 8,
+                                       energy_needed_kwh=1.0, window_source=('SECRET_UNKNOWN',))
+    recorder = capture.CaptureRecorder(None, currency='AUD', local_diagnostics=True)
+    optimizer = module.BatteryOptimizer(interval_minutes=60, horizon_hours=8)
+    with capture.record_cycle(optimizer, recorder):
+        optimizer.optimize(**{**inputs(), 'ev_plan': [private_plan]})
+    partial = recorder.export()
+    assert partial['cycles'][0]['attempts'][0]['coverage']['unsupported_inputs'] == ['ev_plan']
+    assert 'SECRET_UNKNOWN' not in json.dumps(partial)
+
+
 def test_negative_import_flags_survive_local_solver_capture(api, tmp_path):
     import asyncio
     from power_sync.decision_diagnostics import AsyncDecisionWriter

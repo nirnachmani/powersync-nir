@@ -1,3 +1,9 @@
+<!-- release: v2.12.1744-nir.4 -->
+
+## v2.12.1744-nir.4 — EV plan diagnostic capture
+- Capture reviewed Smart Schedule EV charging-window sources in optimizer diagnostics; previously these values caused the EV plan input to be omitted.
+- Preserve privacy filtering and strict replay validation, with a full-horizon real-solver-to-disk test of mixed EV window sources.
+
 <!-- release: v2.12.1744-nir.3 -->
 
 ## v2.12.1744-nir.3 — solver decision capture

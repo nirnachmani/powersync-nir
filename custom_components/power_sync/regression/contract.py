@@ -78,6 +78,12 @@ CLASS_FIELDS = {
     ),
 }
 MANUAL_FIELDS = frozenset(("control_type", "mode_slots", "required_charge_kw", "required_discharge_kw"))
+# Closed set emitted by the EV planner and optimizer policy-envelope builder.
+EV_WINDOW_SOURCES = frozenset((
+    "", "solar_surplus", "grid_free", "grid_negative", "grid_offpeak",
+    "grid_cheap", "grid_opportunistic", "grid_deadline_fallback", "grid_peak",
+    "grid_shoulder", "grid_super_offpeak", "grid_epex", "price_blocked", "demand_blocked",
+))
 ENUMS = frozenset((
     "", "cost", "idle", "charge", "discharge", "export", "consume",
     "self_consumption", "self_use", "solar_export", "off_grid", "hold_soc",
@@ -140,6 +146,10 @@ class Codec:
                     ZoneInfo(value)
                 except (ValueError, KeyError):
                     raise ContractError("unsupported_timezone") from None
+                return value
+            if field == "window_source":
+                if value not in EV_WINDOW_SOURCES:
+                    raise ContractError("unsupported_text")
                 return value
             if value not in ENUMS and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
                 raise ContractError("unsupported_text")
@@ -288,6 +298,9 @@ def validate_bundle(bundle):
             elif field == "vehicle_id" or field.startswith("_quota_"):
                 if not re.fullmatch(r"ref_[1-9]\d*", value):
                     raise ContractError("invalid_alias")
+            elif field == "window_source":
+                if value not in EV_WINDOW_SOURCES:
+                    raise ContractError("unsupported_text")
             elif value not in ENUMS and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
                 raise ContractError("unsupported_text")
             return
