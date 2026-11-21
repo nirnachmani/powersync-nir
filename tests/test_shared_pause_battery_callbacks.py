@@ -660,6 +660,24 @@ def test_callback_started_before_settled_pause_cannot_resume(rig, monkeypatch, m
     asyncio.run(scenario())
 
 
+def test_solar_dip_resets_start_delay_for_shared_vehicle(rig):
+    async def scenario():
+        rig.runtime['params']['sustained_surplus_minutes'] = 3
+        rig.runtime.update(current_amps=0, target_amps=0, charging_started=False,
+                           high_surplus_start=datetime.now() - timedelta(minutes=4))
+        rig.power.state = '0'
+        rig.live.update(battery_soc=80, grid_power=0, solar_power=0, load_power=0, battery_power=0)
+        await rig.tick()
+        assert rig.runtime['high_surplus_start'] is None
+        calls = rig.hass.services.async_call.await_count
+        rig.live['grid_power'] = -5000
+        await rig.tick()
+        assert rig.runtime['high_surplus_start'] is not None
+        await rig.tick()
+        assert rig.hass.services.async_call.await_count == calls
+    asyncio.run(scenario())
+
+
 def test_solar_start_queued_before_pause_settles_is_rejected(rig, monkeypatch):
     async def scenario():
         rig.live.update(battery_soc=80, grid_power=-5000)

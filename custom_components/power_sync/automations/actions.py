@@ -12863,7 +12863,8 @@ async def _dynamic_ev_update_surplus_impl(
         state["high_surplus_start"] = None
         new_amps = 0
     elif executable_available_amps + 1e-9 < min_amps:
-        # Not enough surplus
+        # A later start requires a fresh uninterrupted surplus window.
+        state["high_surplus_start"] = None
         if effective_current_amps > 0:
             # Track how long we've been below threshold
             low_surplus_start = state.get("low_surplus_start")
