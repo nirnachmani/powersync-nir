@@ -5909,6 +5909,7 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
         if not self._energy_acc._last_update:
             await self._energy_acc.async_restore()
         try:
+            battery_observed_at = dt_util.utcnow()
             status = await self._controller.get_status()
 
             attrs = status.attributes or {}
@@ -6049,6 +6050,10 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
                 "ev_soc": evdc_state.vehicle_soc if evdc_state else None,
                 "battery_level": attrs.get("battery_soc", 0),  # %
                 "last_update": dt_util.utcnow(),
+                "telemetry_observed_at": {
+                    "battery_level": battery_observed_at if _finite_float(attrs.get("battery_soc")) is not None else None,
+                    "battery_power": battery_observed_at if _finite_float(attrs.get("battery_power_kw")) is not None else None,
+                },
                 # Extra Sigenergy-specific data
                 "active_power_kw": attrs.get("active_power_kw", 0),
                 "export_limit_kw": attrs.get("export_limit_kw"),

@@ -81,6 +81,7 @@ def _sigenergy_grid_coordinator(attrs, previous=None):
         "dt_util": types.SimpleNamespace(utcnow=lambda: 123),
         "_fresh_site_ev_load": lambda *args: (0, True),
         "_get_current_prices": lambda *args: (0, 0),
+        "_finite_float": lambda value: float(value) if value is not None else None,
     }
     exec(compile("from __future__ import annotations\n" + ast.unparse(method), "coordinator.py", "exec"), namespace)
 
@@ -112,6 +113,16 @@ def test_sigenergy_grid_status_reaches_energy_sensor(status):
     })["_grid_status_value"]
     assert "grid_status" in data
     assert value(data) == status
+
+
+@pytest.mark.parametrize("power, expected", [(0, 123), (2.0, 123), (None, None)])
+def test_sigenergy_efficiency_requires_measured_battery_power(power, expected):
+    attrs = {"battery_soc": 50}
+    if power is not None:
+        attrs["battery_power_kw"] = power
+    coordinator, update = _sigenergy_grid_coordinator(attrs)
+    data = asyncio.run(update(coordinator))
+    assert data["telemetry_observed_at"] == {"battery_level": 123, "battery_power": expected}
 
 
 def test_sigenergy_grid_status_does_not_survive_failed_battery_read():

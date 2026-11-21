@@ -98,7 +98,7 @@ def test_current_schedule_committed_once_after_every_planning_stage():
         assert re.search(r"self\._last_optimizer_result\s*=", chain) is None
 
     for field in ("_current_schedule", "_last_optimizer_result", "_last_update_time",
-                  "_last_diagnostic_plan_trace_id"):
+                  "_last_diagnostic_plan_trace_id", "_last_published_optimizer_parameters"):
         assignments = list(re.finditer(rf"self\.{field}\s*=", method_source))
         assert len(assignments) == 1
         assert assignments[0].start() > method_source.index(
@@ -196,7 +196,7 @@ def _publication_pipeline(*, rerun=True):
                and isinstance(node.test, ast.Call)
                and isinstance(node.test.func, ast.Attribute)
                and node.test.func.attr == "isEnabledFor")
-    function = ast.parse("async def pipeline(self, result, _run_optimizer_once): pass").body[0]
+    function = ast.parse("async def pipeline(self, result, _run_optimizer_once, resolved_parameters): pass").body[0]
     function.body = copy.deepcopy(body[start:end])
     namespace = dict.fromkeys((
         "import_prices", "export_prices", "spread_import_blocked", "solar_forecast",
@@ -225,6 +225,8 @@ def test_slow_reserve_rerun_never_exposes_an_uncommitted_export(rerun, failure_s
     async def run():
         old_schedule = SimpleNamespace(actions=["self_consumption"])
         old_result = SimpleNamespace(schedule=old_schedule)
+        old_parameters = object()
+        resolved_parameters = object()
         reference = SimpleNamespace(schedule=SimpleNamespace(actions=["export"]),
                                     future_export_protection_floor_slots=[], lp_stats={},
                                     reserve_recommendation={})
@@ -236,6 +238,7 @@ def test_slow_reserve_rerun_never_exposes_an_uncommitted_export(rerun, failure_s
         committed_prices = []
         subject = SimpleNamespace(
             _current_schedule=old_schedule, _last_optimizer_result=old_result,
+            _last_published_optimizer_parameters=old_parameters,
             _last_update_time=old_time, _last_diagnostic_plan_trace_id="old",
             _decision_diagnostic_trace_id="new",
             _config=SimpleNamespace(backup_reserve=0.2), auto_apply_reserve_enabled=True,
@@ -260,6 +263,7 @@ def test_slow_reserve_rerun_never_exposes_an_uncommitted_export(rerun, failure_s
         def assert_previous_plan():
             assert subject._current_schedule is old_schedule
             assert subject._last_optimizer_result is old_result
+            assert subject._last_published_optimizer_parameters is old_parameters
             assert subject._last_update_time is old_time
             assert subject._last_diagnostic_plan_trace_id == "old"
             assert adopted == []
@@ -283,16 +287,18 @@ def test_slow_reserve_rerun_never_exposes_an_uncommitted_export(rerun, failure_s
             return result
 
         subject._apply_external_energy_plan = external
+        publish = _publication_pipeline(rerun=rerun)
         if failure_stage:
             error = asyncio.CancelledError if failure_stage == "cancel" else RuntimeError
             with pytest.raises(error):
-                await _publication_pipeline(rerun=rerun)(subject, reference, solve_again)
+                await publish(subject, reference, solve_again, resolved_parameters)
             assert_previous_plan()
         else:
-            await _publication_pipeline(rerun=rerun)(subject, reference, solve_again)
+            await publish(subject, reference, solve_again, resolved_parameters)
             expected = final if rerun else reference
             assert subject._current_schedule is expected.schedule
             assert subject._last_optimizer_result is expected
+            assert subject._last_published_optimizer_parameters is resolved_parameters
             assert subject._last_update_time != old_time
             assert subject._last_diagnostic_plan_trace_id == "new"
             assert adopted == [expected]
