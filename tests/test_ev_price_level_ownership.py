@@ -10565,3 +10565,84 @@ def test_preserve_mode_handoff_does_not_release_battery():
     finally:
         ev_planner.set_price_level_executor(previous_price)
         ev_planner.set_scheduled_charging_executor(previous_scheduled)
+
+
+@pytest.mark.parametrize(
+    ("price", "grid_import_limited", "demand_blocked", "battery_power", "grid_power", "source"),
+    (
+        (0, False, False, -16000, 7500, "grid_free"),
+        (0, False, False, -2000, -6500, "solar_surplus"),
+        (15, False, False, -16000, 7500, "solar_surplus"),
+        (0, True, False, -16000, 7500, "solar_surplus"),
+        (0, False, True, -16000, 7500, "solar_surplus"),
+    ),
+)
+def test_solar_preferred_uses_free_grid_if_battery_leaves_no_ev_surplus(
+    monkeypatch, price, grid_import_limited, demand_blocked, battery_power, grid_power, source,
+):
+    now = datetime(2026, 11, 21, 12, 46, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner, "_ha_local_now_naive", lambda: now.replace(tzinfo=None))
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: now)
+    monkeypatch.setattr(ev_planner, "get_ev_location", AsyncMock(return_value="home"))
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", AsyncMock(return_value=True))
+    monkeypatch.setattr(ev_pricing, "get_current_export_price", lambda *_: 0)
+
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data["solar_surplus_config"] = {
+        "enabled": True,
+        "household_buffer_kw": 2.0,
+        "allow_parallel_charging": True,
+        "max_battery_charge_rate_kw": 15.0,
+    }
+    entry = _FakeConfigEntry()
+    planner = ev_planner.ChargingPlanner(hass, entry)
+    monkeypatch.setattr(planner, "_is_grid_charging_blocked_at", lambda _: demand_blocked)
+    executor = ev_planner.AutoScheduleExecutor(hass, entry, planner=planner)
+    executor._get_vehicle_soc = AsyncMock(return_value=65)
+    executor._resolve_effective_charger_capability = AsyncMock(return_value=None)
+
+    async def mark_started(vehicle_id, settings, state, source, force_max_rate=False):
+        state.is_charging = True
+        return True
+
+    executor._start_charging = AsyncMock(side_effect=mark_started)
+    settings = ev_planner.AutoScheduleSettings(
+        vehicle_id=VIN,
+        display_name="Test Tesla",
+        target_soc=70,
+        priority=ev_planner.ChargingPriority.SOLAR_PREFERRED,
+        limit_grid_import=grid_import_limited,
+        min_charge_amps=1,
+    )
+    state = executor.get_state(VIN)
+    state.last_plan_update = now.replace(tzinfo=None)
+    state.current_plan = ev_planner.ChargingPlan(
+        vehicle_id=VIN,
+        current_soc=65,
+        target_soc=70,
+        target_time=(now + timedelta(hours=17)).isoformat(),
+        energy_needed_kwh=4.8,
+        windows=[ev_planner.PlannedChargingWindow(
+            start_time=(now - timedelta(minutes=13)).isoformat(),
+            end_time=(now + timedelta(minutes=30)).isoformat(),
+            source="solar_surplus",
+            estimated_power_kw=7.0,
+            estimated_energy_kwh=4.8,
+            price_cents_kwh=0.0,
+            reason="solar_forecast",
+        )],
+    )
+
+    asyncio.run(executor._evaluate_vehicle(VIN, settings, {
+        "battery_soc": 100 if battery_power == -2000 else 87,
+        "solar_power": 11600,
+        "load_power": 3100,
+        "battery_power": battery_power,
+        "grid_power": grid_power,
+        "ev_power": 0,
+    }, current_price_cents=price))
+
+    executor._start_charging.assert_awaited_once_with(
+        VIN, settings, state, source, force_max_rate=False
+    )
+    assert state.last_decision == "started"

@@ -7042,6 +7042,28 @@ class AutoScheduleExecutor:
             priority=effective_priority,
         )
 
+        if (
+            should_charge
+            and source == "solar_surplus"
+            and effective_priority == ChargingPriority.SOLAR_PREFERRED
+            and current_price_cents is not None
+            and current_price_cents <= FREE_GRID_PRICE_EPSILON_CENTS
+            and not effective_limit_grid
+            and not self.planner._is_grid_charging_blocked_at(ha_now)
+        ):
+            from .actions import _calculate_solar_surplus
+
+            solar_config = await self._get_solar_surplus_config()
+            solar_config["min_battery_soc"] = effective_home_min
+            available_surplus_kw = _calculate_solar_surplus(
+                live_status, (live_status.get("ev_power") or 0) / 1000,
+                solar_config, self.hass,
+            )
+            if available_surplus_kw < settings.get_min_surplus_kw():
+                source = "grid_free"
+                reason = (f"Free grid power ({current_price_cents:.1f}c/kWh); "
+                          f"usable solar surplus is {available_surplus_kw:.1f} kW")
+
         # Apply additional constraints based on priority mode
         if should_charge and source.startswith("grid"):
             # Check price constraint (but not for time_critical - deadline takes priority)
