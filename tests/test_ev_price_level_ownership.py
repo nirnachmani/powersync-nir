@@ -126,8 +126,8 @@ VIN = "5YJTEST0000000001"
     "price,priority,window_source,expected",
     [
         (None, "cost_optimized", None, (False, "waiting")),
-        (None, "solar_preferred", None, (True, "solar_surplus")),
-        (None, "solar_only", None, (True, "solar_surplus")),
+        (None, "solar_preferred", None, (False, "waiting")),
+        (None, "solar_only", None, (False, "waiting")),
         (None, "cost_optimized", "grid_offpeak", (True, "grid_offpeak")),
         (None, "cost_optimized", "solar_surplus", (True, "solar_surplus")),
         (-5, "cost_optimized", None, (True, "grid_free")),
@@ -459,6 +459,24 @@ def test_time_critical_does_not_use_free_period_after_departure(monkeypatch):
     assert source == "waiting"
 
 
+def test_smart_schedule_yields_nonplanned_cheap_and_solar_opportunities(monkeypatch):
+    brisbane_tz = timezone(timedelta(hours=10))
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda: datetime(2026, 8, 18, 1, 0, tzinfo=brisbane_tz))
+    planner = ev_planner.ChargingPlanner(_FakeHass(), _FakeConfigEntry())
+    plan = SimpleNamespace(windows=[])
+    for price, solar, priority in (
+        (5.0, 0.0, ev_planner.ChargingPriority.COST_OPTIMIZED),
+        (25.0, 4.0, ev_planner.ChargingPriority.SOLAR_PREFERRED),
+    ):
+        should_charge, _, source = asyncio.run(planner.should_charge_now(
+            vehicle_id=VIN, plan=plan, current_surplus_kw=solar,
+            current_price_cents=price, battery_soc=80.0,
+            current_export_price_cents=0.0, priority=priority,
+        ))
+        assert should_charge is False
+        assert source == "waiting"
+
+
 def test_cost_optimized_waits_for_planned_free_window(monkeypatch):
     brisbane_tz = timezone(timedelta(hours=10))
     monkeypatch.setattr(
@@ -501,11 +519,11 @@ def test_cost_optimized_waits_for_planned_free_window(monkeypatch):
     ("priority", "expected_should_charge", "expected_source"),
     (
         (ev_planner.ChargingPriority.COST_OPTIMIZED, False, "waiting"),
-        (ev_planner.ChargingPriority.SOLAR_PREFERRED, True, "solar_surplus"),
-        (ev_planner.ChargingPriority.SOLAR_ONLY, True, "solar_surplus"),
+        (ev_planner.ChargingPriority.SOLAR_PREFERRED, False, "waiting"),
+        (ev_planner.ChargingPriority.SOLAR_ONLY, False, "waiting"),
     ),
 )
-def test_opportunistic_solar_respects_smart_schedule_priority(
+def test_smart_schedule_yields_unplanned_solar_regardless_of_strategy(
     monkeypatch,
     priority,
     expected_should_charge,
@@ -564,7 +582,11 @@ def test_solar_only_live_decision_blocks_high_value_export(monkeypatch):
     should_charge, reason, source = asyncio.run(
         planner.should_charge_now(
             vehicle_id=VIN,
-            plan=SimpleNamespace(windows=[]),
+            plan=SimpleNamespace(windows=[SimpleNamespace(
+                start_time="2026-08-18T09:00:00",
+                end_time="2026-08-18T10:00:00",
+                source="solar_surplus", price_cents_kwh=20.0,
+            )]),
             current_surplus_kw=3.5,
             current_price_cents=31.0,
             current_export_price_cents=20.0,
@@ -861,6 +883,116 @@ def test_amber_no_usable_intervals_uses_existing_fallback(monkeypatch):
         return sentinel
     monkeypatch.setattr(forecaster, "_get_sigenergy_tariff_forecast", fallback)
     assert asyncio.run(forecaster.get_price_forecast(1)) is sentinel
+
+
+def test_smart_plan_records_actual_forecast_and_windows(monkeypatch, tmp_path):
+    import importlib, json
+    now = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, 'now', lambda: now)
+    hass, entry = _FakeHass(), _FakeConfigEntry()
+    planner = ev_planner.ChargingPlanner(hass, entry)
+    async def forecast(_hours):
+        ev_planner._smart_price_forecast_source.set('amber_weighted')
+        return [ev_planner.PriceForecast('2026-09-17T13:00:00', 10, 4, 'offpeak'),
+                ev_planner.PriceForecast('2026-09-17T14:00:00', 30, 5, 'peak')]
+    planner.price_forecaster.get_price_forecast = forecast
+    planner.surplus_forecaster.forecast_surplus = AsyncMock(return_value=[
+        ev_planner.SurplusForecast('2026-09-17T13:00:00', 4, 2, 2, .8)])
+    async def run():
+        disabled = await planner.plan_charging(
+            vehicle_id='shared_ev_profile_a', current_soc=50, target_soc=55, target_time=None,
+            resolved_capacity=ev_capacity.resolve_ev_battery_capacity(manual_capacity_kwh=40),
+            charger_power_kw=4, priority=ev_planner.ChargingPriority.COST_OPTIMIZED,
+            max_grid_price_cents=20)
+        writer = importlib.import_module('power_sync.decision_diagnostics').AsyncDecisionWriter(tmp_path)
+        writer.start()
+        hass.data['power_sync']['entry-1']['decision_diagnostics'] = writer
+        from power_sync.automations.actions import _decision_trace_id
+        token = _decision_trace_id.set((asyncio.current_task(), 'a' * 32))
+        result = await planner.plan_charging(
+            vehicle_id='shared_ev_profile_a', current_soc=50, target_soc=55, target_time=None,
+            resolved_capacity=ev_capacity.resolve_ev_battery_capacity(manual_capacity_kwh=40),
+            charger_power_kw=4, priority=ev_planner.ChargingPriority.COST_OPTIMIZED,
+            max_grid_price_cents=20)
+        _decision_trace_id.reset(token)
+        await writer.close()
+        return result, disabled
+    result, disabled = asyncio.run(run())
+    assert result.to_dict() == disabled.to_dict()
+    rows = [json.loads(x) for x in next(tmp_path.glob('ev-*.jsonl')).read_text().splitlines()]
+    event = next(row for row in rows if row['event'] == 'smart_schedule_plan')
+    assert event['profile'] == 'shared_ev_profile_a'
+    assert event['trace_id'] == 'a' * 32
+    assert event['price_forecast_source'] == 'amber_weighted'
+    assert event['forecast_candidates'][0]['import_cents'] == 10
+    assert event['forecast_candidates'][0]['surplus_kw'] == 2
+    assert event['forecast_candidates'][1]['import_cents'] == 30
+    assert event['candidate_decisions'][1]['grid_reason'] == 'price_cap'
+    assert event['candidate_decisions'][0]['solar_eligible'] is True
+    assert event['candidate_decisions'][0]['solar_rank'] == 1
+    assert event['candidate_decisions'][0]['solar_selected'] is True
+    assert event['candidate_decisions'][0]['grid_rank'] == 2
+    assert event['candidate_decisions'][0]['grid_selected'] is False
+    assert event['max_price_cents'] == 20
+    assert len(event['planned_windows']) == len(result.windows)
+    assert all('vehicle_id' not in row for row in rows)
+
+
+def test_smart_plan_target_already_met_records_without_forecasts(tmp_path):
+    import importlib, json
+    hass, entry = _FakeHass(), _FakeConfigEntry()
+    planner = ev_planner.ChargingPlanner(hass, entry)
+    async def run():
+        writer = importlib.import_module('power_sync.decision_diagnostics').AsyncDecisionWriter(tmp_path)
+        writer.start()
+        hass.data['power_sync']['entry-1']['decision_diagnostics'] = writer
+        result = await planner.plan_charging(
+            vehicle_id='shared_ev_profile_a', current_soc=80, target_soc=50, target_time=None,
+            resolved_capacity=ev_capacity.resolve_ev_battery_capacity(manual_capacity_kwh=40),
+            priority=ev_planner.ChargingPriority.COST_OPTIMIZED)
+        await writer.close()
+        return result
+    assert asyncio.run(run()).energy_needed_kwh == 0
+    rows = [json.loads(row) for row in next(tmp_path.glob('ev-*.jsonl')).read_text().splitlines()]
+    assert any(row['event'] == 'smart_schedule_plan' and row['plan_state'] == 'target_met' for row in rows)
+
+
+def test_smart_plan_forecast_failure_is_recorded_without_masking_exception(monkeypatch, tmp_path):
+    import importlib, json
+    hass, entry = _FakeHass(), _FakeConfigEntry()
+    planner = ev_planner.ChargingPlanner(hass, entry)
+    planner.surplus_forecaster.forecast_surplus = AsyncMock(side_effect=RuntimeError('private error detail'))
+    async def run():
+        writer = importlib.import_module('power_sync.decision_diagnostics').AsyncDecisionWriter(tmp_path)
+        writer.start()
+        hass.data['power_sync']['entry-1']['decision_diagnostics'] = writer
+        with pytest.raises(RuntimeError, match='private error detail'):
+            await planner.plan_charging(
+                vehicle_id='shared_ev_profile_a', current_soc=50, target_soc=55, target_time=None,
+                resolved_capacity=ev_capacity.resolve_ev_battery_capacity(manual_capacity_kwh=40),
+                priority=ev_planner.ChargingPriority.COST_OPTIMIZED)
+        await writer.close()
+    asyncio.run(run())
+    raw = next(tmp_path.glob('ev-*.jsonl')).read_text()
+    event = next(json.loads(row) for row in raw.splitlines() if json.loads(row)['event'] == 'smart_schedule_plan')
+    assert event['plan_state'] == 'forecast_error'
+    assert 'private error detail' not in raw
+
+
+def test_price_forecaster_records_actual_selected_source(monkeypatch):
+    adelaide = ZoneInfo('Australia/Adelaide')
+    monkeypatch.setattr(ev_planner.dt_util, 'now', lambda: datetime(2026, 7, 3, 0, tzinfo=adelaide))
+    monkeypatch.setattr(ev_planner.dt_util, 'as_local', lambda value: value.astimezone(adelaide), raising=False)
+    hass, entry = _FakeHass(), _FakeConfigEntry()
+    entry.data = {'amber_api_token': 'token'}
+    hass.data['power_sync']['entry-1']['amber_coordinator'] = SimpleNamespace(data={'forecast': [
+        dict(nemTime='2026-07-03T02:00:00+09:30', duration=60, perKwh=10)]})
+    async def run():
+        result = await ev_planner.PriceForecaster(hass, entry).get_price_forecast(3)
+        return result, ev_planner._smart_price_forecast_source.get()
+    result, source = asyncio.run(run())
+    assert result
+    assert source == 'amber_weighted'
 
 
 def test_amber_weighted_forecast_drives_cost_optimized_plan(monkeypatch):
@@ -2439,6 +2571,94 @@ class _FakeStates:
     def async_entity_ids(self, domain: str):
         prefix = f"{domain}."
         return [entity_id for entity_id in self._states if entity_id.startswith(prefix)]
+
+
+def test_price_does_not_take_solar_when_live_arbitration_prefers_solar(monkeypatch):
+    hass = _FakeHass(states={'sensor.connected_vehicle': 'tank'})
+    hass.data['power_sync']['entry-1']['automation_store']._data['solar_surplus_config'] = {'enabled': True}
+    entry = _FakeConfigEntry()
+    entry.options = {'generic_charger_enabled': True,
+        'shared_loadpoint_connected_vehicle_entity': 'sensor.connected_vehicle',
+        'shared_loadpoint_profile_a_name': 'Tank', 'shared_loadpoint_profile_a_state': 'tank',
+        'shared_loadpoint_profile_b_name': 'Other', 'shared_loadpoint_profile_b_state': 'other'}
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    executor.get_charging_decision = AsyncMock(return_value=(True, 'recovery', 'price_level_recovery'))
+    executor._start_charging = AsyncMock(return_value=True)
+    monkeypatch.setattr(ev_planner, 'discover_all_tesla_vehicles', AsyncMock(return_value=[]))
+    monkeypatch.setattr(ev_planner, '_shared_live_opportunity_decision', AsyncMock(return_value=('solar_surplus', {})))
+    asyncio.run(executor.evaluate_all_vehicles(20))
+    executor._start_charging.assert_not_awaited()
+
+
+def test_price_opportunity_waits_for_adoption_without_start_failure(monkeypatch):
+    hass = _FakeHass()
+    entry = _FakeConfigEntry()
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    monkeypatch.setattr(ev_planner, '_build_dynamic_charging_params', lambda *a, **k: {
+        'vehicle_id': 'generic_ev', 'active_logical_vehicle_id': 'shared_ev_profile_a',
+        'owner_mode': 'price_level_opportunity'})
+    from power_sync.automations import actions
+    monkeypatch.setattr(actions, '_is_vehicle_charge_complete', AsyncMock(return_value=False))
+    monkeypatch.setattr(actions, '_shared_opportunity_handover_adopted', lambda *a: False)
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(ev_planner, '_start_coordinated_charging', start)
+    assert not asyncio.run(executor._start_charging('price_level_opportunity', 'cheap',
+        vehicle_vin='shared_ev_profile_a', opportunity_generation='candidate'))
+    start.assert_not_awaited()
+    state = executor._get_or_create_vehicle_state('shared_ev_profile_a')
+    assert state.last_decision == 'waiting'
+    assert 'optimizer' in state.last_decision_reason.lower()
+    assert state.start_cooldown_until == 0
+
+
+def test_real_price_decision_publishes_fresh_shared_opportunity(monkeypatch):
+    from unittest.mock import Mock
+    now = datetime(2026, 11, 21, 12, tzinfo=timezone.utc)
+    hass = _FakeHass(states={'sensor.connected_vehicle': 'tank'}, price_settings={
+        'recovery_soc': 40, 'recovery_price_cents': 30,
+        'opportunity_price_cents': 10, 'home_battery_minimum': 20})
+    hass.states.get('sensor.connected_vehicle').last_changed = now - timedelta(minutes=1)
+    entry = _FakeConfigEntry()
+    entry.options = {'generic_charger_enabled': True,
+        'shared_loadpoint_connected_vehicle_entity': 'sensor.connected_vehicle',
+        'shared_loadpoint_profile_a_name': 'Tank', 'shared_loadpoint_profile_a_state': 'tank',
+        'shared_loadpoint_profile_b_name': 'Other', 'shared_loadpoint_profile_b_state': 'other'}
+    coordinator = SimpleNamespace(_enabled=True, _schedule_settings_reoptimization=Mock())
+    hass.data['power_sync']['entry-1']['optimization_coordinator'] = coordinator
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    executor._get_home_battery_soc = AsyncMock(return_value=60)
+    executor._get_ev_soc = AsyncMock(return_value=50)
+    monkeypatch.setattr(ev_planner, 'get_ev_location', AsyncMock(return_value='home'))
+    monkeypatch.setattr(ev_planner, 'is_ev_plugged_in', AsyncMock(return_value=True))
+    monkeypatch.setattr(ev_planner.dt_util, 'now', lambda: now)
+    monkeypatch.setattr(ev_planner, '_build_dynamic_charging_params', lambda *a, **k: {
+        'active_logical_vehicle_id': 'shared_ev_profile_a',
+        'min_charge_amps': 6, 'max_charge_amps': 32, 'voltage': 230, 'phases': 1})
+    should, _, mode = asyncio.run(executor.get_charging_decision(8))
+    request = ev_planner._publish_price_only_shared_opportunity(executor, 'shared_ev_profile_a', should, mode, 8)
+    assert request['mode'] == 'price_level_opportunity'
+    assert request['power_kw'] == pytest.approx(7.36)
+    assert request['min_power_kw'] == pytest.approx(1.38)
+    coordinator._schedule_settings_reoptimization.assert_called_once()
+    same = ev_planner._publish_price_only_shared_opportunity(executor, 'shared_ev_profile_a', should, mode, 8)
+    assert same is request
+    coordinator._schedule_settings_reoptimization.assert_called_once()
+    monkeypatch.setattr(ev_planner, 'discover_all_tesla_vehicles', AsyncMock(return_value=[]))
+    executor._start_charging = AsyncMock(return_value=False)
+    asyncio.run(executor.evaluate_all_vehicles(8))
+    assert executor._start_charging.await_count == 1
+    assert executor._start_charging.await_args is not None
+    assert executor._start_charging.await_args.kwargs == {
+        'vehicle_vin': 'shared_ev_profile_a', 'opportunity_generation': request['generation']}
+    executor._start_charging.reset_mock()
+    hass.states.get('sensor.connected_vehicle').last_changed = None
+    asyncio.run(executor.evaluate_all_vehicles(8))
+    executor._start_charging.assert_not_awaited()
+    hass.states.get('sensor.connected_vehicle').last_changed = now - timedelta(minutes=1)
+    should, _, mode = asyncio.run(executor.get_charging_decision(20))
+    assert ev_planner._publish_price_only_shared_opportunity(executor, 'shared_ev_profile_a', should, mode, 20) is None
+    assert '_shared_opportunity_request' not in hass.data['power_sync']['entry-1']
+    assert coordinator._schedule_settings_reoptimization.call_count == 2
 
 
 def test_price_level_native_home_battery_minimum_blocks_shared_generic_start(

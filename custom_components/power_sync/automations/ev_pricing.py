@@ -22,6 +22,40 @@ from ..const import DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 
+def get_automation_import_price(entry_data: dict, tariff_resolver=None):
+    """Read the same current tariff used by the EV automation evaluation."""
+    coordinator = entry_data.get("amber_coordinator")
+    if coordinator and coordinator.data:
+        for price in coordinator.data.get("current", []):
+            if price.get("channelType") == "general":
+                value = price.get("perKwh")
+                if value is not None:
+                    return value
+                break
+    prices = entry_data.get("amber_prices", {})
+    if prices and prices.get("import_cents") is not None:
+        return prices.get("import_cents")
+    schedule = entry_data.get("tariff_schedule", {})
+    if schedule:
+        if schedule.get("tou_periods"):
+            if tariff_resolver is None:
+                from .. import get_current_price_from_tariff_schedule
+                tariff_resolver = get_current_price_from_tariff_schedule
+            value, _, _ = tariff_resolver(schedule)
+        else:
+            value = schedule.get("buy_price")
+        if value is not None:
+            return value
+    tariff = entry_data.get("sigenergy_tariff", {})
+    if tariff:
+        now = dt_util.now()
+        current_time = f"{now.hour:02d}:{30 if now.minute >= 30 else 0:02d}"
+        for slot in tariff.get("buy_prices", []):
+            if slot.get("timeRange", "").startswith(current_time):
+                return slot.get("price")
+    return None
+
+
 def _parse_schedule_timestamp(value: Any, local_tz: Any) -> datetime | None:
     """Parse one optimizer timestamp, preserving an explicit offset."""
     if not isinstance(value, str) or not value.strip():

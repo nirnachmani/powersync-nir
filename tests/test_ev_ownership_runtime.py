@@ -538,6 +538,13 @@ def test_takeover_flag_only_replaces_solar_surplus_ownership():
     )
 
 
+def test_smart_schedule_can_request_price_owner_handover_only_with_takeover_permission():
+    for mode in ("price_level_recovery", "price_level_opportunity"):
+        assert ev_ownership.can_take_over_ev_ownership(mode, "smart_schedule", allow_takeover=True)
+        assert not ev_ownership.can_take_over_ev_ownership(mode, "smart_schedule", allow_takeover=False)
+        assert not ev_ownership.can_take_over_ev_ownership("smart_schedule", mode, allow_takeover=True)
+
+
 def test_explicit_boost_can_take_over_automated_or_manual_ownership():
     assert ev_ownership.can_take_over_ev_ownership("smart_schedule", "boost")
     assert ev_ownership.can_take_over_ev_ownership("manual", "boost")

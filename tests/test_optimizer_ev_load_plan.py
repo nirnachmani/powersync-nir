@@ -44,6 +44,65 @@ def _plan(**overrides):
 # ---------------------------------------------------------------------------
 
 
+def test_current_opportunity_attaches_without_replacing_future_deadline():
+    future = _plan(vehicle_id='car', max_power_kw=(0.0, 7.0, 7.0), energy_needed_kwh=5)
+    plans = ev_load_plan.add_current_opportunity(
+        [future], vehicle_id='car', n_slots=3, power_kw=4, min_power_kw=2.0,
+        allow_grid=False, allow_battery=False)
+    assert len(plans) == 1
+    assert plans[0].min_power_kw == 1.4
+    assert plans[0].opportunity_min_power_kw == 2.0
+    assert plans[0].max_power_kw == (0.0, 7.0, 7.0)
+    assert plans[0].energy_needed_kwh == 5
+    assert plans[0].opportunity_power_kw == 4
+    assert plans[0].allow_grid[0] is False
+    assert plans[0].allow_battery[0] is False
+
+
+def test_opportunity_keeps_its_own_battery_policy_separate_from_future_smart():
+    future = _plan(vehicle_id='car', max_power_kw=(0., 7.), energy_needed_kwh=5,
+                   battery_floor_soc=(0.8, 0.8), preserve_home_battery=(True, True))
+    plans = ev_load_plan.add_current_opportunity(
+        [future], vehicle_id='car', n_slots=2, power_kw=4, min_power_kw=1.4,
+        allow_grid=True, allow_battery=False, battery_floor_soc=0.25,
+        preserve_home_battery=False)
+    assert plans[0].battery_floor_soc == (0.25, 0.8)
+    assert plans[0].preserve_home_battery == (False, True)
+
+
+def test_current_smart_window_keeps_priority_and_its_source_permissions():
+    smart = _plan(vehicle_id='car', max_power_kw=(7.0, 0.0),
+                  allow_grid=(True, False), energy_needed_kwh=5)
+    result = ev_load_plan.add_current_opportunity(
+        [smart], vehicle_id='car', n_slots=2, power_kw=4, min_power_kw=1.4,
+        allow_grid=False, allow_battery=False)
+    assert result == [smart]
+
+
+def test_current_opportunity_never_adds_duplicate_selected_car():
+    first, second = _plan(vehicle_id='car'), _plan(vehicle_id='car')
+    result = ev_load_plan.add_current_opportunity(
+        [first, second], vehicle_id='car', n_slots=8, power_kw=4,
+        min_power_kw=1.4, allow_grid=True, allow_battery=False)
+    assert result == [first, second]
+
+
+def test_subminimum_current_opportunity_does_not_create_ev_plan():
+    assert ev_load_plan.add_current_opportunity(
+        [], vehicle_id='car', n_slots=3, power_kw=1, min_power_kw=1.4,
+        allow_grid=False, allow_battery=False) == []
+
+
+def test_current_opportunity_creates_vehicle_when_smart_target_met():
+    plans = ev_load_plan.add_current_opportunity(
+        [], vehicle_id='car', n_slots=3, power_kw=4, min_power_kw=1.4,
+        allow_grid=True, allow_battery=False)
+    assert len(plans) == 1
+    assert plans[0].energy_needed_kwh == 0
+    assert plans[0].opportunity_power_kw == 4
+    assert plans[0].max_power_kw == (0.0,) * 3
+
+
 def test_plan_is_padded_to_the_solve_horizon():
     normalized = ev_load_plan.normalize_ev_charge_plan(_plan(), 12)
 

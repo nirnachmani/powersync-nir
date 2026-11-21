@@ -3500,6 +3500,8 @@ def _shared_positive_write_guard(hass, config_entry, params):
                     and current is runtime and (current is None or current.get("session_id") == session)
                     and not is_shared_stop_fenced(hass, config_entry, physical)
                     and resolved and resolved.get("vehicle_id") == physical
+                    and ("_opportunity_generation" not in params or
+                         _shared_opportunity_handover_adopted(hass, config_entry, physical, params))
                     and ((params.get("owner_mode") or params.get("dynamic_mode")) != "smart_schedule"
                          or resolve_shared_profile_soc(hass, config_entry, profile) is not None))
     return checked
@@ -5978,6 +5980,14 @@ async def _action_stop_ev_charging(
     config_entry: ConfigEntry,
     params: Dict[str, Any]
 ) -> bool:
+    return await _action_stop_ev_charging_locked_impl(hass, config_entry, params)
+
+
+async def _action_stop_ev_charging_locked_impl(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    params: Dict[str, Any]
+) -> bool:
     """
     Stop EV charging via Tesla, OCPP, generic, or Zaptec charger.
 
@@ -6664,6 +6674,7 @@ _BATTERY_FLOOR_STOP_RETRY_SECONDS = 30
 
 # Lock to prevent duplicate dynamic EV charging sessions from concurrent triggers
 _start_dynamic_lock = asyncio.Lock()
+_dynamic_start_lock_task: ContextVar[asyncio.Task | None] = ContextVar("dynamic_start_lock_task", default=None)
 _dynamic_ev_update_locks: Dict[str, asyncio.Lock] = {}
 _dynamic_ev_solar_update_locks: Dict[str, asyncio.Lock] = {}
 _phase_load_management_locks: Dict[str, asyncio.Lock] = {}
@@ -6823,6 +6834,99 @@ async def _preflight_shared_solar_surplus_decision(
     if not await is_ev_plugged_in(hass, config_entry, vehicle_vin=active_profile_id):
         return denied("vehicle is not plugged in")
     return {"allowed": True, "reason": "", "source": "solar_surplus"}
+
+
+async def _evaluate_shared_solar_candidate(hass, config_entry, params):
+    """Observe Solar's actual admission inputs without creating a session or trial.
+
+    ``None`` means unknown and must not authorize an ownership transition.
+    The existing Solar rate controller remains authoritative after handover.
+    """
+    from .shared_loadpoint import binding_for_entry, resolve_active_shared_profile
+    binding = binding_for_entry(config_entry)
+    profile = resolve_active_shared_profile(hass, config_entry)
+    selector = hass.states.get(binding.connected_vehicle_entity) if binding else None
+    changed = getattr(selector, 'last_changed', None)
+    if not profile or changed is None or profile != params.get('active_logical_vehicle_id'):
+        return None
+
+    def selection_unchanged():
+        current = hass.states.get(binding.connected_vehicle_entity)
+        return (resolve_active_shared_profile(hass, config_entry) == profile
+                and getattr(current, 'last_changed', None) == changed)
+
+    admission = await _preflight_shared_solar_surplus_decision(hass, config_entry)
+    if not selection_unchanged() or admission is None:
+        return None
+    if not admission.get('allowed'):
+        return {'eligible': False, 'reason': admission.get('reason')}
+    solar_params = _refresh_solar_surplus_runtime_params(
+        hass, config_entry.entry_id, {**params, 'owner_mode': 'solar_surplus'})
+    if await _dynamic_ev_full_soc_reason(hass, config_entry, params['vehicle_id'], solar_params):
+        return {'eligible': False, 'reason': 'vehicle_full'} if selection_unchanged() else None
+    live = await _get_tesla_live_status(hass, config_entry)
+    if not selection_unchanged() or not isinstance(live, dict):
+        return None
+    try:
+        values = [float(live[k]) for k in ('battery_soc', 'solar_power', 'grid_power', 'battery_power')]
+        if not all(math.isfinite(v) for v in values):
+            return None
+        soc, _, grid, battery = values
+        if not 0 <= soc <= 100:
+            return None
+        voltage, phases = float(solar_params.get('voltage', 240)), float(solar_params.get('phases', 1))
+        configured_max = float(solar_params.get('max_charge_amps', 32))
+        min_amps = float(_effective_min_charge_amps(solar_params, hass))
+        if not all(math.isfinite(v) and v > 0 for v in (voltage, phases, configured_max, min_amps)):
+            return None
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    price = _get_current_ev_export_price(hass, config_entry.entry_id)
+    if not solar_surplus_price_allows_charging(price, solar_params):
+        return {'eligible': False, 'reason': 'export_price'} if selection_unchanged() else None
+    charger_meter = None
+    if solar_params.get('charger_type') == 'sigenergy':
+        charger_meter = await _read_sigenergy_charger_power_kw(hass, config_entry, solar_params)
+    ev_kw, available = await _get_observed_ev_power_reading_kw(
+        hass, params['vehicle_id'], solar_params,
+        allow_wall_connector_fallback=True, charger_meter_power_kw=charger_meter)
+    if not selection_unchanged():
+        return None
+    context = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {}).get('_shared_loadpoint_cycle_context', {})
+    if not available:
+        if context.get('physical_active') is not False:
+            return None
+        ev_kw = 0.0
+    try:
+        ev_kw = float(ev_kw)
+        if not math.isfinite(ev_kw) or ev_kw < 0:
+            return None
+        capacity = float(_calculate_solar_surplus(live, ev_kw, solar_params, hass))
+        floor = float(get_solar_surplus_min_battery_soc(solar_params))
+        battery_charge = max(0.0, -battery / 1000)
+        parallel = _solar_parallel_start_available(
+            allow_parallel=solar_params.get('allow_parallel_charging'), battery_soc=soc,
+            min_soc=floor, battery_charge_kw=battery_charge,
+            battery_discharge_kw=max(0.0, battery / 1000), grid_power_kw=grid / 1000,
+            grid_import_tolerance_kw=float(solar_params.get('grid_import_tolerance_kw', 0.1)),
+            raw_surplus_kw=capacity)
+        runtime = _dynamic_ev_state.get(config_entry.entry_id, {}).get(params['vehicle_id'], {})
+        continuing = bool(runtime.get('active') and runtime.get('active_profile_id') == profile
+            and runtime.get('charging_started') and not runtime.get('paused')
+            and runtime.get('params', {}).get('owner_mode') == 'solar_surplus'
+            and soc >= float(solar_params.get('pause_below_soc', max(0, floor - 10)))
+            and (not solar_params.get('allow_parallel_charging') or soc >= floor or parallel))
+        battery_permits = soc >= floor or parallel or continuing
+        if not battery_permits:
+            return {'eligible': False, 'reason': 'battery_floor', 'selection_changed': changed}
+        eligible = capacity >= min_amps * voltage * phases / 1000
+        return {'eligible': bool(eligible), 'capacity_kw': capacity,
+                'max_kw': configured_max * voltage * phases / 1000,
+                'min_kw': min_amps * voltage * phases / 1000,
+                'floor_soc': floor / 100, 'parallel': bool(parallel),
+                'params': solar_params, 'selection_changed': changed}
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _record_automated_shared_loadpoint_decision(
@@ -7576,6 +7680,32 @@ def record_smart_schedule_effective_authorization(
     }
 
 
+def _shared_smart_intent(hass, config_entry, vehicle_id, params) -> Optional[bool]:
+    """Return the selected profile's fresh live Smart decision, if known."""
+    from .shared_loadpoint import binding_for_entry, canonical_shared_loadpoint_id, resolve_active_shared_profile
+    selected = resolve_active_shared_profile(hass, config_entry)
+    binding = binding_for_entry(config_entry)
+    if (not selected or binding is None or selected != params.get('active_logical_vehicle_id')
+            or vehicle_id != canonical_shared_loadpoint_id(config_entry, selected)):
+        return None
+    selector = hass.states.get(binding.connected_vehicle_entity)
+    changed = getattr(selector, 'last_changed', None)
+    record = _smart_schedule_effective_authorizations.get(config_entry.entry_id, {}).get(selected.upper())
+    if not changed or not isinstance(record, dict) or record.get('selection_changed') != changed:
+        return None
+    try:
+        age = time.monotonic() - float(record['recorded_at'])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not -1 <= age <= _SMART_SCHEDULE_AUTHORIZATION_MAX_AGE_SECONDS:
+        return None
+    return record.get('allowed') if type(record.get('allowed')) is bool else None
+
+
+def _shared_smart_has_inactive_intent(hass, config_entry, vehicle_id, params) -> bool:
+    return _shared_smart_intent(hass, config_entry, vehicle_id, params) is False
+
+
 def _smart_schedule_has_fresh_free_grid_authorization(
     config_entry: ConfigEntry,
     vehicle_id: str,
@@ -8323,6 +8453,16 @@ def _ev_power_drift_since_site_sample_kw(live_status: dict) -> float:
         return (float(observed_w) - float(sampled_w)) / 1000
     except (TypeError, ValueError):
         return 0.0
+
+
+def _solar_parallel_start_available(*, allow_parallel, battery_soc, min_soc,
+                                    battery_charge_kw, battery_discharge_kw,
+                                    grid_power_kw, grid_import_tolerance_kw,
+                                    raw_surplus_kw):
+    """Shared strict below-floor admission used by Solar and passive evaluation."""
+    return bool(allow_parallel and battery_soc < min_soc
+                and battery_charge_kw > 0.05 and battery_discharge_kw <= 0.05
+                and grid_power_kw <= grid_import_tolerance_kw and raw_surplus_kw > 0)
 
 
 def _calculate_solar_surplus(
@@ -9461,6 +9601,22 @@ async def _set_vehicle_amps_unchecked(
             _record_manual_generic_failure(manual_failure, "control_validation")
             return False
 
+        async def compensate_opportunity_start():
+            if ("_opportunity_generation" not in params
+                    or _dynamic_start_lock_task.get() is not asyncio.current_task()
+                    or shared_lease is None
+                    or not _generic_shared_start_still_authorized(hass, config_entry, vehicle_id, params)):
+                return False
+            cleanup_params = dict(params)
+            cleanup_params.pop("require_physical_start_confirmation", None)
+            cleanup_params["_expected_shared_stop_lease"] = shared_lease
+            cleanup_params["_expected_shared_stop_identity"] = {
+                key: shared_lease.get(key) for key in (
+                    "owner", "owner_mode", "session_id", "active_profile_id",
+                    "started_at", "resolver_stop_lease_token")}
+            await _action_stop_ev_charging_locked_impl(hass, config_entry, cleanup_params)
+            return True
+
         try:
             if amps == 0:
                 # Stop/pause charging; no await between authority check and dispatch.
@@ -9530,7 +9686,12 @@ async def _set_vehicle_amps_unchecked(
                     if (validated is None or not shared_guard()
                             or is_shared_stop_fenced(hass, config_entry, vehicle_id)
                             or get_ev_ownership(hass, config_entry, vehicle_id)[1] is not shared_lease):
+                        await compensate_opportunity_start()
                         return False
+                if ("_opportunity_generation" in params and not
+                        _shared_opportunity_handover_adopted(hass, config_entry, vehicle_id, params)):
+                    await compensate_opportunity_start()
+                    return False
                 if confirmation_started_at is not None and switch_entity:
                     # Setup/wake/current writes can take time. Their telemetry
                     # must not confirm the later switch start.
@@ -9540,13 +9701,16 @@ async def _set_vehicle_amps_unchecked(
                         def authorize_write():
                             return bool(shared_guard()
                                         and get_ev_ownership(hass, config_entry, vehicle_id)[1] is shared_lease
-                                        and _generic_shared_start_still_authorized(hass, config_entry, vehicle_id, params))
+                                        and _generic_shared_start_still_authorized(hass, config_entry, vehicle_id, params)
+                                        and ("_opportunity_generation" not in params or
+                                             _shared_opportunity_handover_adopted(hass, config_entry, vehicle_id, params)))
                         started = await _start_generic_charger_switch(
                             hass, switch_entity, manual_failure, authorize_write=authorize_write
                         )
                     else:
                         started = await _start_generic_charger_switch(hass, switch_entity, manual_failure)
                     if not started:
+                        await compensate_opportunity_start()
                         return False
                 if confirmation_started_at is not None:
                     confirmed = False
@@ -9556,8 +9720,10 @@ async def _set_vehicle_amps_unchecked(
                             params,
                             confirmation_started_at,
                         )
-                        if confirmed and not _generic_shared_start_still_authorized(
-                            hass, config_entry, vehicle_id, params
+                        if confirmed and (
+                            not _generic_shared_start_still_authorized(hass, config_entry, vehicle_id, params)
+                            or ("_opportunity_generation" in params and not
+                                _shared_opportunity_handover_adopted(hass, config_entry, vehicle_id, params))
                         ):
                             confirmed = False
                             evidence = (
@@ -9575,13 +9741,14 @@ async def _set_vehicle_amps_unchecked(
                             cleanup_params = dict(params)
                             cleanup_params.pop("require_physical_start_confirmation", None)
                             try:
-                                await _set_vehicle_amps_unchecked(
-                                    hass,
-                                    config_entry,
-                                    vehicle_id,
-                                    0,
-                                    cleanup_params,
-                                )
+                                if not await compensate_opportunity_start():
+                                    await _set_vehicle_amps_unchecked(
+                                        hass,
+                                        config_entry,
+                                        vehicle_id,
+                                        0,
+                                        cleanup_params,
+                                    )
                             except Exception as cleanup_error:
                                 _LOGGER.warning(
                                     "Generic charger start cleanup failed for %s: %s",
@@ -10274,6 +10441,162 @@ def _optimizer_planned_ev_charge_kw(
     except Exception as err:
         _LOGGER.debug("Could not read planned EV charge power: %s", err)
         return None
+
+
+def _shared_opportunity_handover_adopted(hass, config_entry, vehicle_id, params):
+    """Require the selected opportunity's own fresh adopted optimizer result."""
+    from .shared_loadpoint import binding_for_entry, canonical_shared_loadpoint_id, resolve_active_shared_profile
+
+    entry = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
+    if _shared_smart_intent(hass, config_entry, vehicle_id, params) is True:
+        return False
+    coordinator = entry.get("optimization_coordinator")
+    if coordinator is None or not getattr(coordinator, "_enabled", True):
+        return True
+    adopted = getattr(coordinator, "_adopted_shared_opportunity", None)
+    if not isinstance(adopted, dict):
+        return False
+    request = adopted.get("request")
+    if not isinstance(request, dict) or entry.get("_shared_opportunity_request") is not request:
+        return False
+    try:
+        age = (dt_util.now() - request["decided_at"]).total_seconds()
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    if not -1 <= age <= 90:
+        return False
+    if str(request.get("mode") or "").startswith("price_level"):
+        from ..solar_surplus_config import get_stored_solar_surplus_config
+        from .ev_pricing import get_automation_import_price
+        try:
+            price = get_automation_import_price(entry)
+            if price is None or float(price) != request.get("price_cents"):
+                return False
+        except (TypeError, ValueError, OverflowError, ImportError):
+            return False
+        store = entry.get("automation_store")
+        stored_data = getattr(store, "_data", {}) or {}
+        price_config = stored_data.get("price_level_charging", {})
+        if (not isinstance(price_config, dict) or not price_config.get("enabled")
+                or price_config != request.get("price_config")):
+            return False
+        solar_config = stored_data.get('solar_surplus_config') or {}
+        if solar_config != request.get('solar_config', {}):
+            return False
+        if (get_stored_solar_surplus_config(entry).get("enabled", False)
+                and not request.get('solar_arbitrated')):
+            return False
+    if request.get('solar_arbitrated') and request.get('mode') == 'solar_surplus':
+        from .ev_pricing import get_automation_import_price
+        store = entry.get('automation_store')
+        stored = getattr(store, '_data', {}) or {}
+        try:
+            price = get_automation_import_price(entry)
+            if (price is None or float(price) != request.get('price_cents')
+                    or stored.get('solar_surplus_config', {}) != request.get('solar_config')
+                    or stored.get('price_level_charging', {}) != request.get('price_config')):
+                return False
+        except (TypeError, ValueError, OverflowError, ImportError):
+            return False
+    profile = params.get("active_logical_vehicle_id")
+    binding = binding_for_entry(config_entry)
+    selected = resolve_active_shared_profile(hass, config_entry)
+    selector = hass.states.get(binding.connected_vehicle_entity) if binding else None
+    changed = getattr(selector, "last_changed", None)
+    if (not profile or selected != profile or request.get("profile") != profile
+            or vehicle_id != canonical_shared_loadpoint_id(config_entry, profile)
+            or changed is None or request.get("selection_changed") != changed
+            or not request.get("generation")
+            or request.get("generation") != params.get("_opportunity_generation")
+            or request.get("mode") != params.get("owner_mode")
+            or adopted.get("schedule_updated") != getattr(getattr(coordinator, "_current_schedule", None), "last_updated", None)):
+        return False
+    planned_kw = _optimizer_planned_ev_charge_kw(hass, config_entry, vehicle_id, params)
+    return _optimizer_ev_ceiling_amps(
+        planned_kw, voltage=params.get("voltage", 230), phases=params.get("phases", 1),
+        min_amps=params.get("min_charge_amps", 6), max_amps=params.get("max_charge_amps", 32),
+    ) not in (None, 0)
+
+
+async def _shared_opportunity_revalidate(hass, config_entry, vehicle_id, params):
+    """Re-run the originating mode after awaited work and recheck adoption."""
+    if not _shared_opportunity_handover_adopted(hass, config_entry, vehicle_id, params):
+        return False
+    if str(params.get("owner_mode") or "").startswith("price_level"):
+        from .ev_charging_planner import get_price_level_executor
+        from .ev_pricing import get_automation_import_price
+        executor = get_price_level_executor()
+        if executor is None or getattr(executor.config_entry, "entry_id", None) != config_entry.entry_id:
+            return False
+        entry = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
+        price = get_automation_import_price(entry)
+        allowed, reason, mode = await executor.get_charging_decision(price)
+        if not allowed or mode != params.get("owner_mode"):
+            return False
+        request = entry.get('_shared_opportunity_request')
+        if isinstance(request, dict) and request.get('solar_arbitrated'):
+            from .ev_charging_planner import _shared_live_opportunity_decision
+            choice, _ = await _shared_live_opportunity_decision(
+                executor, params.get('active_logical_vehicle_id'), (allowed, reason, mode), price)
+            if choice != 'price_level':
+                return False
+    elif params.get('owner_mode') == 'solar_surplus':
+        entry = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
+        request = entry.get('_shared_opportunity_request')
+        if isinstance(request, dict) and request.get('solar_arbitrated'):
+            from .ev_charging_planner import get_price_level_executor, _shared_live_opportunity_decision
+            from .ev_pricing import get_automation_import_price
+            executor = get_price_level_executor()
+            if executor is None or getattr(executor.config_entry, 'entry_id', None) != config_entry.entry_id:
+                return False
+            price = get_automation_import_price(entry)
+            decision = await executor.get_charging_decision(price)
+            choice, _ = await _shared_live_opportunity_decision(
+                executor, params.get('active_logical_vehicle_id'), decision, price)
+            if choice != 'solar_surplus':
+                return False
+    return _shared_opportunity_handover_adopted(hass, config_entry, vehicle_id, params)
+
+
+def _shared_smart_handover_adopted(hass, config_entry, vehicle_id, params):
+    """Require a fresh directive for the exact currently selected Smart plan."""
+    from ..const import DOMAIN
+
+    entry = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
+    coordinator = entry.get("optimization_coordinator")
+    if coordinator is None or not getattr(coordinator, "_enabled", True):
+        return True
+    if params.get('_smart_handover_source') == 'grid_free':
+        from .ev_pricing import get_automation_import_price
+        try:
+            price = get_automation_import_price(entry)
+            if (price is not None and math.isfinite(float(price)) and float(price) <= 0
+                    and _optimizer_planned_ev_charge_kw(hass, config_entry, vehicle_id, params) == 0
+                    and _smart_schedule_has_fresh_free_grid_authorization(config_entry, vehicle_id, hass, params)):
+                # Preserve the existing exact-profile free-grid zero exception;
+                # the separate negative-price controls decide the energy source.
+                return True
+        except (TypeError, ValueError, OverflowError):
+            pass
+    profile = params.get("active_logical_vehicle_id")
+    adopted = (getattr(coordinator, "_adopted_smart_handover", {}) or {}).get(profile)
+    if not adopted or adopted.get("plan") is None:
+        return False
+    schedule = getattr(coordinator, "_current_schedule", None)
+    if (
+        adopted.get("schedule_updated") != getattr(schedule, "last_updated", None)
+        or params.get("_smart_handover_plan_id") != id(adopted["plan"])
+        or params.get("_smart_handover_source") != adopted.get("source")
+    ):
+        return False
+    planned_kw = _optimizer_planned_ev_charge_kw(hass, config_entry, vehicle_id, params)
+    return _optimizer_ev_ceiling_amps(
+        planned_kw,
+        voltage=params.get("voltage", 230),
+        phases=params.get("phases", 1),
+        min_amps=params.get("min_charge_amps", 6),
+        max_amps=params.get("max_charge_amps", 32),
+    ) not in (None, 0)
 
 
 def _optimizer_ev_ceiling_amps(
@@ -11373,6 +11696,31 @@ async def _refresh_dynamic_tesla_charger_capability(
 @_decision_trace_scope
 @_shared_callback_capability_scope
 async def _dynamic_ev_update_surplus(
+    hass: HomeAssistant, config_entry: ConfigEntry, entry_id: str, vehicle_id: str,
+) -> None:
+    """Update Solar and invalidate its previous opportunity on early exits."""
+    state = _dynamic_ev_state.get(entry_id, {}).get(vehicle_id)
+    token = object()
+    if isinstance(state, dict):
+        state['_solar_opportunity_cycle'] = token
+    try:
+        await _dynamic_ev_update_surplus_impl(hass, config_entry, entry_id, vehicle_id)
+    finally:
+        entry = hass.data.get(DOMAIN, {}).get(entry_id, {})
+        request = entry.get('_shared_opportunity_request')
+        if (isinstance(state, dict) and state.get('_solar_opportunity_cycle') is token
+                and entry.get('_solar_opportunity_state') is state
+                and isinstance(request, dict) and request.get('mode') == 'solar_surplus'):
+            from .shared_opportunity import withdraw_opportunity_request
+            if withdraw_opportunity_request(entry):
+                coordinator = entry.get('optimization_coordinator')
+                if coordinator and getattr(coordinator, '_enabled', False):
+                    coordinator._schedule_settings_reoptimization()
+        if isinstance(state, dict) and state.get('_solar_opportunity_cycle') is token:
+            state.pop('_solar_opportunity_cycle', None)
+
+
+async def _dynamic_ev_update_surplus_impl(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     entry_id: str,
@@ -12076,13 +12424,11 @@ async def _dynamic_ev_update_surplus(
     grid_import_tolerance_kw = params.get("grid_import_tolerance_kw", 0.1)
     battery_charge_kw = max(0.0, -battery_power_kw)
     battery_discharge_kw = max(0.0, battery_power_kw)
-    strict_surplus_available = (
-        allow_parallel and
-        battery_soc < min_soc and
-        battery_charge_kw > 0.05 and
-        battery_discharge_kw <= 0.05 and
-        grid_power_kw <= grid_import_tolerance_kw and
-        raw_surplus_kw > 0
+    strict_surplus_available = _solar_parallel_start_available(
+        allow_parallel=allow_parallel, battery_soc=battery_soc, min_soc=min_soc,
+        battery_charge_kw=battery_charge_kw, battery_discharge_kw=battery_discharge_kw,
+        grid_power_kw=grid_power_kw, grid_import_tolerance_kw=grid_import_tolerance_kw,
+        raw_surplus_kw=raw_surplus_kw,
     )
     parallel_charging_available = (
         allow_parallel and
@@ -12339,9 +12685,76 @@ async def _dynamic_ev_update_surplus(
     min_amps = _effective_min_charge_amps(params, hass)
     hardware_min_amps = _hardware_min_charge_amps(params, hass)
     max_amps = _effective_max_charge_amps(params, hass)
+    low_since = state.get("low_surplus_start")
+    within_stop_delay = (
+        effective_current_amps > 0
+        and (low_since is None or
+             (datetime.now() - low_since).total_seconds() < float(params.get("stop_delay_minutes", 5)) * 60)
+    )
+    competing_fresh = False
+    if (params.get("owner_mode") == "solar_surplus"
+            and params.get("shared_loadpoint_binding")
+            and (available_amps >= min_amps or within_stop_delay)):
+        from .shared_loadpoint import binding_for_entry, resolve_active_shared_profile
+        from .shared_opportunity import update_opportunity_request
+        binding = binding_for_entry(config_entry)
+        selector = hass.states.get(binding.connected_vehicle_entity) if binding else None
+        changed_at = getattr(selector, "last_changed", None)
+        selected = resolve_active_shared_profile(hass, config_entry)
+        entry_data = hass.data.get(DOMAIN, {}).get(entry_id, {})
+        coordinator = entry_data.get("optimization_coordinator")
+        competing = entry_data.get('_shared_opportunity_request')
+        competing_fresh = False
+        if isinstance(competing, dict) and str(competing.get('mode', '')).startswith('price_level') and competing.get('solar_arbitrated'):
+            from .ev_pricing import get_automation_import_price
+            stored = getattr(entry_data.get('automation_store'), '_data', {}) or {}
+            try:
+                age = (dt_util.now() - competing['decided_at']).total_seconds()
+                competing_fresh = (0 <= age <= 90 and competing.get('profile') == selected
+                    and competing.get('selection_changed') == changed_at
+                    and float(get_automation_import_price(entry_data)) == competing.get('price_cents')
+                    and (stored.get('price_level_charging') or {}) == competing.get('price_config')
+                    and (stored.get('solar_surplus_config') or {}) == competing.get('solar_config'))
+            except (TypeError, ValueError, KeyError, OverflowError, ImportError):
+                competing_fresh = False
+        if (coordinator and getattr(coordinator, "_enabled", False)
+                and not competing_fresh and selected and selected == params.get("active_logical_vehicle_id")
+                and changed_at is not None and voltage > 0 and phases > 0):
+            # Use the actual pre-optimizer solar decision. The existing Solar
+            # controller still enforces its minimum-surplus start/stop timers.
+            # The solver may plan up to the configured maximum; live Solar
+            # rate control below still clamps to measured surplus. Keeping the
+            # envelope stable avoids a re-solve for each one-amp PV fluctuation.
+            floor = max(0.0, min(1.0, float(min_soc) / 100.0))
+            parallel = bool(state.get("parallel_charging_mode") and battery_soc < min_soc)
+            facts = {"profile": selected, "mode": "solar_surplus",
+                "selection_changed": changed_at,
+                "power_kw": max_amps * voltage * phases / 1000,
+                "min_power_kw": min_amps * voltage * phases / 1000,
+                "allow_grid": False, "allow_battery": False,
+                "battery_floor_soc": floor, "min_start_soc": floor,
+                "allow_min_start_solar_exception": parallel,
+                "solar_battery_reserve_kw": float(max_battery_charge_kw) if parallel else 0.0}
+            _request, changed = update_opportunity_request(entry_data, facts, dt_util.now())
+            if '_opportunity_generation' in params:
+                params['_opportunity_generation'] = _request['generation']
+            entry_data['_solar_opportunity_state'] = state
+            state.pop('_solar_opportunity_cycle', None)
+            if changed:
+                coordinator._schedule_settings_reoptimization()
     planned_ev_charge_kw = _optimizer_planned_ev_charge_kw(
         hass, config_entry, vehicle_id, params
     )
+    entry_data = hass.data.get(DOMAIN, {}).get(entry_id, {})
+    solar_request = entry_data.get('_shared_opportunity_request')
+    if effective_current_amps <= 0 and competing_fresh:
+        planned_ev_charge_kw = 0.0
+    if (effective_current_amps <= 0 and entry_data.get('_solar_opportunity_state') is state
+            and isinstance(solar_request, dict) and solar_request.get('mode') == 'solar_surplus'):
+        guarded_params = {**params, '_opportunity_generation': solar_request.get('generation')}
+        if not _shared_opportunity_handover_adopted(hass, config_entry, vehicle_id, guarded_params):
+            # A positive Smart/Price result is not an adopted Solar opportunity.
+            planned_ev_charge_kw = 0.0
     optimizer_ceiling_amps = _optimizer_ev_ceiling_amps(
         planned_ev_charge_kw,
         voltage=voltage,
@@ -12478,6 +12891,23 @@ async def _dynamic_ev_update_surplus(
         if effective_current_amps == 0:
             # Track how long we've had surplus before starting
             high_surplus_start = state.get("high_surplus_start")
+            if high_surplus_start is None and params.get('_opportunity_generation'):
+                from .shared_loadpoint import binding_for_entry, resolve_active_shared_profile
+                entry_data = hass.data.get(DOMAIN, {}).get(entry_id, {})
+                tracker = entry_data.get('_shared_solar_boundary') or {}
+                binding = binding_for_entry(config_entry)
+                selector = hass.states.get(binding.connected_vehicle_entity) if binding else None
+                selected = resolve_active_shared_profile(hass, config_entry) if binding else None
+                since = tracker.get('above')
+                if (tracker.get('eligible') and selected == params.get('active_logical_vehicle_id')
+                        and tracker.get('profile') == selected
+                        and tracker.get('selection_changed') == getattr(selector, 'last_changed', None)
+                        and isinstance(since, (int, float))
+                        and _shared_opportunity_handover_adopted(hass, config_entry, vehicle_id, params)):
+                    elapsed = time.monotonic() - since
+                    if math.isfinite(elapsed) and elapsed >= 0:
+                        high_surplus_start = datetime.now() - timedelta(seconds=elapsed)
+                        state['high_surplus_start'] = high_surplus_start
             if high_surplus_start is None:
                 state["high_surplus_start"] = datetime.now()
                 new_amps = 0  # Don't set amps yet, wait for sustained surplus
@@ -14727,9 +15157,13 @@ async def _action_start_ev_charging_dynamic(
     from ..const import DOMAIN
 
     async with _start_dynamic_lock:
-        return await _action_start_ev_charging_dynamic_locked(
-            hass, config_entry, params, context
-        )
+        token = _dynamic_start_lock_task.set(asyncio.current_task())
+        try:
+            return await _action_start_ev_charging_dynamic_locked(
+                hass, config_entry, params, context
+            )
+        finally:
+            _dynamic_start_lock_task.reset(token)
 
 
 def _consume_recovered_solar_surplus_continuation_amps(
@@ -14976,7 +15410,13 @@ async def _action_start_ev_charging_dynamic_locked(
     entry_vehicles = _dynamic_ev_state.get(entry_id, {})
 
     if shared_binding is not None:
+        if ("_opportunity_generation" in params
+                and not await _shared_opportunity_revalidate(hass, config_entry, vehicle_id, params)):
+            return False
         from .ev_ownership import can_take_over_ev_ownership, owner_family
+        if (owner_family(owner_mode) in {'price_level', 'solar_surplus'}
+                and _shared_smart_intent(hass, config_entry, vehicle_id, params) is True):
+            return False
         entry_data = _automated_shared_sequence_entry_data(hass, config_entry)
         handover = entry_data.get(_SHARED_HANDOVER_KEY) if entry_data is not None else None
         if handover:
@@ -14993,6 +15433,11 @@ async def _action_start_ev_charging_dynamic_locked(
             elif not handover.get("pending", {}).get("settled_observation"):
                 return False
             elif handover.get("reaffirmed"):
+                if (owner_family(owner_mode) == "smart_schedule"
+                        and not _shared_smart_handover_adopted(
+                            hass, config_entry, vehicle_id, params
+                        )):
+                    return False
                 # The successor is evaluated again by its own policy; no saved
                 # command or parameters are replayed after the stop settles.
                 entry_data.pop(_SHARED_HANDOVER_KEY, None)
@@ -15363,6 +15808,10 @@ async def _action_start_ev_charging_dynamic_locked(
         vehicle_id,
         owner_mode=owner_mode,
         allow_takeover=allow_takeover,
+        allow_adopted_solar_takeover=(shared_binding is not None and '_opportunity_generation' in params
+            and owner_family(owner_mode) == 'solar_surplus'),
+        allow_smart_yield=(_shared_smart_has_inactive_intent(hass, config_entry, vehicle_id, params)
+            if shared_binding is not None else None),
     )
     if not allowed:
         reason = block_reason or "another EV mode owns this loadpoint"
@@ -15405,6 +15854,10 @@ async def _action_start_ev_charging_dynamic_locked(
             )
             return False
 
+    if (shared_binding is not None and "_opportunity_generation" in params
+            and not await _shared_opportunity_revalidate(hass, config_entry, vehicle_id, params)):
+        return False
+
     # Legacy fallback for runtime state created before explicit ownership was
     # claimed. This keeps old dynamic sessions from being hijacked by another
     # automated mode during an in-place upgrade.
@@ -15417,10 +15870,21 @@ async def _action_start_ev_charging_dynamic_locked(
             or existing_params.get("dynamic_mode")
             or "dynamic"
         )
+        if (
+            shared_binding is not None
+            and owner_family(existing_owner_mode) == "price_level"
+            and owner_family(owner_mode) == "smart_schedule"
+            and not _shared_smart_handover_adopted(hass, config_entry, vid, params)
+        ):
+            return False
         if not can_take_over_ev_ownership(
             existing_owner_mode,
             owner_mode,
             allow_takeover=allow_takeover,
+            allow_adopted_solar_takeover=(shared_binding is not None and '_opportunity_generation' in params
+                and owner_family(owner_mode) == 'solar_surplus'),
+            allow_smart_yield=(_shared_smart_has_inactive_intent(hass, config_entry, vehicle_id, params)
+                if shared_binding is not None else None),
         ):
             reason = f"{existing_owner_mode} already owns this loadpoint"
             _LOGGER.info(
@@ -15461,6 +15925,35 @@ async def _action_start_ev_charging_dynamic_locked(
             # the existing controller in place. Keep this command-neutral so a
             # policy handoff cannot interrupt an EV that is already charging.
             if owner_family(existing_owner_mode) != owner_family(owner_mode):
+                if (
+                    shared_binding is not None
+                    and owner_family(existing_owner_mode) == "price_level"
+                    and owner_family(owner_mode) == "smart_schedule"
+                    and allow_takeover
+                ):
+                    if not _shared_smart_handover_adopted(
+                        hass, config_entry, vid, params
+                    ):
+                        return False
+                    # A business-owner change must settle Price-Level's exact
+                    # executor/session before Smart Schedule may start. A
+                    # command-neutral parameter swap leaves the old executor
+                    # believing it still owns charging.
+                    token = _direct_shared_stop_owner.set(
+                        (asyncio.current_task(), v_state, None, dict(existing_params))
+                    )
+                    try:
+                        await _stop_dynamic_under_transition_lock(
+                            hass, config_entry,
+                            {"vehicle_id": vid, "stop_charging": True,
+                             "stop_reason": "mode handoff", "_expected_state": v_state},
+                        )
+                    finally:
+                        _direct_shared_stop_owner.reset(token)
+                    _remember_shared_handover(
+                        hass, config_entry, vid, params, v_state.get("pending_stop")
+                    )
+                    return False
                 if can_take_over_ev_ownership(
                     existing_owner_mode,
                     owner_mode,
@@ -15767,11 +16260,42 @@ async def _action_start_ev_charging_dynamic_locked(
     # command by a poll interval, so the not-yet-settled aftermath of our own
     # stop must never read back as evidence that the car is already charging.
     teardown_report: Dict[str, Any] = {}
+    teardown_stop_charging = True
+    outgoing = entry_vehicles.get(vehicle_id)
+    if (shared_binding is not None and isinstance(outgoing, dict) and outgoing.get('active')
+            and owner_family((outgoing.get('params') or {}).get('owner_mode')) == 'smart_schedule'
+            and owner_family(owner_mode) in {'price_level', 'solar_surplus'}
+            and not _shared_smart_has_inactive_intent(hass, config_entry, vehicle_id, params)):
+        return False
+    if (shared_binding is not None and '_opportunity_generation' in params
+            and isinstance(outgoing, dict) and outgoing.get('active')
+            and outgoing.get('active_profile_id') == params.get('active_logical_vehicle_id')
+            and not outgoing.get('pending_stop') and not outgoing.get('charging_started')
+            and not outgoing.get('current_amps')):
+        from .ev_ownership import get_ev_ownership
+        lease_before = get_ev_ownership(hass, config_entry, vehicle_id)[1]
+        observation = await _observe_shared_loadpoint_for_direct_lease(
+            hass, config_entry, vehicle_id, outgoing.get('params') or {})
+        if not await _shared_opportunity_revalidate(hass, config_entry, vehicle_id, params):
+            return False
+        if (entry_vehicles.get(vehicle_id) is not outgoing or outgoing.get('pending_stop')
+                or lease_before is None or get_ev_ownership(hass, config_entry, vehicle_id)[1] is not lease_before):
+            return False
+        if observation is None or not observation.fresh or observation.charging is None:
+            return False
+        if observation.charging is False:
+            teardown_stop_charging = False
+    if (shared_binding is not None and isinstance(outgoing, dict) and outgoing.get('active')
+            and owner_family((outgoing.get('params') or {}).get('owner_mode')) == 'smart_schedule'
+            and owner_family(owner_mode) in {'price_level', 'solar_surplus'}
+            and not _shared_smart_has_inactive_intent(hass, config_entry, vehicle_id, params)):
+        return False
     teardown_ok = await _stop_dynamic_under_transition_lock(
         hass,
         config_entry,
         {
             "vehicle_id": vehicle_id,
+            "stop_charging": teardown_stop_charging,
             "_physical_stop_report": teardown_report,
             "_user_initiated": bool(params.get("_user_initiated")),
         },
@@ -15783,6 +16307,15 @@ async def _action_start_ev_charging_dynamic_locked(
                 entry_vehicles.get(vehicle_id, {}).get("pending_stop"),
             )
         return False
+    if not teardown_stop_charging and outgoing is not None:
+        from .ev_ownership import get_ev_ownership
+        snapshot = outgoing.get('executor_stop_snapshot')
+        if (entry_vehicles.get(vehicle_id) is None
+                and get_ev_ownership(hass, config_entry, vehicle_id)[1] is None and snapshot):
+            try:
+                snapshot['complete'](config_entry, snapshot)
+            except Exception:
+                _LOGGER.exception('Could not reconcile outgoing executor at idle handover')
     self_stopped_during_teardown = bool(
         teardown_report.get("physical_stop_vehicle_ids")
     )

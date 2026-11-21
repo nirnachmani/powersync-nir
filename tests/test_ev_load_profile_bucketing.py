@@ -352,6 +352,9 @@ class _FakeOverlayCoordinator:
         }
         return self._ev_charge_plan
 
+    def _merge_shared_opportunity(self, plans, schedule_timestamps):
+        return plans
+
     async def _build_price_level_projection(self, n_intervals: int):
         return SimpleNamespace(
             expected_w=tuple(0.0 for _ in range(n_intervals)),
@@ -511,6 +514,245 @@ def _extract_coordinator_method(name: str):
     ast.fix_missing_locations(method)
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(COORDINATOR_PATH), "exec"), namespace)
     return namespace[name]
+
+
+def test_selected_fresh_opportunity_enters_optimizer_without_smart_plan(monkeypatch):
+    from test_shared_loadpoint_action_guard import _Hass, _Entry
+    from power_sync.optimization.ev_load_plan import EVChargePlan
+    merge = _extract_coordinator_method('_merge_shared_opportunity')
+    now = datetime(2026, 8, 21, 0, 5, tzinfo=timezone.utc)
+    monkeypatch.setattr(_ha_dt, 'now', lambda: now)
+    hass, entry = _Hass(), _Entry()
+    selector = hass.states.get('sensor.connected_vehicle')
+    selector.last_changed = now - timedelta(minutes=1)
+    request = {'profile': 'shared_ev_profile_a', 'mode': 'price_level_opportunity',
+               'generation': object(), 'selection_changed': selector.last_changed, 'decided_at': now,
+               'power_kw': 4.0, 'min_power_kw': 1.4,
+               'allow_grid': True, 'allow_battery': False}
+    hass.data['power_sync'][entry.entry_id]['_shared_opportunity_request'] = request
+    coordinator = SimpleNamespace(hass=hass, config_entry=entry, _pending_shared_opportunity=None)
+    plans = merge(coordinator, None, [now, now + timedelta(minutes=5)])
+    assert len(plans) == 1 and isinstance(plans[0], EVChargePlan)
+    assert plans[0].vehicle_id == 'shared_ev_profile_a'
+    assert plans[0].opportunity_power_kw == 4.0
+    assert coordinator._pending_shared_opportunity is request
+    selector.last_changed = now
+    assert merge(coordinator, None, [now]) is None
+    assert coordinator._pending_shared_opportunity is None
+    selector.last_changed = request['selection_changed']
+    request['decided_at'] = now - timedelta(seconds=91)
+    assert merge(coordinator, None, [now]) is None
+    assert coordinator._pending_shared_opportunity is None
+
+
+def test_real_solver_opportunity_is_adopted_with_same_request(monkeypatch):
+    from test_shared_loadpoint_action_guard import _Hass, _Entry
+    optimizer_module = importlib.import_module('power_sync.optimization.battery_optimizer')
+    merge = _extract_coordinator_method('_merge_shared_opportunity')
+    adopt = _extract_coordinator_method('_adopt_solved_ev_series')
+    now = datetime(2026, 8, 21, 0, 5, tzinfo=timezone.utc)
+    monkeypatch.setattr(_ha_dt, 'now', lambda: now)
+    hass, entry = _Hass(), _Entry()
+    selector = hass.states.get('sensor.connected_vehicle')
+    selector.last_changed = now - timedelta(minutes=1)
+    request = {'profile': 'shared_ev_profile_a', 'mode': 'solar_surplus',
+               'generation': object(), 'selection_changed': selector.last_changed,
+               'decided_at': now, 'power_kw': 4., 'min_power_kw': 1.4,
+               'allow_grid': False, 'allow_battery': False}
+    hass.data['power_sync'][entry.entry_id]['_shared_opportunity_request'] = request
+    coordinator = SimpleNamespace(hass=hass, config_entry=entry,
+        _last_planned_ev_load_forecast_w=None, _last_effective_ev_load_forecast_w=None)
+    timestamps = [now + timedelta(hours=i) for i in range(8)]
+    plans = merge(coordinator, None, timestamps)
+    coordinator._pending_ev_charge_plan = plans
+    optimizer = optimizer_module.BatteryOptimizer(capacity_wh=40000, max_charge_w=14700,
+        max_discharge_w=10000, max_grid_import_w=5000, backup_reserve=.05,
+        interval_minutes=60, horizon_hours=8)
+    result = optimizer.optimize(import_prices=[.1]*8, export_prices=[.05]*8,
+        solar_forecast=[6.] + [0.]*7, load_forecast=[.5]*8,
+        current_soc=1., schedule_timestamps=timestamps, allow_grid_charge=False, ev_plan=plans)
+    assert result.lp_stats['ev_opportunity_solve_used']
+    adopt(coordinator, result)
+    assert coordinator._adopted_shared_opportunity['request'] is request
+    assert coordinator._last_ev_charge_by_vehicle_w['shared_ev_profile_a'][0] == pytest.approx(4000, abs=1)
+    from test_shared_loadpoint_action_guard import actions
+    coordinator._enabled = True
+    coordinator._config = SimpleNamespace(interval_minutes=60)
+    coordinator._current_schedule = result.schedule
+    coordinator._get_current_action = lambda: result.schedule.actions[0]
+    hass.data['power_sync'][entry.entry_id]['optimization_coordinator'] = coordinator
+    params = {'active_logical_vehicle_id': 'shared_ev_profile_a', 'owner_mode': 'solar_surplus',
+              '_opportunity_generation': request['generation'], 'voltage': 230, 'phases': 1,
+              'min_charge_amps': 6, 'max_charge_amps': 32}
+    assert actions._shared_opportunity_handover_adopted(hass, entry, 'generic_ev', params)
+
+
+@pytest.mark.parametrize('price_change_phase', ['none', 'number', 'confirm'])
+def test_real_price_policy_to_solver_adoption_and_controller(monkeypatch, price_change_phase):
+    from unittest.mock import AsyncMock, Mock
+    from test_ev_price_level_ownership import ev_planner
+    from test_shared_loadpoint_action_guard import _Hass, _Entry, actions, _generic_params
+    from test_shared_stop_storage import Store
+    optimizer_module = importlib.import_module('power_sync.optimization.battery_optimizer')
+    merge = _extract_coordinator_method('_merge_shared_opportunity')
+    adopt = _extract_coordinator_method('_adopt_solved_ev_series')
+    now = datetime(2026, 8, 21, 0, 5, tzinfo=timezone.utc)
+    monkeypatch.setattr(_ha_dt, 'now', lambda: now)
+    hass, entry = _Hass(), _Entry()
+    hass.states.get('switch.shared_ev').state = 'off'
+    hass.states.async_all = lambda: []
+    hass.states.get('sensor.connected_vehicle').last_changed = now - timedelta(minutes=1)
+    data = hass.data['power_sync'][entry.entry_id]
+    data['automation_store'] = Store()
+    data['automation_store']._data['price_level_charging'] = {
+        'enabled': True, 'home_battery_minimum': 20, 'opportunity_price_cents': 10}
+    data['amber_prices'] = {'import_cents': 8}
+    coordinator = SimpleNamespace(hass=hass, config_entry=entry, _enabled=True,
+        _schedule_settings_reoptimization=Mock(), _last_planned_ev_load_forecast_w=None,
+        _last_effective_ev_load_forecast_w=None, _config=SimpleNamespace(interval_minutes=60))
+    data['optimization_coordinator'] = coordinator
+    executor = ev_planner.PriceLevelChargingExecutor(hass, entry)
+    executor._get_home_battery_soc = AsyncMock(return_value=60)
+    executor._get_ev_soc = AsyncMock(return_value=50)
+    monkeypatch.setattr(ev_planner, 'get_price_level_executor', lambda: executor)
+    monkeypatch.setattr(ev_planner, 'get_ev_location', AsyncMock(return_value='home'))
+    monkeypatch.setattr(ev_planner, 'is_ev_plugged_in', AsyncMock(return_value=True))
+    monkeypatch.setattr(ev_planner, 'discover_all_tesla_vehicles', AsyncMock(return_value=[]))
+    monkeypatch.setattr(actions, '_is_vehicle_charge_complete', AsyncMock(return_value=False))
+    async def observed_start(*args):
+        if price_change_phase == 'confirm':
+            data['amber_prices']['import_cents'] = 20
+        return True, 'controlled fresh readback'
+    async def service(domain, name, *args, **kwargs):
+        if price_change_phase == 'number' and (domain, name) == ('number', 'set_value'):
+            data['amber_prices']['import_cents'] = 20
+    hass.services.async_call.side_effect = service
+    monkeypatch.setattr(actions, '_wait_for_generic_physical_start', observed_start)
+    monkeypatch.setattr(ev_planner, '_build_dynamic_charging_params', lambda *a, **k: {
+        **_generic_params(), 'vehicle_id': 'generic_ev', 'active_logical_vehicle_id': 'shared_ev_profile_a',
+        'owner_mode': k['owner_mode'], 'dynamic_mode': 'battery_target',
+        'voltage': 230, 'phases': 1, 'min_charge_amps': 6, 'max_charge_amps': 16})
+    asyncio.run(executor.evaluate_all_vehicles(8))
+    hass.services.async_call.assert_not_awaited()
+    request = data['_shared_opportunity_request']
+    timestamps = [now + timedelta(hours=i) for i in range(8)]
+    plans = merge(coordinator, None, timestamps)
+    coordinator._pending_ev_charge_plan = plans
+    optimizer = optimizer_module.BatteryOptimizer(capacity_wh=40000, max_charge_w=14700,
+        max_discharge_w=10000, max_grid_import_w=5000, backup_reserve=.05,
+        interval_minutes=60, horizon_hours=8)
+    result = optimizer.optimize(import_prices=[.08]*8, export_prices=[.05]*8,
+        solar_forecast=[0.]*8, load_forecast=[.5]*8, current_soc=1.,
+        schedule_timestamps=timestamps, allow_grid_charge=False, ev_plan=plans)
+    adopt(coordinator, result)
+    assert coordinator._adopted_shared_opportunity['request'] is request
+    coordinator._current_schedule = result.schedule
+    coordinator._get_current_action = lambda: result.schedule.actions[0]
+    asyncio.run(executor.evaluate_all_vehicles(8))
+    if price_change_phase != 'none':
+        runtime = actions._dynamic_ev_state[entry.entry_id]['generic_ev']
+        assert not runtime['active'] and runtime.get('pending_stop')
+        assert any(call.args[:2] == ('switch', 'turn_off') for call in hass.services.async_call.await_args_list), hass.services.async_call.await_args_list
+        if price_change_phase == 'number':
+            assert not any(call.args[:2] == ('switch', 'turn_on') for call in hass.services.async_call.await_args_list)
+    else:
+        assert actions._dynamic_ev_state[entry.entry_id]['generic_ev']['active']
+    assert hass.services.async_call.await_count > 0
+    actions._dynamic_ev_state.clear()
+
+
+def test_adopted_opportunity_rejects_stale_or_wrong_profile(monkeypatch):
+    from test_shared_loadpoint_action_guard import _Hass, _Entry, actions
+    hass, entry = _Hass(), _Entry()
+    selector = hass.states.get('sensor.connected_vehicle')
+    changed_at = datetime(2026, 8, 21, tzinfo=timezone.utc)
+    selector.last_changed = changed_at
+    now = datetime(2026, 8, 21, 0, 5, tzinfo=timezone.utc)
+    monkeypatch.setattr(actions.dt_util, 'now', lambda: now)
+    generation = object()
+    request = {'profile': 'shared_ev_profile_a', 'mode': 'price_level_opportunity',
+               'price_cents': 8.0, 'price_config': {'enabled': True},
+               'generation': generation, 'selection_changed': selector.last_changed, 'decided_at': now}
+    hass.data['power_sync'][entry.entry_id]['automation_store'] = SimpleNamespace(
+        _data={'price_level_charging': {'enabled': True}})
+    hass.data['power_sync'][entry.entry_id]['amber_prices'] = {'import_cents': 8.0}
+    updated = datetime(2026, 8, 21, 0, 5, tzinfo=timezone.utc)
+    coordinator = SimpleNamespace(_enabled=True, _current_schedule=SimpleNamespace(last_updated=updated),
+        _adopted_shared_opportunity={'request': request, 'schedule_updated': updated})
+    hass.data['power_sync'][entry.entry_id]['optimization_coordinator'] = coordinator
+    hass.data['power_sync'][entry.entry_id]['_shared_opportunity_request'] = request
+    monkeypatch.setattr(actions, '_optimizer_planned_ev_charge_kw', lambda *a, **kw: 4.0)
+    params = {'active_logical_vehicle_id': 'shared_ev_profile_a',
+              'owner_mode': 'price_level_opportunity', '_opportunity_generation': generation,
+              'min_charge_amps': 6, 'max_charge_amps': 32, 'voltage': 230, 'phases': 1}
+    assert actions._shared_opportunity_handover_adopted(hass, entry, 'generic_ev', params)
+    actions.record_smart_schedule_effective_authorization(entry, 'shared_ev_profile_a',
+        allowed=True, source='grid_offpeak', hass=hass)
+    assert not actions._shared_opportunity_handover_adopted(hass, entry, 'generic_ev', params)
+    actions._smart_schedule_effective_authorizations.clear()
+    hass.data['power_sync'][entry.entry_id]['amber_prices']['import_cents'] = 20.0
+    assert not actions._shared_opportunity_handover_adopted(hass, entry, 'generic_ev', params)
+    hass.data['power_sync'][entry.entry_id]['amber_prices']['import_cents'] = 8.0
+    hass.data['power_sync'][entry.entry_id]['automation_store']._data['price_level_charging']['enabled'] = False
+    assert not actions._shared_opportunity_handover_adopted(hass, entry, 'generic_ev', params)
+    hass.data['power_sync'][entry.entry_id]['automation_store']._data['price_level_charging']['enabled'] = True
+    selector.last_changed = datetime(2026, 8, 22, tzinfo=timezone.utc)
+    assert not actions._shared_opportunity_handover_adopted(hass, entry, 'generic_ev', params)
+    selector.last_changed = request['selection_changed']
+    params['_opportunity_generation'] = object()
+    assert not actions._shared_opportunity_handover_adopted(hass, entry, 'generic_ev', params)
+    params['_opportunity_generation'] = generation
+    params['owner_mode'] = 'solar_surplus'
+    assert not actions._shared_opportunity_handover_adopted(hass, entry, 'generic_ev', params)
+    params['owner_mode'] = 'price_level_opportunity'
+    hass.data['power_sync'][entry.entry_id]['_shared_opportunity_request'] = dict(request)
+    assert not actions._shared_opportunity_handover_adopted(hass, entry, 'generic_ev', params)
+    hass.data['power_sync'][entry.entry_id]['_shared_opportunity_request'] = request
+    request['decided_at'] = now - timedelta(seconds=91)
+    assert not actions._shared_opportunity_handover_adopted(hass, entry, 'generic_ev', params)
+    request['decided_at'] = now
+    coordinator._current_schedule.last_updated = datetime(2026, 8, 21, 0, 10, tzinfo=timezone.utc)
+    assert not actions._shared_opportunity_handover_adopted(hass, entry, 'generic_ev', params)
+
+
+def test_opportunity_adoption_is_bound_to_selected_solve_and_success():
+    adopt = _extract_coordinator_method('_adopt_solved_ev_series')
+    updated = datetime(2026, 8, 21, 0, 5, tzinfo=timezone.utc)
+    request = {'profile': 'profile-a', 'mode': 'price_level_opportunity', 'generation': object()}
+    result = SimpleNamespace(schedule=SimpleNamespace(last_updated=updated, actions=[]),
+                             ev_charge_by_vehicle_w={'profile-a': [4000.]},
+                             ev_source_by_vehicle_w={}, lp_stats={'ev_opportunity_solve_used': True})
+    coordinator = SimpleNamespace(_pending_shared_opportunity=request,
+        _pending_ev_charge_plan=[SimpleNamespace(vehicle_id='profile-a', opportunity_power_kw=4)],
+        _last_planned_ev_load_forecast_w=None, _last_effective_ev_load_forecast_w=None)
+    adopt(coordinator, result)
+    assert coordinator._adopted_shared_opportunity['request'] is request
+    assert coordinator._adopted_shared_opportunity['schedule_updated'] == updated
+    result.lp_stats['ev_opportunity_solve_used'] = False
+    adopt(coordinator, result)
+    assert coordinator._adopted_shared_opportunity is None
+    result.lp_stats['ev_opportunity_solve_used'] = True
+    coordinator._pending_ev_charge_plan = []
+    adopt(coordinator, result)
+    assert coordinator._adopted_shared_opportunity is None
+
+
+def test_smart_handover_policy_is_frozen_only_with_adopted_ev_series():
+    adopt = _extract_coordinator_method("_adopt_solved_ev_series")
+    updated = datetime(2026, 8, 21, 0, 5, tzinfo=timezone.utc)
+    plan = object()
+    policy = {"profile-a": {"current": {"window_source": "grid_offpeak", "max_power_kw": 7.0}}}
+    result = SimpleNamespace(schedule=SimpleNamespace(last_updated=updated, actions=[]),
+                             ev_charge_by_vehicle_w={"profile-a": [7000.0]},
+                             ev_source_by_vehicle_w={})
+    coordinator = SimpleNamespace(_last_ev_optimizer_policy=policy,
+        _pending_smart_plan_refs={"profile-a": plan},
+        _last_planned_ev_load_forecast_w=None, _last_effective_ev_load_forecast_w=None)
+    adopt(coordinator, result)
+    policy["profile-a"]["current"]["window_source"] = "unavailable_now"
+    assert coordinator._adopted_smart_handover["profile-a"]["plan"] is plan
+    assert coordinator._adopted_smart_handover["profile-a"]["source"] == "grid_offpeak"
+    assert coordinator._adopted_smart_handover["profile-a"]["schedule_updated"] == updated
 
 
 def test_solved_ev_series_keeps_exact_vehicle_zeroes_and_schedule_identity():
@@ -1121,6 +1363,20 @@ def test_blocked_smart_loadpoint_still_suppresses_price_level_takeover():
     load = _run_overlay(coordinator, [2000.0, 2000.0, 2000.0, 2000.0])
 
     assert load == [3200.0, 3200.0, 2000.0, 2000.0]
+
+
+def test_current_only_opportunity_preserves_future_price_projection():
+    coordinator = _FakeOverlayCoordinator(external_forecast=None, internal_forecast=None,
+                                           ev_integration_enabled=True)
+    coordinator._price_components = {'ev': [6800.0, 6800.0, 6800.0, 0.0]}
+    coordinator._internal_forecast = [3000.0, 0.0, 0.0, 0.0]
+    def merge(_plans, _timestamps):
+        coordinator._pending_shared_opportunity = {'profile': 'ev'}
+        return [SimpleNamespace(vehicle_id='ev', energy_needed_kwh=0,
+                                opportunity_power_kw=4)]
+    coordinator._merge_shared_opportunity = merge
+    load = _run_overlay(coordinator, [2000.0] * 4)
+    assert load == [2000.0, 8800.0, 8800.0, 2000.0]
 
 
 def test_lp_plan_suppresses_only_its_loadpoint_overlay():

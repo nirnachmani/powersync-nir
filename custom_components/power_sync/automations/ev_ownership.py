@@ -50,6 +50,8 @@ def can_take_over_ev_ownership(
     requested_mode: Any,
     *,
     allow_takeover: bool = False,
+    allow_adopted_solar_takeover: bool = False,
+    allow_smart_yield: bool | None = None,
 ) -> bool:
     """Return whether one EV owner mode may replace another."""
     requested_family = owner_family(requested_mode)
@@ -69,8 +71,19 @@ def can_take_over_ev_ownership(
 
     if existing_family == "manual":
         return False
+    if (allow_smart_yield is not None and existing_family == "smart_schedule"
+            and requested_family in {"solar_surplus", "price_level"}):
+        return bool(allow_takeover and allow_smart_yield)
 
-    return bool(allow_takeover and is_solar_surplus_owner_mode(existing_mode))
+    return bool(
+        allow_takeover
+        and (
+            is_solar_surplus_owner_mode(existing_mode)
+            or (requested_family == "smart_schedule" and existing_family == "price_level")
+            or (allow_adopted_solar_takeover and requested_family == "solar_surplus"
+                and existing_family == "price_level")
+        )
+    )
 
 
 def _now_iso() -> str:
@@ -931,6 +944,8 @@ def can_claim_ev_ownership(
     *,
     owner_mode: str,
     allow_takeover: bool = False,
+    allow_adopted_solar_takeover: bool = False,
+    allow_smart_yield: bool | None = None,
 ) -> tuple[bool, str | None, dict[str, Any] | None, str | None]:
     """Return whether an owner mode may claim a loadpoint right now."""
     lease_id, lease = get_ev_ownership(hass, config_entry, vehicle_id)
@@ -964,6 +979,8 @@ def can_claim_ev_ownership(
         existing_mode,
         owner_mode,
         allow_takeover=allow_takeover,
+        allow_adopted_solar_takeover=allow_adopted_solar_takeover,
+        allow_smart_yield=allow_smart_yield,
     ):
         return True, lease_id, lease, None
 

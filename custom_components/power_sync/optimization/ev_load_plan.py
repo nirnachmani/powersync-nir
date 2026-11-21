@@ -16,7 +16,7 @@ available. This module carries the missing demand in two forms:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from typing import Iterable, Sequence
 
@@ -75,6 +75,9 @@ class EVChargePlan:
     # deadline, letting the solver satisfy the total in a cheap window that
     # car can no longer use.
     deadline_requirements: tuple[tuple[int, float], ...] = ()
+    # Current-slot opportunity is distinct from the departure requirement.
+    opportunity_power_kw: float = 0.0
+    opportunity_min_power_kw: float = 0.0
 
     @property
     def staged_requirements(self) -> tuple[tuple[int, float], ...]:
@@ -83,15 +86,16 @@ class EVChargePlan:
             return self.deadline_requirements
         deadline = self.deadline_index
         if deadline < 0:
-            return ()
+            return ((0, 0.0),) if self.opportunity_power_kw > 1e-6 else ()
         return ((deadline, self.energy_needed_kwh),)
 
     @property
     def active(self) -> bool:
         """Return whether this plan asks for any schedulable energy."""
         return (
-            self.energy_needed_kwh > 1e-6
-            and any(power > 1e-6 for power in self.max_power_kw)
+            (self.energy_needed_kwh > 1e-6
+             and any(power > 1e-6 for power in self.max_power_kw))
+            or self.opportunity_power_kw > 1e-6
         )
 
     @property
@@ -178,8 +182,68 @@ def normalize_ev_charge_plan(
         window_source=tuple(sources),
         initially_charging=bool(plan.initially_charging),
         deadline_requirements=tuple(stages),
+        opportunity_power_kw=max(0.0, _finite(plan.opportunity_power_kw)),
+        opportunity_min_power_kw=max(0.0, _finite(plan.opportunity_min_power_kw)),
     )
     return normalized if normalized.active else None
+
+
+def add_current_opportunity(
+    plans: Sequence[EVChargePlan], *, vehicle_id: str, n_slots: int,
+    power_kw: float, min_power_kw: float, allow_grid: bool, allow_battery: bool,
+    battery_floor_soc: float = 0.0, preserve_home_battery: bool = False,
+    min_start_soc: float = 0.0, stop_at_battery_floor: bool = True,
+    limit_grid_import: bool = False, solar_battery_reserve_kw: float = 0.0,
+    allow_min_start_solar_exception: bool = False,
+) -> list[EVChargePlan]:
+    """Merge one already-authorized opportunity without duplicating its EV.
+
+    This is only a data transformation; callers must independently establish
+    current mode eligibility and selected physical binding before using it.
+    """
+    result = list(plans)
+    power = max(0.0, _finite(power_kw))
+    minimum = max(0.0, _finite(min_power_kw))
+    if not vehicle_id or n_slots <= 0 or power <= 1e-6 or power + 1e-9 < minimum:
+        return result
+    matches = [i for i, plan in enumerate(result) if plan.vehicle_id == vehicle_id]
+    if len(matches) > 1:
+        return result
+    if matches:
+        index = matches[0]
+        plan = normalize_ev_charge_plan(result[index], n_slots)
+        if plan is None:
+            plan = result[index]
+        # A current planned Smart window already has priority.
+        if plan.max_power_kw and plan.max_power_kw[0] > 1e-6:
+            return result
+    else:
+        index = len(result)
+        plan = EVChargePlan(vehicle_id=vehicle_id, max_power_kw=(0.0,) * n_slots,
+                            energy_needed_kwh=0.0)
+    def first(values, default, value):
+        padded = list(values[:n_slots]) + [default] * max(0, n_slots - len(values))
+        padded[0] = value
+        return tuple(padded)
+    merged = replace(
+        plan, opportunity_power_kw=power,
+        opportunity_min_power_kw=max(0.0, _finite(min_power_kw)),
+        allow_grid=first(plan.allow_grid, True, allow_grid),
+        allow_solar=first(plan.allow_solar, True, True),
+        allow_battery=first(plan.allow_battery, True, allow_battery),
+        battery_floor_soc=first(plan.battery_floor_soc, 0.0, max(0.0, min(1.0, _finite(battery_floor_soc)))),
+        preserve_home_battery=first(plan.preserve_home_battery, False, preserve_home_battery),
+        min_start_soc=first(plan.min_start_soc, 0.0, max(0.0, min(1.0, _finite(min_start_soc)))),
+        stop_at_battery_floor=first(plan.stop_at_battery_floor, True, stop_at_battery_floor),
+        limit_grid_import=first(plan.limit_grid_import, False, limit_grid_import),
+        allow_min_start_solar_exception=first(plan.allow_min_start_solar_exception, False, allow_min_start_solar_exception),
+        solar_battery_reserve_kw=first(plan.solar_battery_reserve_kw, 0.0, max(0.0, _finite(solar_battery_reserve_kw))),
+    )
+    if matches:
+        result[index] = merged
+    else:
+        result.append(merged)
+    return result
 
 
 def combine_ev_charge_plans(

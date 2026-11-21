@@ -145,8 +145,9 @@ def test_realistic_ev_window_sources_are_persisted_in_complete_capture(api, tmp_
                   current_soc=1.0,
                   schedule_timestamps=[now + timedelta(minutes=5 * i) for i in range(n)],
                   negative_import_pv_slots=[False] * n)
-    plan = module.EVChargePlan(vehicle_id='VIN_PRIVATE_CANARY', max_power_kw=(7.36,) * n,
+    plan = module.EVChargePlan(vehicle_id='VIN_PRIVATE_CANARY', max_power_kw=(0.0,) + (7.36,) * (n - 1),
                                energy_needed_kwh=5.0, deadline_requirements=((100, 5.0),),
+                               opportunity_power_kw=3.0, opportunity_min_power_kw=1.4,
                                window_source=(sources * 53)[:n])
     values['ev_plan'] = [plan]
     recorder = capture.CaptureRecorder(None, currency='AUD', local_diagnostics=True)
@@ -164,8 +165,23 @@ def test_realistic_ev_window_sources_are_persisted_in_complete_capture(api, tmp_
     assert report['errors'] == 0, report['error_reasons']
     attempt = report['cycles'][0]['attempts'][0]
     assert attempt['coverage']['complete'] is True
-    assert contract.decode(attempt['inputs']['ev_plan'], module)[0].window_source == plan.window_source
+    decoded = contract.decode(attempt['inputs']['ev_plan'], module)[0]
+    assert decoded.window_source == plan.window_source
+    assert decoded.opportunity_power_kw == 3.0
+    assert decoded.opportunity_min_power_kw == 1.4
     assert 'VIN_PRIVATE_CANARY' not in json.dumps(report)
+
+
+def test_current_opportunity_survives_capture_and_strict_replay(api):
+    module, _, contract = api
+    plan = module.EVChargePlan(vehicle_id='VIN_CANARY', max_power_kw=(0.0,) * 8,
+                               energy_needed_kwh=0, opportunity_power_kw=3.0)
+    _, bundle, _ = capture_one(api, values={**inputs(), 'ev_plan': [plan]})
+    assert contract.decode(bundle['inputs']['ev_plan'], module)[0].opportunity_power_kw == 3.0
+    assert 'VIN_CANARY' not in json.dumps(bundle)
+    from regression_runner.runtime import replay
+    repeated = replay(bundle, COMPONENT)
+    assert repeated is not None
 
 
 def test_ev_window_sources_round_trip_in_strict_replay_and_unknown_is_private(api):

@@ -13,6 +13,7 @@ import logging
 import math
 import statistics
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, time as dt_time, timezone
 from typing import Optional, List, Dict, Any, Tuple, Iterator, Mapping, Sequence
@@ -2096,6 +2097,12 @@ class SurplusForecaster:
         return forecasts
 
 
+_smart_price_forecast_source = ContextVar("smart_price_forecast_source", default="unknown")
+_smart_candidate_diagnostics: ContextVar[Optional[list[dict]]] = ContextVar(
+    "smart_candidate_diagnostics", default=None
+)
+
+
 class PriceForecaster:
     """Gets electricity price forecasts."""
 
@@ -2119,6 +2126,7 @@ class PriceForecaster:
             List of PriceForecast objects
         """
         from ..const import CONF_ELECTRICITY_PROVIDER
+        _smart_price_forecast_source.set("unknown")
 
         # Get electricity provider
         electricity_provider = self.config_entry.options.get(
@@ -2134,6 +2142,9 @@ class PriceForecaster:
                 else self._get_amber_forecast(hours)
             )
             if amber_forecast:
+                _smart_price_forecast_source.set(
+                    "amber_weighted" if electricity_provider == "amber" else "amber"
+                )
                 return amber_forecast
 
         # EPEX is a dynamic retail-price provider. A generic Australian TOU
@@ -2142,7 +2153,9 @@ class PriceForecaster:
         elif electricity_provider == "epex":
             epex_forecast = self._get_optimizer_price_forecast(hours)
             if epex_forecast:
+                _smart_price_forecast_source.set("epex_optimizer")
                 return epex_forecast
+            _smart_price_forecast_source.set("unavailable")
             _LOGGER.warning(
                 "EV price forecast: EPEX optimizer price coverage is unavailable; "
                 "Smart Schedule will not create a grid-price plan"
@@ -2154,11 +2167,13 @@ class PriceForecaster:
         elif electricity_provider in ("agl", "globird", "aemo_vpp"):
             tariff_forecast = await self._get_tariff_forecast(hours)
             if tariff_forecast:
+                _smart_price_forecast_source.set("site_tariff")
                 return tariff_forecast
 
         # Try Sigenergy tariff if available (for Sigenergy users with Amber)
         sigenergy_forecast = await self._get_sigenergy_tariff_forecast(hours)
         if sigenergy_forecast:
+            _smart_price_forecast_source.set("sigenergy_tariff")
             return sigenergy_forecast
 
         # The site's own tariff schedule, whatever the provider. Gating this
@@ -2169,6 +2184,7 @@ class PriceForecaster:
         # pay, so a real cheap window looked expensive and vice versa.
         tariff_forecast = await self._get_tariff_forecast(hours)
         if tariff_forecast:
+            _smart_price_forecast_source.set("site_tariff")
             return tariff_forecast
 
         # Fall back to TOU estimation. This is a generic guess, not the site's
@@ -2180,6 +2196,7 @@ class PriceForecaster:
             "not match your actual rates",
             electricity_provider,
         )
+        _smart_price_forecast_source.set("generic_tou")
         return await self._estimate_tou_prices(hours)
 
     def _get_optimizer_price_forecast(
@@ -3164,6 +3181,15 @@ class ChargingPlanner:
         # Calculate energy needed
         soc_delta = target_soc - current_soc
         if soc_delta <= 0:
+            try:
+                observer = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {}).get('decision_diagnostics')
+                if observer is not None:
+                    observer.emit('ev', {'event': 'smart_schedule_plan', 'plan_state': 'target_met',
+                        'profile': vehicle_id, 'priority': priority.value, 'current_soc': current_soc,
+                        'target_soc': target_soc, 'target_time': target_time.isoformat() if target_time else None,
+                        'energy_needed_kwh': 0, 'can_meet_target': True})
+            except Exception:
+                _LOGGER.debug('Smart Schedule completion diagnostics unavailable', exc_info=True)
             return ChargingPlan(
                 vehicle_id=vehicle_id,
                 current_soc=current_soc,
@@ -3194,9 +3220,23 @@ class ChargingPlanner:
         else:
             hours_available = 24
 
-        # Get forecasts
-        surplus_forecast = await self.surplus_forecaster.forecast_surplus(hours_available)
-        price_forecast = await self.price_forecaster.get_price_forecast(hours_available)
+        # Get forecasts. Diagnostic failure must never change planning behavior.
+        try:
+            surplus_forecast = await self.surplus_forecaster.forecast_surplus(hours_available)
+            _smart_price_forecast_source.set("unknown")
+            price_forecast = await self.price_forecaster.get_price_forecast(hours_available)
+            price_forecast_source = _smart_price_forecast_source.get()
+        except Exception:
+            try:
+                observer = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {}).get('decision_diagnostics')
+                if observer is not None:
+                    observer.emit('ev', {'event': 'smart_schedule_plan', 'profile': vehicle_id,
+                        'priority': priority.value, 'current_soc': current_soc, 'target_soc': target_soc,
+                        'target_time': target_time.isoformat() if target_time else None,
+                        'energy_needed_kwh': energy_needed_kwh, 'plan_state': 'forecast_error'})
+            except Exception:
+                _LOGGER.debug('Smart Schedule failure diagnostics unavailable', exc_info=True)
+            raise
 
         # Get battery power schedule for dynamic power sharing
         # EV uses remaining grid capacity when battery is also charging
@@ -3210,6 +3250,7 @@ class ChargingPlanner:
             )
 
         # Create plan based on priority
+        _smart_candidate_diagnostics.set(None)
         if priority == ChargingPriority.SOLAR_ONLY:
             plan = await self._plan_solar_only(
                 vehicle_id, current_soc, target_soc, target_time,
@@ -3271,6 +3312,48 @@ class ChargingPlanner:
         plan.battery_capacity_source = resolved_capacity.battery_capacity_source
         plan.priority = priority.value
         plan.max_grid_price_cents = max_grid_price_cents
+        try:
+            observer = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {}).get('decision_diagnostics')
+            if observer is not None:
+                surplus_by_hour = {_forecast_hour_key(row.hour): row for row in surplus_forecast}
+                candidates = []
+                for row in price_forecast:
+                    surplus = surplus_by_hour.get(_forecast_hour_key(row.hour))
+                    candidates.append({
+                        'hour': row.hour, 'import_cents': row.import_cents,
+                        'export_cents': row.export_cents,
+                        'solar_kw': getattr(surplus, 'solar_kw', None),
+                        'load_kw': getattr(surplus, 'load_kw', None),
+                        'surplus_kw': getattr(surplus, 'surplus_kw', None),
+                    })
+                candidate_decisions = (
+                    _smart_candidate_diagnostics.get()
+                    if priority == ChargingPriority.COST_OPTIMIZED
+                    or (priority == ChargingPriority.SOLAR_PREFERRED and target_time is None)
+                    else None
+                )
+                from .actions import _current_decision_trace
+                observer.emit('ev', {
+                    'event': 'smart_schedule_plan', 'plan_state': 'complete', 'profile': vehicle_id,
+                    'trace_id': _current_decision_trace(),
+                    'price_forecast_source': price_forecast_source,
+                    'priority': priority.value, 'target_time': plan.target_time,
+                    'current_soc': current_soc, 'target_soc': target_soc,
+                    'energy_needed_kwh': energy_needed_kwh, 'max_charge_kw': charger_power_kw,
+                    'max_price_cents': max_grid_price_cents, 'can_meet_target': plan.can_meet_target,
+                    'forecast_candidates': candidates,
+                    'candidate_decisions': candidate_decisions,
+                    'candidate_capture': ('not_recorded' if candidate_decisions is None else
+                                          'complete' if len(candidate_decisions) == len(price_forecast) else 'partial'),
+                    'planned_windows': [
+                        {'start': w.start_time, 'end': w.end_time, 'source': w.source,
+                         'power_kw': w.estimated_power_kw, 'energy_kwh': w.estimated_energy_kwh,
+                         'price_cents': w.price_cents_kwh}
+                        for w in plan.windows
+                    ],
+                })
+        except Exception:
+            _LOGGER.debug('Smart Schedule plan diagnostics unavailable', exc_info=True)
         return plan
 
     async def _plan_solar_only(
@@ -3698,6 +3781,8 @@ class ChargingPlanner:
 
         # Build charging options from price forecast (within deadline)
         charging_options = []
+        observer = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {}).get('decision_diagnostics')
+        diagnostic_rows = [] if observer is not None else None
         repeated_price_hours = _repeated_forecast_local_hours(
             [price.hour for price in price_forecast]
         )
@@ -3760,15 +3845,17 @@ class ChargingPlanner:
             option_identity = _forecast_interval_identity(price)
 
             # Solar surplus is free
-            if solar_available >= 1.0 and solar_surplus_price_allows_charging(
+            solar_allowed = solar_available >= 1.0 and solar_surplus_price_allows_charging(
                 price.export_cents,
                 solar_policy,
-            ):
+            )
+            if solar_allowed:
                 charging_options.append({
                     "hour": display_start,
                     "hour_dt": hour_dt,
                     "end_time": display_end,
                     "identity": option_identity,
+                    "diagnostic_index": len(diagnostic_rows) if diagnostic_rows is not None else None,
                     "source": "solar_surplus",
                     "power_kw": min(solar_available, charger_power_kw),
                     "cost_cents": price.export_cents,
@@ -3816,6 +3903,18 @@ class ChargingPlanner:
                 priority=ChargingPriority.COST_OPTIMIZED,
             )
 
+            if diagnostic_rows is not None:
+                diagnostic_rows.append({
+                    'hour': price.hour,
+                    'solar_eligible': bool(solar_allowed),
+                    'grid_eligible': bool(grid_power > 0.5 and not grid_blocked and price_allowed),
+                    'solar_reason': ('eligible' if solar_allowed else
+                                     'insufficient_solar' if solar_available < 1.0 else 'export_limit'),
+                    'grid_reason': ('demand_window' if grid_blocked else
+                                    'price_cap' if not price_allowed else
+                                    'insufficient_power' if grid_power <= 0.5 else 'eligible'),
+                })
+
             if (
                 grid_power > 0.5
                 and not grid_blocked
@@ -3837,6 +3936,7 @@ class ChargingPlanner:
                     ),
                     "end_time": display_end,
                     "identity": option_identity,
+                    "diagnostic_index": len(diagnostic_rows) - 1 if diagnostic_rows is not None else None,
                     "source": grid_source,
                     "power_kw": grid_power,
                     "cost_cents": price.import_cents,
@@ -3898,6 +3998,13 @@ class ChargingPlanner:
             return (effective_cost, source_pref, time)
 
         charging_options.sort(key=sort_key)
+        if diagnostic_rows is not None:
+            for rank, option in enumerate(charging_options, start=1):
+                row = diagnostic_rows[option["diagnostic_index"]]
+                source = "solar" if option["source"] == "solar_surplus" else "grid"
+                row[f"{source}_rank"] = rank
+                row[f"{source}_selected"] = False
+        _smart_candidate_diagnostics.set(diagnostic_rows)
 
         # Log top 5 cheapest options
         for i, opt in enumerate(charging_options[:5]):
@@ -3958,6 +4065,10 @@ class ChargingPlanner:
                 price_cents_kwh=option["cost_cents"],
                 reason="cost_optimized",
             ))
+
+            if diagnostic_rows is not None:
+                source = "solar" if option["source"] == "solar_surplus" else "grid"
+                diagnostic_rows[option["diagnostic_index"]][f"{source}_selected"] = True
 
             energy_allocated += energy_this_hour
             if "solar" in option["source"]:
@@ -4247,9 +4358,7 @@ class ChargingPlanner:
         2. For time_critical mode: prioritize meeting deadline over paid charging
         3. For other modes: respect home battery priority (min SoC)
         4. If in a planned window from cost-optimized plan, charge
-        5. For solar-first modes, opportunistically charge on solar surplus
-        6. Opportunistic: charge if current price is very cheap (< plan avg or < 10c)
-        7. Otherwise wait for planned windows or better prices
+        5. Otherwise wait for the next planned window
 
         Args:
             vehicle_id: Vehicle identifier
@@ -4374,57 +4483,11 @@ class ChargingPlanner:
                 )
             return False, "No current deadline charging window", "waiting"
 
-        # Cost Optimized/Cheapest Period follows the windows selected by its
-        # cost plan.  Starting a separate Solar Surplus controller outside
-        # those windows bypasses that plan and can briefly draw from the home
-        # battery while the EV rate responds to changing solar.  Solar-first
-        # strategies retain the live-surplus opportunity; a planned solar
-        # window for Cost Optimized was already accepted above.
-        priority_value = getattr(priority, "value", priority)
-        opportunistic_solar_enabled = str(priority_value or "").lower() in {
-            ChargingPriority.SOLAR_ONLY.value,
-            ChargingPriority.SOLAR_PREFERRED.value,
-        }
-        if opportunistic_solar_enabled and current_surplus_kw >= 1.5:
-            solar_allowed, solar_reason = _solar_export_gate()
-            if not solar_allowed:
-                return False, solar_reason, "waiting"
-            return True, f"Solar surplus ({current_surplus_kw:.1f}kW)", "solar_surplus"
-
-        # Keep free planned windows in the comparison.  Dropping zero prices
-        # makes an all-free plan look like a default 30c plan, which can start
-        # opportunistic paid charging before the planned free period.
+        # Paid-price and surplus opportunities belong to Price-Level and
+        # Solar Surplus, respectively. Smart Schedule only acts on its own
+        # planned windows (and the explicit free-grid path above).
         if current_price_cents is None:
             return False, "Current retail price unavailable", "waiting"
-
-        if plan.windows:
-            planned_prices = [w.price_cents_kwh for w in plan.windows]
-            min_planned_price = min(planned_prices)
-        else:
-            min_planned_price = 30
-
-        # Opportunistic: if current price is better than our best planned window, charge now
-        # This handles the case where prices dropped since we made the plan
-        if current_price_cents <= min_planned_price and current_price_cents < 20:
-            if plan.windows:
-                _LOGGER.info(
-                    f"Opportunistic charging: current {current_price_cents:.1f}c <= "
-                    f"cheapest scheduled window {min_planned_price:.1f}c"
-                )
-            else:
-                _LOGGER.info(
-                    f"Opportunistic charging: current {current_price_cents:.1f}c <= "
-                    f"default threshold {min_planned_price:.1f}c (no schedule set)"
-                )
-            return True, f"Better than planned ({current_price_cents:.0f}c ≤ {min_planned_price:.0f}c)", "grid_opportunistic"
-
-        # Opportunistic: very cheap power (< 10c) - always charge
-        if current_price_cents < 10:
-            return True, f"Very cheap power ({current_price_cents:.0f}c/kWh)", "grid_offpeak"
-
-        # Opportunistic: negative pricing (getting paid to use power)
-        if current_price_cents < 0:
-            return True, f"Negative pricing ({current_price_cents:.0f}c/kWh) - getting paid!", "grid_negative"
 
         # Check how far away the next planned window is
         next_window_start = None
@@ -8441,6 +8504,8 @@ class AutoScheduleExecutor:
             "dynamic_mode": dynamic_mode,
             "owner_mode": "smart_schedule_solar_surplus" if source == "solar_surplus" else "smart_schedule",
             "allow_ownership_takeover": True,
+            "_smart_handover_plan_id": id(state.current_plan) if state.current_plan else None,
+            "_smart_handover_source": source,
             "min_charge_amps": settings.min_charge_amps,
             "configured_max_charge_amps": settings.max_charge_amps,
             "max_charge_amps": effective_max_amps,
@@ -9904,6 +9969,302 @@ def _build_dynamic_charging_params(
     return resolved or {}
 
 
+async def _shared_live_opportunity_decision(executor, selected, price_decision, price):
+    """Arbitrate current mode decisions using a passive, real Solar observation."""
+    from .actions import _dynamic_ev_state, _evaluate_shared_solar_candidate
+    from .shared_opportunity import SolarBoundary, choose_positive_price_owner
+    hass, entry = executor.hass, executor.config_entry
+    data = hass.data.get(executor._domain, {}).get(entry.entry_id, {})
+    opts = {**entry.data, **entry.options}
+    params = _build_dynamic_charging_params(hass, executor._domain, entry, opts,
+        owner_mode='solar_surplus', vehicle_vin=selected, allow_ownership_takeover=True)
+    if not params:
+        data.pop('_shared_solar_boundary', None)
+        return None, None
+    candidate = await _evaluate_shared_solar_candidate(hass, entry, params)
+    if candidate is None:
+        data.pop('_shared_solar_boundary', None)
+        return None, None
+    changed = candidate.get('selection_changed')
+    runtime = _dynamic_ev_state.get(entry.entry_id, {}).get(params.get('vehicle_id'), {})
+    existing_solar = (runtime.get('active') and runtime.get('active_profile_id') == selected
+                      and runtime.get('params', {}).get('owner_mode') == 'solar_surplus'
+                      and runtime.get('current_amps', 0) > 0)
+    tracker = data.get('_shared_solar_boundary')
+    policy = candidate.get('params') or {}
+    boundary_config = (candidate.get('max_kw'), candidate.get('min_kw'),
+                       policy.get('sustained_surplus_minutes', 2), policy.get('stop_delay_minutes', 5))
+    if (not isinstance(tracker, dict) or tracker.get('profile') != selected
+            or tracker.get('selection_changed') != changed or tracker.get('boundary_config') != boundary_config):
+        initial_full = bool(existing_solar and candidate.get('eligible')
+            and candidate.get('capacity_kw', 0) >= candidate.get('max_kw', float('inf')))
+        tracker = {'profile': selected, 'selection_changed': changed, 'boundary_config': boundary_config,
+                   'boundary': SolarBoundary(full=initial_full), 'eligible': bool(existing_solar),
+                   'above': None, 'below': None}
+        data['_shared_solar_boundary'] = tracker
+    now = time.monotonic()
+    solar_params = candidate.get('params', {})
+    start_delay = float(solar_params.get('sustained_surplus_minutes', 2)) * 60
+    stop_delay = float(solar_params.get('stop_delay_minutes', 5)) * 60
+    raw_eligible = bool(candidate.get('eligible'))
+    if raw_eligible:
+        tracker['below'] = None
+        if tracker['above'] is None:
+            tracker['above'] = now
+        if now - tracker['above'] >= start_delay:
+            tracker['eligible'] = True
+    elif 'capacity_kw' not in candidate or not existing_solar:
+        # Hard denials and an unowned Solar candidate do not get a stop grace.
+        tracker.update(eligible=False, above=None, below=None)
+    else:
+        tracker['above'] = None
+        if tracker['below'] is None:
+            tracker['below'] = now
+        if now - tracker['below'] >= stop_delay:
+            tracker['eligible'] = False
+    capacity = candidate.get('capacity_kw', 0.0)
+    maximum = candidate.get('max_kw', 1.0)
+    result = choose_positive_price_owner(tracker['boundary'], now=now,
+        solar_eligible=raw_eligible or tracker['eligible'], solar_capacity_kw=capacity,
+        maximum_kw=maximum, price_cents=price,
+        opportunity_price_cents=executor._get_settings().get('opportunity_price_cents', 10),
+        price_eligible=bool(price_decision[0]), start_delay_s=start_delay, stop_delay_s=stop_delay)
+    if result == 'solar_surplus' and not tracker['eligible']:
+        result = 'price_level' if price_decision[0] else None
+    return result, candidate
+
+
+def _publish_price_only_shared_opportunity(executor, selected, should_charge, mode, price, *, solar_arbitrated=False):
+    """Publish Price's real decision when no Solar arbitration is needed.
+
+    Solar-enabled decisions are deliberately left to the shared arbiter: the
+    Solar preflight by itself is not evidence of usable surplus.
+    """
+    from .shared_loadpoint import binding_for_entry, resolve_active_shared_profile
+    from .shared_opportunity import update_opportunity_request, withdraw_opportunity_request
+    from ..solar_surplus_config import get_stored_solar_surplus_config
+
+    hass, config_entry = executor.hass, executor.config_entry
+    entry = hass.data.get(executor._domain, {}).get(config_entry.entry_id, {})
+    coordinator = entry.get("optimization_coordinator")
+    binding = binding_for_entry(config_entry)
+    selector = hass.states.get(binding.connected_vehicle_entity) if binding else None
+    changed_at = getattr(selector, "last_changed", None)
+    old = entry.get("_shared_opportunity_request")
+    def withdraw():
+        if isinstance(old, dict) and str(old.get("mode", "")).startswith("price_level"):
+            if withdraw_opportunity_request(entry) and coordinator and getattr(coordinator, "_enabled", False):
+                coordinator._schedule_settings_reoptimization()
+    try:
+        valid_positive_price = price is not None and math.isfinite(float(price)) and float(price) > 0
+    except (TypeError, ValueError, OverflowError):
+        valid_positive_price = False
+    requires_coordination = bool(coordinator and getattr(coordinator, "_enabled", False)
+        and binding and selected and should_charge and valid_positive_price
+        and (solar_arbitrated or not get_stored_solar_surplus_config(entry).get("enabled", False)))
+    if (not requires_coordination
+            or resolve_active_shared_profile(hass, config_entry) != selected
+            or changed_at is None or mode not in {"price_level_recovery", "price_level_opportunity"}):
+        withdraw()
+        return False if requires_coordination else None
+    settings = executor._get_settings()
+    opts = {**config_entry.data, **config_entry.options}
+    params = _build_dynamic_charging_params(
+        hass, executor._domain, config_entry, opts, owner_mode=mode,
+        vehicle_vin=selected, no_grid_import=settings.get("no_grid_import", False),
+        allow_ownership_takeover=True,
+    )
+    if not params or params.get("active_logical_vehicle_id") != selected:
+        withdraw()
+        return False
+    try:
+        voltage = float(params.get("voltage", 240))
+        phases = float(params.get("phases", 1))
+        maximum = float(params.get("max_charge_amps", 32))
+        minimum = float(params.get("min_charge_amps", 6))
+        floor = float(settings.get("home_battery_minimum", 20)) / 100
+        if not all(math.isfinite(x) for x in (voltage, phases, maximum, minimum, floor)):
+            raise ValueError("invalid limits")
+        if voltage <= 0 or phases <= 0 or minimum <= 0 or maximum < minimum or not 0 <= floor <= 1:
+            raise ValueError("invalid limits")
+    except (TypeError, ValueError, OverflowError):
+        withdraw()
+        return False
+    preserve = bool(settings.get("preserve_home_battery", False))
+    store = entry.get("automation_store")
+    stored_data = getattr(store, "_data", {}) or {}
+    price_config = stored_data.get("price_level_charging", {})
+    if not isinstance(price_config, dict) or not price_config.get("enabled"):
+        withdraw()
+        return False
+    facts = {"profile": selected, "mode": mode, "selection_changed": changed_at,
+             "price_config": dict(price_config),
+             "solar_config": dict(stored_data.get("solar_surplus_config") or {}),
+             "solar_arbitrated": bool(solar_arbitrated),
+             "price_cents": float(price),
+             "power_kw": maximum * voltage * phases / 1000,
+             "min_power_kw": minimum * voltage * phases / 1000,
+             "allow_grid": not bool(settings.get("no_grid_import", False)),
+             "allow_battery": not preserve, "battery_floor_soc": floor,
+             "min_start_soc": floor, "preserve_home_battery": preserve}
+    request, changed = update_opportunity_request(entry, facts, dt_util.now())
+    if changed:
+        coordinator._schedule_settings_reoptimization()
+    return request
+
+
+async def _request_solar_takeover(executor, selected, candidate, price):
+    """Ask the optimizer before Solar displaces an existing Price controller."""
+    from .actions import (_action_start_ev_charging_dynamic, _dynamic_ev_state,
+                          _record_automated_shared_loadpoint_decision,
+                          _shared_smart_has_inactive_intent, _shared_opportunity_handover_adopted)
+    from .ev_ownership import owner_family
+    from .shared_opportunity import update_opportunity_request
+    hass, entry = executor.hass, executor.config_entry
+    data = hass.data.get(executor._domain, {}).get(entry.entry_id, {})
+    params = dict(candidate.get('params') or {})
+    physical = params.get('vehicle_id')
+    runtime = _dynamic_ev_state.get(entry.entry_id, {}).get(physical, {})
+    handover = data.get('_shared_loadpoint_handover') or {}
+    retained_handover = (handover.get('profile') == selected and handover.get('loadpoint') == physical
+                         and owner_family(handover.get('owner_mode')) == 'solar_surplus')
+    outgoing_price = (runtime.get('active') and runtime.get('active_profile_id') == selected
+                      and owner_family(runtime.get('params', {}).get('owner_mode')) == 'price_level')
+    outgoing_smart = (runtime.get('active') and runtime.get('active_profile_id') == selected
+                      and owner_family(runtime.get('params', {}).get('owner_mode')) == 'smart_schedule'
+                      and _shared_smart_has_inactive_intent(hass, entry, physical, params))
+    if not outgoing_price and not outgoing_smart and not retained_handover:
+        return
+    _record_automated_shared_loadpoint_decision(
+        hass, entry, allowed=True, responsible_mode='solar_surplus',
+        reason='', source='solar_surplus')
+    coordinator = data.get('optimization_coordinator')
+    params.update(owner_mode='solar_surplus', dynamic_mode='solar_surplus',
+                  allow_ownership_takeover=True)
+    store = data.get('automation_store')
+    stored = getattr(store, '_data', {}) or {}
+    facts = {'profile': selected, 'mode': 'solar_surplus',
+        'selection_changed': candidate['selection_changed'],
+        'price_cents': float(price), 'price_config': dict(stored.get('price_level_charging') or {}),
+        'solar_config': dict(stored.get('solar_surplus_config') or {}), 'solar_arbitrated': True,
+        'power_kw': candidate['max_kw'], 'min_power_kw': candidate['min_kw'],
+        'allow_grid': False, 'allow_battery': False,
+        'battery_floor_soc': candidate['floor_soc'], 'min_start_soc': candidate['floor_soc'],
+        'allow_min_start_solar_exception': candidate['parallel'],
+        'solar_battery_reserve_kw': float(params.get('max_battery_charge_rate_kw', 5)) if candidate['parallel'] else 0.0}
+    request, changed = update_opportunity_request(data, facts, dt_util.now())
+    params['_opportunity_generation'] = request['generation']
+    if coordinator and getattr(coordinator, '_enabled', False):
+        if changed:
+            coordinator._schedule_settings_reoptimization()
+        if not _shared_opportunity_handover_adopted(hass, entry, physical, params):
+            return
+    await _action_start_ev_charging_dynamic(hass, entry, params)
+
+
+async def _evaluate_solar_for_idle_smart(executor):
+    """Let a real Solar contender replace a Smart owner with no current intent."""
+    from .actions import _dynamic_ev_state, _shared_smart_has_inactive_intent
+    from .ev_ownership import owner_family
+    from .ev_pricing import get_automation_import_price
+    from .shared_loadpoint import canonical_shared_loadpoint_id, resolve_active_shared_profile
+    hass, entry = executor.hass, executor.config_entry
+    selected = resolve_active_shared_profile(hass, entry)
+    physical = canonical_shared_loadpoint_id(entry, selected) if selected else None
+    if not physical:
+        return
+    data = hass.data.get(executor._domain, {}).get(entry.entry_id, {})
+    runtime = _dynamic_ev_state.get(entry.entry_id, {}).get(physical, {})
+    handover = data.get('_shared_loadpoint_handover') or {}
+    retained = (handover.get('profile') == selected and handover.get('loadpoint') == physical
+                and owner_family(handover.get('owner_mode')) == 'solar_surplus')
+    params = runtime.get('params') or {'active_logical_vehicle_id': selected}
+    smart_owner = (runtime.get('active') and runtime.get('active_profile_id') == selected
+                   and owner_family(params.get('owner_mode')) == 'smart_schedule')
+    if ((not smart_owner and not retained)
+            or not _shared_smart_has_inactive_intent(hass, entry, physical, params)):
+        return
+    price = get_automation_import_price(data)
+    if price is None or not math.isfinite(float(price)) or price <= 0:
+        return
+    decision = await executor.get_charging_decision(price)
+    choice, candidate = await _shared_live_opportunity_decision(executor, selected, decision, price)
+    if choice == 'solar_surplus' and candidate:
+        await _request_solar_takeover(executor, selected, candidate, price)
+    _emit_shared_opportunity_decision(executor, selected, decision, price, choice, candidate)
+
+
+def _emit_shared_opportunity_decision(executor, selected, decision, price, choice, candidate):
+    """Record the bounded inputs actually used for positive-price arbitration."""
+    data = executor.hass.data.get(executor._domain, {}).get(executor.config_entry.entry_id, {})
+    observer = data.get('decision_diagnostics')
+    if observer is None:
+        return
+    try:
+        from .actions import _current_decision_trace
+        request = data.get('_shared_opportunity_request')
+        tracker = data.get('_shared_solar_boundary') or {}
+        boundary = tracker.get('boundary')
+        values = candidate or {}
+        observer.emit('ev', {'event': 'shared_opportunity_decision',
+            'trace_id': _current_decision_trace(), 'profile': selected, 'source': choice,
+            'price_cents': price, 'price_eligible': bool(decision[0]),
+            'opportunity_price_cents': executor._get_settings().get('opportunity_price_cents'),
+            'solar_eligible': values.get('eligible'), 'solar_surplus_kw': values.get('capacity_kw'),
+            'max_charge_kw': values.get('max_kw'),
+            'solar_full': getattr(boundary, 'full', None),
+            'opportunity_generation': request.get('generation') if isinstance(request, dict) else None})
+    except Exception:
+        _LOGGER.exception('Failed to record shared opportunity decision')
+
+
+async def _select_shared_price_opportunity(executor, selected, decision, price):
+    """Keep ordinary free-price handling separate from positive-price arbitration."""
+    from ..solar_surplus_config import get_stored_solar_surplus_config
+    data = executor.hass.data.get(executor._domain, {}).get(executor.config_entry.entry_id, {})
+    solar_enabled = get_stored_solar_surplus_config(data).get('enabled', False)
+    try:
+        positive = price is not None and math.isfinite(float(price)) and float(price) > 0
+    except (TypeError, ValueError, OverflowError):
+        positive = False
+    if not positive and price is not None and decision[0]:
+        # Existing grid-capable Price charging returns to its pre-opportunity
+        # path at free/negative prices. Replace (don't mutate) the runtime
+        # parameters so an in-flight positive-price command retains its fence.
+        from .actions import _dynamic_ev_state
+        from .ev_pricing import get_automation_import_price
+        from .shared_loadpoint import canonical_shared_loadpoint_id, resolve_active_shared_profile
+        try:
+            current_price = get_automation_import_price(data)
+            if (math.isfinite(float(price)) and float(price) <= 0
+                    and current_price is not None and float(current_price) == float(price)
+                    and selected is not None
+                    and resolve_active_shared_profile(executor.hass, executor.config_entry) == selected):
+                physical = canonical_shared_loadpoint_id(executor.config_entry, selected)
+                runtime = (_dynamic_ev_state.get(executor.config_entry.entry_id, {}).get(physical, {})
+                           if physical is not None else {})
+                old_params = runtime.get('params') or {}
+                if (runtime.get('active') and runtime.get('active_profile_id') == selected
+                        and old_params.get('owner_mode') == decision[2]
+                        and '_opportunity_generation' in old_params):
+                    runtime['params'] = {k: v for k, v in old_params.items() if k != '_opportunity_generation'}
+        except (TypeError, ValueError, OverflowError):
+            pass
+    if solar_enabled and positive and decision[0]:
+        choice, candidate = await _shared_live_opportunity_decision(executor, selected, decision, price)
+        if choice != 'price_level':
+            _publish_price_only_shared_opportunity(executor, selected, False, decision[2], price)
+            if choice == 'solar_surplus' and candidate:
+                await _request_solar_takeover(executor, selected, candidate, price)
+            _emit_shared_opportunity_decision(executor, selected, decision, price, choice, candidate)
+            return False
+        request = _publish_price_only_shared_opportunity(
+            executor, selected, decision[0], decision[2], price, solar_arbitrated=True)
+        _emit_shared_opportunity_decision(executor, selected, decision, price, choice, candidate)
+        return request
+    return _publish_price_only_shared_opportunity(executor, selected, decision[0], decision[2], price)
+
+
 def _build_dynamic_stop_params(
     hass: "HomeAssistant",
     domain: str,
@@ -10060,6 +10421,7 @@ async def _start_coordinated_charging(
     allow_ownership_takeover: bool = False,
     cooldown_state: Optional[Any] = None,
     require_physical_start_confirmation: bool = False,
+    opportunity_generation: Optional[str] = None,
     log_prefix: str = "EV charging",
 ) -> bool:
     """Start charging through the configured dynamic charger action."""
@@ -10093,6 +10455,8 @@ async def _start_coordinated_charging(
             log_prefix,
         )
         return False
+    if opportunity_generation is not None:
+        params["_opportunity_generation"] = opportunity_generation
     charger_type = params.get("charger_type", _configured_charger_type(opts))
     confirm_tesla_start = (
         require_physical_start_confirmation and charger_type == "tesla"
@@ -11507,7 +11871,8 @@ class PriceLevelChargingExecutor:
         self,
         mode: str,
         reason: str,
-        vehicle_vin: Optional[str] = None
+        vehicle_vin: Optional[str] = None,
+        opportunity_generation: Optional[str] = None,
     ) -> bool:
         """Start EV charging.
 
@@ -11554,6 +11919,24 @@ class PriceLevelChargingExecutor:
             )
             return False
 
+        if opportunity_generation is not None:
+            from .actions import _shared_opportunity_handover_adopted
+            opts = {**self.config_entry.data, **self.config_entry.options}
+            opportunity_params = _build_dynamic_charging_params(
+                self.hass, self._domain, self.config_entry, opts,
+                owner_mode=mode, vehicle_vin=vehicle_vin,
+                no_grid_import=self._get_settings().get("no_grid_import", False),
+                allow_ownership_takeover=True,
+            )
+            opportunity_params["_opportunity_generation"] = opportunity_generation
+            physical = opportunity_params.get("vehicle_id")
+            if not physical or not _shared_opportunity_handover_adopted(
+                self.hass, self.config_entry, physical, opportunity_params
+            ):
+                state.last_decision = "waiting"
+                state.last_decision_reason = "Waiting for an adopted optimizer opportunity"
+                return False
+
         retry_already_pending = state.start_cooldown_until > time.time()
         success = await _start_coordinated_charging(
             self.hass,
@@ -11566,6 +11949,8 @@ class PriceLevelChargingExecutor:
             allow_ownership_takeover=True,
             cooldown_state=state,
             require_physical_start_confirmation=True,
+            **({"opportunity_generation": opportunity_generation}
+               if opportunity_generation is not None else {}),
             log_prefix="Price-level charging",
         )
         if not success:
@@ -11987,6 +12372,11 @@ class PriceLevelChargingExecutor:
                 should_charge, reason, mode = decision
                 pseudo_vin = selected or "sigenergy_charger"
                 results[pseudo_vin] = decision
+                opportunity = (await _select_shared_price_opportunity(
+                    self, selected, decision, current_price_cents
+                ) if shared else None)
+                if shared and _selected_shared_coordinated_vehicle(self.hass, self.config_entry)[1] != selected:
+                    return results
 
                 try:
                     from .actions import _record_automated_shared_loadpoint_decision
@@ -11994,7 +12384,7 @@ class PriceLevelChargingExecutor:
                     _record_automated_shared_loadpoint_decision(
                         self.hass,
                         self.config_entry,
-                        allowed=should_charge,
+                        allowed=should_charge and opportunity is not False,
                         responsible_mode="price_level",
                         reason=reason,
                         source=mode,
@@ -12014,7 +12404,11 @@ class PriceLevelChargingExecutor:
                     vehicle_state.pending_shared_stop = None
                 stop_unconfirmed = False
                 if should_charge and not vehicle_state.is_charging:
-                    await self._start_charging(mode, reason, vehicle_vin=pseudo_vin)
+                    if opportunity:
+                        await self._start_charging(mode, reason, vehicle_vin=pseudo_vin,
+                            opportunity_generation=opportunity["generation"])
+                    elif opportunity is None:
+                        await self._start_charging(mode, reason, vehicle_vin=pseudo_vin)
                 elif not should_charge and (vehicle_state.is_charging or (
                     shared and self._state.last_decision not in ("away", "unplugged")
                     and _matching_shared_mode_owner(self.hass, self.config_entry, pseudo_vin, "price_level")
@@ -12059,6 +12453,11 @@ class PriceLevelChargingExecutor:
                 should_charge, reason, mode = decision
                 pseudo_vin = selected or "generic_ev"
                 results[pseudo_vin] = decision
+                opportunity = (await _select_shared_price_opportunity(
+                    self, selected, decision, current_price_cents
+                ) if shared else None)
+                if shared and _selected_shared_coordinated_vehicle(self.hass, self.config_entry)[1] != selected:
+                    return results
 
                 try:
                     from .actions import _record_automated_shared_loadpoint_decision
@@ -12066,7 +12465,7 @@ class PriceLevelChargingExecutor:
                     _record_automated_shared_loadpoint_decision(
                         self.hass,
                         self.config_entry,
-                        allowed=should_charge,
+                        allowed=should_charge and opportunity is not False,
                         responsible_mode="price_level",
                         reason=reason,
                         source=mode,
@@ -12086,7 +12485,11 @@ class PriceLevelChargingExecutor:
                     vehicle_state.pending_shared_stop = None
                 stop_unconfirmed = False
                 if should_charge and not vehicle_state.is_charging:
-                    await self._start_charging(mode, reason, vehicle_vin=pseudo_vin)
+                    if opportunity:
+                        await self._start_charging(mode, reason, vehicle_vin=pseudo_vin,
+                            opportunity_generation=opportunity["generation"])
+                    elif opportunity is None:
+                        await self._start_charging(mode, reason, vehicle_vin=pseudo_vin)
                 elif not should_charge and (vehicle_state.is_charging or (
                     shared and self._state.last_decision not in ("away", "unplugged")
                     and _matching_shared_mode_owner(self.hass, self.config_entry, pseudo_vin, "price_level")

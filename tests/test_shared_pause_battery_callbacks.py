@@ -44,6 +44,181 @@ def rig(monkeypatch):
     actions._dynamic_ev_state.clear()
 
 
+def test_live_solar_surplus_enters_optimizer_even_when_old_window_was_zero(rig, monkeypatch):
+    selector = rig.hass.states.get('sensor.connected_vehicle')
+    selector.last_changed = datetime.now(timezone.utc) - timedelta(minutes=1)
+    rig.live.update(battery_soc=90, battery_power=0, grid_power=-5000, load_power=1000)
+    store = rig.hass.data['power_sync'][rig.entry.entry_id]['automation_store']
+    store._data['solar_surplus_config'] = {'enabled': True, 'min_battery_soc': 50,
+        'household_buffer_kw': 0.5, 'sustained_surplus_minutes': 2}
+    coordinator = SimpleNamespace(_enabled=True, _schedule_settings_reoptimization=Mock())
+    rig.hass.data['power_sync'][rig.entry.entry_id]['optimization_coordinator'] = coordinator
+    monkeypatch.setattr(actions.dt_util, 'now', lambda: datetime.now(timezone.utc), raising=False)
+    monkeypatch.setattr(actions, '_optimizer_planned_ev_charge_kw', lambda *a, **k: 0.0)
+    asyncio.run(rig.tick())
+    request = rig.hass.data['power_sync'][rig.entry.entry_id]['_shared_opportunity_request']
+    assert request['profile'] == 'shared_ev_profile_a'
+    assert request['mode'] == 'solar_surplus'
+    assert request['allow_grid'] is False
+    assert request['allow_battery'] is False
+    assert request['power_kw'] >= request['min_power_kw']
+    coordinator._schedule_settings_reoptimization.assert_called_once()
+    rig.live['battery_soc'] = 10
+    asyncio.run(rig.tick())
+    assert '_shared_opportunity_request' not in rig.hass.data['power_sync'][rig.entry.entry_id]
+    assert coordinator._schedule_settings_reoptimization.call_count == 2
+
+
+def test_solar_opportunity_survives_transient_low_surplus_stop_delay(rig, monkeypatch):
+    selector = rig.hass.states.get('sensor.connected_vehicle')
+    selector.last_changed = datetime.now(timezone.utc) - timedelta(minutes=1)
+    rig.live.update(battery_soc=90, battery_power=0, grid_power=-5000, load_power=1000)
+    rig.hass.data['power_sync'][rig.entry.entry_id]['automation_store']._data['solar_surplus_config'] = {
+        'enabled': True, 'min_battery_soc': 50, 'stop_delay_minutes': 3}
+    coordinator = SimpleNamespace(_enabled=True, _schedule_settings_reoptimization=Mock())
+    rig.hass.data['power_sync'][rig.entry.entry_id]['optimization_coordinator'] = coordinator
+    monkeypatch.setattr(actions.dt_util, 'now', lambda: datetime.now(timezone.utc), raising=False)
+    monkeypatch.setattr(actions, '_optimizer_planned_ev_charge_kw', lambda *a, **k: 4.0)
+    monkeypatch.setattr(actions, '_set_vehicle_amps', AsyncMock(return_value=True))
+    asyncio.run(rig.tick())
+    entry = rig.hass.data['power_sync'][rig.entry.entry_id]
+    request = entry['_shared_opportunity_request']
+    rig.live['grid_power'] = 5000
+    asyncio.run(rig.tick())
+    assert entry['_shared_opportunity_request'] is request
+    coordinator._schedule_settings_reoptimization.assert_called_once()
+
+
+def test_solar_new_request_does_not_consume_unrelated_old_positive_directive(rig, monkeypatch):
+    selector = rig.hass.states.get('sensor.connected_vehicle')
+    selector.last_changed = datetime.now(timezone.utc) - timedelta(minutes=1)
+    rig.live.update(battery_soc=90, battery_power=0, grid_power=-5000, load_power=1000)
+    rig.power.state = '0'
+    rig.runtime.update(current_amps=0, target_amps=0, charging_started=False)
+    rig.hass.data['power_sync'][rig.entry.entry_id]['automation_store']._data['solar_surplus_config'] = {
+        'enabled': True, 'min_battery_soc': 50, 'sustained_surplus_minutes': 0}
+    coordinator = SimpleNamespace(_enabled=True, _schedule_settings_reoptimization=Mock())
+    rig.hass.data['power_sync'][rig.entry.entry_id]['optimization_coordinator'] = coordinator
+    monkeypatch.setattr(actions.dt_util, 'now', lambda: datetime.now(timezone.utc), raising=False)
+    monkeypatch.setattr(actions, '_optimizer_planned_ev_charge_kw', lambda *a, **k: 4.0)
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, '_action_start_ev_charging', start)
+    asyncio.run(rig.tick())
+    asyncio.run(rig.tick())
+    start.assert_not_awaited()
+    assert rig.runtime['target_amps'] == 0
+
+
+def test_solar_tick_does_not_overwrite_fresh_price_handover_candidate(rig, monkeypatch):
+    from power_sync.automations.shared_opportunity import update_opportunity_request
+    selector = rig.hass.states.get('sensor.connected_vehicle')
+    selector.last_changed = datetime.now(timezone.utc) - timedelta(minutes=1)
+    rig.live.update(battery_soc=90, battery_power=0, grid_power=-5000, load_power=1000)
+    entry = rig.hass.data['power_sync'][rig.entry.entry_id]
+    entry['automation_store']._data['solar_surplus_config'] = {'enabled': True, 'min_battery_soc': 50}
+    entry['optimization_coordinator'] = SimpleNamespace(_enabled=True, _schedule_settings_reoptimization=Mock())
+    monkeypatch.setattr(actions.dt_util, 'now', lambda: datetime.now(timezone.utc), raising=False)
+    monkeypatch.setattr(actions, '_optimizer_planned_ev_charge_kw', lambda *a, **k: 4.0)
+    monkeypatch.setattr(actions, '_set_vehicle_amps', AsyncMock(return_value=True))
+    entry['amber_prices'] = {'import_cents': 8}
+    request, _ = update_opportunity_request(entry, {'mode': 'price_level_recovery',
+        'profile': 'shared_ev_profile_a', 'solar_arbitrated': True,
+        'price_cents': 8, 'selection_changed': selector.last_changed,
+        'price_config': {}, 'solar_config': dict(entry['automation_store']._data['solar_surplus_config'])}, datetime.now(timezone.utc))
+    asyncio.run(rig.tick())
+    assert entry['_shared_opportunity_request'] is request
+    entry['optimization_coordinator']._schedule_settings_reoptimization.assert_not_called()
+
+
+def test_idle_solar_does_not_use_a_price_successor_directive(rig, monkeypatch):
+    from power_sync.automations.shared_opportunity import update_opportunity_request
+    selector = rig.hass.states.get('sensor.connected_vehicle')
+    selector.last_changed = datetime.now(timezone.utc) - timedelta(minutes=1)
+    rig.live.update(battery_soc=90, battery_power=0, grid_power=-5000, load_power=1000)
+    rig.power.state = '0'
+    rig.runtime.update(current_amps=0, target_amps=0, charging_started=False)
+    entry = rig.hass.data['power_sync'][rig.entry.entry_id]
+    entry['automation_store']._data['solar_surplus_config'] = {'enabled': True, 'min_battery_soc': 50,
+        'sustained_surplus_minutes': 0}
+    entry['amber_prices'] = {'import_cents': 8}
+    entry['optimization_coordinator'] = SimpleNamespace(_enabled=True, _schedule_settings_reoptimization=Mock())
+    monkeypatch.setattr(actions.dt_util, 'now', lambda: datetime.now(timezone.utc), raising=False)
+    monkeypatch.setattr(actions, '_optimizer_planned_ev_charge_kw', lambda *a, **k: 4.0)
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, '_action_start_ev_charging', start)
+    update_opportunity_request(entry, {'mode': 'price_level_recovery', 'profile': 'shared_ev_profile_a',
+        'solar_arbitrated': True, 'price_cents': 8, 'selection_changed': selector.last_changed,
+        'price_config': {}, 'solar_config': dict(entry['automation_store']._data['solar_surplus_config'])}, datetime.now(timezone.utc))
+    asyncio.run(rig.tick())
+    asyncio.run(rig.tick())
+    start.assert_not_awaited()
+
+
+def test_solar_successor_reuses_sustained_surplus_evidence(rig, monkeypatch):
+    from power_sync.automations.shared_opportunity import update_opportunity_request
+    import time
+    selector = rig.hass.states.get('sensor.connected_vehicle')
+    selector.last_changed = datetime.now(timezone.utc) - timedelta(minutes=10)
+    rig.live.update(battery_soc=90, battery_power=0, grid_power=-5000, load_power=1000)
+    rig.power.state = '0'
+    rig.runtime.update(current_amps=0, target_amps=0, charging_started=False)
+    entry = rig.hass.data['power_sync'][rig.entry.entry_id]
+    entry['automation_store']._data['solar_surplus_config'] = {'enabled': True, 'min_battery_soc': 50,
+        'sustained_surplus_minutes': 3}
+    entry['optimization_coordinator'] = SimpleNamespace(_enabled=True, _schedule_settings_reoptimization=Mock())
+    monkeypatch.setattr(actions.dt_util, 'now', lambda: datetime.now(timezone.utc), raising=False)
+    monkeypatch.setattr(actions, '_optimizer_planned_ev_charge_kw', lambda *a, **k: 4.0)
+    monkeypatch.setattr(actions, '_shared_opportunity_handover_adopted', lambda *a: True)
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, '_action_start_ev_charging', start)
+    request, _ = update_opportunity_request(entry, {'mode': 'solar_surplus', 'profile': 'shared_ev_profile_a'}, datetime.now(timezone.utc))
+    rig.runtime['params']['_opportunity_generation'] = request['generation']
+    entry['_shared_solar_boundary'] = {'profile': 'shared_ev_profile_a', 'selection_changed': selector.last_changed,
+        'eligible': True, 'above': time.monotonic() - 181}
+    asyncio.run(rig.tick())
+    start.assert_awaited_once()
+
+
+def test_real_solar_policy_to_solver_and_guarded_rate(rig, monkeypatch):
+    import importlib
+    from test_ev_load_profile_bucketing import _extract_coordinator_method
+    now = datetime.now(timezone.utc)
+    rig.hass.states.get('sensor.connected_vehicle').last_changed = now - timedelta(minutes=1)
+    rig.live.update(battery_soc=90, battery_power=0, grid_power=-5000, load_power=1000)
+    rig.power.state = '0'
+    rig.runtime.update(current_amps=0, target_amps=0, charging_started=False)
+    entry = rig.hass.data['power_sync'][rig.entry.entry_id]
+    entry['automation_store']._data['solar_surplus_config'] = {
+        'enabled': True, 'min_battery_soc': 50, 'sustained_surplus_minutes': 0}
+    coordinator = SimpleNamespace(hass=rig.hass, config_entry=rig.entry, _enabled=True,
+        _schedule_settings_reoptimization=Mock(), _config=SimpleNamespace(interval_minutes=60),
+        _last_planned_ev_load_forecast_w=None, _last_effective_ev_load_forecast_w=None)
+    entry['optimization_coordinator'] = coordinator
+    monkeypatch.setattr(actions.dt_util, 'now', lambda: now, raising=False)
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, '_action_start_ev_charging', start)
+    asyncio.run(rig.tick())
+    start.assert_not_awaited()
+    request = entry['_shared_opportunity_request']
+    timestamps = [now + timedelta(hours=i) for i in range(8)]
+    plans = _extract_coordinator_method('_merge_shared_opportunity')(coordinator, None, timestamps)
+    coordinator._pending_ev_charge_plan = plans
+    optimizer = importlib.import_module('power_sync.optimization.battery_optimizer').BatteryOptimizer(
+        capacity_wh=40000, max_charge_w=14700, max_discharge_w=10000,
+        max_grid_import_w=5000, backup_reserve=.05, interval_minutes=60, horizon_hours=8)
+    result = optimizer.optimize(import_prices=[.2]*8, export_prices=[.05]*8,
+        solar_forecast=[6.] + [0.]*7, load_forecast=[.5]*8, current_soc=1.,
+        schedule_timestamps=timestamps, allow_grid_charge=False, ev_plan=plans)
+    _extract_coordinator_method('_adopt_solved_ev_series')(coordinator, result)
+    assert coordinator._adopted_shared_opportunity['request'] is request
+    coordinator._current_schedule = result.schedule
+    coordinator._get_current_action = lambda: result.schedule.actions[0]
+    asyncio.run(rig.tick())
+    asyncio.run(rig.tick())
+    start.assert_awaited_once()
+    assert rig.runtime['target_amps'] >= 6
+
+
 def test_floor_pause_records_intent_before_dispatch(rig):
     events = []
     class Recorder:

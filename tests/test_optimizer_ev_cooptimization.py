@@ -77,6 +77,165 @@ def _optimizer(module, *, max_grid_import_w=16_100):
     )
 
 
+def test_eligible_solar_opportunity_uses_surplus_after_battery_plan(optimizer_module):
+    module = optimizer_module
+    optimizer = _optimizer(module, max_grid_import_w=5000)
+    args = _kwargs()
+    args.update(solar_forecast=[6.0] + [0.0] * 7, current_soc=1.0,
+                allow_grid_charge=False)
+    baseline = optimizer.optimize(**args)
+    ev = _ev_plan(module, max_power_kw=(0.0,) * 8, energy_needed_kwh=0.0,
+                  opportunity_power_kw=4.0, allow_grid=(False,) * 8,
+                  allow_battery=(False,) * 8)
+    result = optimizer.optimize(**args, ev_plan=ev)
+    assert result.feasible
+    assert result.lp_stats['ev_opportunity_solve_used'] is True
+    assert result.schedule.actions[0].battery_charge_w == pytest.approx(
+        baseline.schedule.actions[0].battery_charge_w, abs=1)
+    assert result.schedule.actions[0].ev_charge_w == pytest.approx(4000, abs=1)
+
+
+def test_solar_opportunity_preserves_battery_demand_and_site_limit(optimizer_module):
+    module = optimizer_module
+    optimizer = _optimizer(module, max_grid_import_w=5000)
+    args = _kwargs()
+    args.update(solar_forecast=[6.0] + [0.0] * 7, current_soc=0.1,
+                load_forecast=[0.5] + [4.0] * 7, allow_grid_charge=False)
+    baseline = optimizer.optimize(**args)
+    battery = baseline.schedule.actions[0].battery_charge_w
+    assert battery > 4000
+    ev = _ev_plan(module, max_power_kw=(0.0,) * 8, energy_needed_kwh=0.0,
+                  opportunity_power_kw=4.0, allow_grid=(False,) * 8,
+                  allow_battery=(False,) * 8)
+    result = optimizer.optimize(**args, ev_plan=ev)
+    assert result.feasible
+    assert result.schedule.actions[0].battery_charge_w == pytest.approx(battery, abs=2)
+    assert result.schedule.actions[0].ev_charge_w <= max(0, 5500 - battery) + 2
+
+
+def test_solar_opportunity_keeps_future_deadline_allocation(optimizer_module):
+    module = optimizer_module
+    optimizer = _optimizer(module, max_grid_import_w=5000)
+    args = _kwargs()
+    args.update(solar_forecast=[6.0] + [0.0] * 7, current_soc=1.0,
+                allow_grid_charge=False)
+    required = _ev_plan(module, max_power_kw=(0.0, 4.0) + (0.0,) * 6,
+                        energy_needed_kwh=3.0)
+    baseline = optimizer.optimize(**args, ev_plan=required)
+    from dataclasses import replace
+    result = optimizer.optimize(**args, ev_plan=replace(required, opportunity_power_kw=4.0))
+    assert result.feasible
+    assert result.schedule.actions[0].ev_charge_w == pytest.approx(4000, abs=1)
+    assert result.schedule.actions[1].ev_charge_w == pytest.approx(
+        baseline.schedule.actions[1].ev_charge_w, abs=1)
+
+
+def test_grid_opportunity_uses_only_remaining_site_capacity(optimizer_module):
+    module = optimizer_module
+    optimizer = _optimizer(module, max_grid_import_w=5000)
+    args = _kwargs()
+    args.update(current_soc=1.0, allow_grid_charge=False)
+    ev = _ev_plan(module, max_power_kw=(0.0,) * 8, energy_needed_kwh=0.0,
+                  opportunity_power_kw=7.0, allow_battery=(False,) * 8)
+    result = optimizer.optimize(**args, ev_plan=ev)
+    assert result.feasible
+    assert result.lp_stats['ev_opportunity_solve_used']
+    assert result.schedule.actions[0].ev_charge_w == pytest.approx(5000, abs=1)
+    assert result.grid_import_w[0] <= 5001
+
+
+def test_opportunity_respects_no_grid_source_policy(optimizer_module):
+    module = optimizer_module
+    optimizer = _optimizer(module, max_grid_import_w=5000)
+    args = _kwargs()
+    args.update(current_soc=1.0, allow_grid_charge=False)
+    ev = _ev_plan(module, max_power_kw=(0.0,) * 8, energy_needed_kwh=0.0,
+                  opportunity_power_kw=7.0, allow_grid=(False,) * 8,
+                  allow_battery=(False,) * 8)
+    result = optimizer.optimize(**args, ev_plan=ev)
+    assert result.feasible
+    assert result.lp_stats['ev_opportunity_solve_used']
+    assert result.schedule.actions[0].ev_charge_w == pytest.approx(0, abs=1)
+
+
+def test_failed_opportunity_solve_keeps_primary_and_does_not_mark_adoptable(optimizer_module, monkeypatch):
+    module = optimizer_module
+    original = module._solve_lp_highs
+    def solve(*args, **kwargs):
+        if kwargs.get('solve_role') == 'tiebreak':
+            raise RuntimeError('simulated failure')
+        return original(*args, **kwargs)
+    monkeypatch.setattr(module, '_solve_lp_highs', solve)
+    optimizer = _optimizer(module, max_grid_import_w=5000)
+    args = _kwargs()
+    args.update(current_soc=1.0, allow_grid_charge=False)
+    ev = _ev_plan(module, max_power_kw=(0.0,) * 8, energy_needed_kwh=0.0,
+                  opportunity_power_kw=7.0, allow_battery=(False,) * 8)
+    result = optimizer.optimize(**args, ev_plan=ev)
+    assert result.feasible
+    assert result.lp_stats['ev_opportunity_solve_used'] is False
+    assert result.schedule.actions[0].ev_charge_w == pytest.approx(0, abs=1)
+
+
+@pytest.mark.parametrize('soc,solar,prices', [
+    (.1, [6.0] + [0.0] * 7, [0.1] * 4 + [0.5] * 4),
+    (.8, [6.0] * 4 + [0.0] * 4, [0.1] * 4 + [0.5] * 4),
+    (.5, [0.0] * 8, [0.5] * 4 + [0.1] * 4),
+])
+def test_opportunity_primary_has_same_battery_plan_as_no_ev(optimizer_module, monkeypatch, soc, solar, prices):
+    module = optimizer_module
+    original = module._solve_lp_highs
+    def solve(*args, **kwargs):
+        if kwargs.get('solve_role') == 'tiebreak':
+            raise RuntimeError('simulated failure')
+        return original(*args, **kwargs)
+    monkeypatch.setattr(module, '_solve_lp_highs', solve)
+    optimizer = _optimizer(module, max_grid_import_w=5000)
+    args = _kwargs()
+    args.update(current_soc=soc, solar_forecast=solar, import_prices=prices)
+    baseline = optimizer.optimize(**args)
+    ev = _ev_plan(module, max_power_kw=(0.0,) * 8, energy_needed_kwh=0.0,
+                  opportunity_power_kw=7.0, allow_battery=(False,) * 8)
+    result = optimizer.optimize(**args, ev_plan=ev)
+    assert [a.battery_charge_w for a in result.schedule.actions] == pytest.approx(
+        [a.battery_charge_w for a in baseline.schedule.actions], abs=2)
+    assert [a.battery_discharge_w for a in result.schedule.actions] == pytest.approx(
+        [a.battery_discharge_w for a in baseline.schedule.actions], abs=2)
+
+
+def test_authorized_opportunity_merged_into_future_plan_reaches_real_solver(optimizer_module):
+    module = optimizer_module
+    load_plan = importlib.import_module('power_sync.optimization.ev_load_plan')
+    optimizer = _optimizer(module, max_grid_import_w=5000)
+    args = _kwargs()
+    args.update(solar_forecast=[6.0] + [0.0] * 7, current_soc=1.0,
+                allow_grid_charge=False)
+    future = _ev_plan(module, max_power_kw=(0.0, 4.0) + (0.0,) * 6,
+                      energy_needed_kwh=3.0)
+    plans = load_plan.add_current_opportunity(
+        [future], vehicle_id='car', n_slots=8, power_kw=4, min_power_kw=1.4,
+        allow_grid=False, allow_battery=False)
+    result = optimizer.optimize(**args, ev_plan=plans)
+    assert result.feasible
+    assert result.lp_stats['ev_opportunity_solve_used']
+    assert result.ev_charge_by_vehicle_w['car'][0] == pytest.approx(4000, abs=1)
+    assert result.ev_charge_by_vehicle_w['car'][1] >= 2999
+
+
+def test_opportunity_does_not_schedule_below_its_own_minimum(optimizer_module):
+    module = optimizer_module
+    optimizer = _optimizer(module, max_grid_import_w=2000)
+    args = _kwargs()
+    args.update(current_soc=1.0, allow_grid_charge=False)
+    ev = _ev_plan(module, max_power_kw=(0.0,) * 8, energy_needed_kwh=0.0,
+                  opportunity_power_kw=4.0, opportunity_min_power_kw=3.0,
+                  allow_battery=(False,) * 8)
+    result = optimizer.optimize(**args, ev_plan=ev)
+    assert result.feasible
+    assert result.lp_stats['ev_opportunity_solve_used']
+    assert result.schedule.actions[0].ev_charge_w == pytest.approx(0, abs=1)
+
+
 def test_negative_import_plan_uses_useful_pv_above_grid_capacity(optimizer_module):
     module = optimizer_module
     start = datetime(2026, 11, 17, 12, tzinfo=timezone.utc)

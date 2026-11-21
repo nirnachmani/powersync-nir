@@ -7372,6 +7372,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._last_effective_ev_load_forecast_w = None
             self._last_ev_charge_by_vehicle_w = None
             self._last_ev_charge_schedule_updated = None
+            self._pending_smart_plan_refs = {}
+            self._pending_shared_opportunity = None
+            self._adopted_shared_opportunity = None
+            self._adopted_smart_handover = {}
             self._last_ev_source_by_vehicle_w = None
             self._last_ev_optimizer_policy = None
             self._last_smart_schedule_ev_load_w = None
@@ -7412,12 +7416,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     # that Smart Schedule actually owns.  ``[]`` is a valid
                     # blocked-plan sentinel; it must not erase unrelated
                     # Price-Level demand from another loadpoint.
-                    self._pending_ev_charge_plan = self._build_ev_charge_plan(
-                        self._price_timestamps(n_ev)
+                    ev_timestamps = self._price_timestamps(n_ev)
+                    self._pending_ev_charge_plan = self._build_ev_charge_plan(ev_timestamps)
+                    deadline_plan = self._pending_ev_charge_plan
+                    self._pending_ev_charge_plan = self._merge_shared_opportunity(
+                        deadline_plan, ev_timestamps
                     )
                     plan_loadpoint_ids = [
                         str(getattr(plan, "vehicle_id", "") or "")
-                        for plan in (self._pending_ev_charge_plan or ())
+                        for plan in (deadline_plan or ())
                         if getattr(plan, "vehicle_id", None)
                     ]
                     policy_loadpoint_ids = [
@@ -7444,6 +7451,26 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         suppressed_loadpoint_ids = set(
                             self._canonical_ev_loadpoint_ids(owned_ids).values()
                         )
+                    price_components = price_projection.expected_by_loadpoint
+                    pending_opportunity = getattr(self, "_pending_shared_opportunity", None)
+                    if pending_opportunity and n_ev:
+                        # An opportunity is current-slot only. Suppress its
+                        # fixed projection in that slot, not the future Price
+                        # forecast, unless a deadline plan already owns the
+                        # full physical loadpoint for the horizon.
+                        opportunity_id = str(pending_opportunity.get("profile") or "")
+                        ids = [opportunity_id, *price_components.keys(), *smart_components.keys()]
+                        canonical = self._canonical_ev_loadpoint_ids(ids)
+                        target = canonical.get(opportunity_id, opportunity_id)
+                        def without_current_opportunity(components):
+                            return {
+                                identifier: ([0.0, *values[1:]]
+                                    if canonical.get(str(identifier), str(identifier)) == target and values
+                                    else values)
+                                for identifier, values in components.items()
+                            }
+                        price_components = without_current_opportunity(price_components)
+                        smart_components = without_current_opportunity(smart_components)
                     (
                         effective_ev_load_w,
                         smart_w,
@@ -7451,7 +7478,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     ) = self._merge_internal_ev_load_components(
                         n_intervals=n_ev,
                         smart_components=smart_components,
-                        price_components=price_projection.expected_by_loadpoint,
+                        price_components=price_components,
                         suppressed_loadpoints=suppressed_loadpoint_ids,
                     )
                     display_projection = price_projection
@@ -9077,6 +9104,55 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if self._last_ev_charge_by_vehicle_w is not None
             else None
         )
+        self._adopted_shared_opportunity = None
+        request = getattr(self, "_pending_shared_opportunity", None)
+        if isinstance(request, dict) and self._last_ev_charge_schedule_updated is not None:
+            profile = request.get("profile")
+            admitted = any(
+                getattr(plan, "vehicle_id", None) == profile
+                and getattr(plan, "opportunity_power_kw", 0) > 0
+                for plan in (getattr(self, "_pending_ev_charge_plan", None) or ())
+            )
+            series = (self._last_ev_charge_by_vehicle_w or {}).get(profile) if isinstance(profile, str) else None
+            stats = getattr(result, "lp_stats", None) or {}
+            if admitted and series and stats.get("ev_opportunity_solve_used") is True:
+                self._adopted_shared_opportunity = {
+                    "request": request,
+                    "schedule_updated": self._last_ev_charge_schedule_updated,
+                }
+        if isinstance(request, dict):
+            try:
+                hass = getattr(self, 'hass', None)
+                entry = getattr(self, 'config_entry', None)
+                observer = (getattr(hass, 'data', {}) or {}).get('power_sync', {}).get(
+                    getattr(entry, 'entry_id', None), {}).get('decision_diagnostics')
+                if observer is not None:
+                    profile = request.get('profile')
+                    values = (self._last_ev_charge_by_vehicle_w or {}).get(profile) if isinstance(profile, str) else None
+                    power = float(values[0]) / 1000 if values else None
+                    accepted = self._adopted_shared_opportunity is not None
+                    observer.emit('ev', {'event': 'shared_opportunity_adoption',
+                        'profile': profile, 'source': request.get('mode'),
+                        'opportunity_generation': request.get('generation'),
+                        'planned_ev_kw': power, 'success': bool(accepted and power is not None and power > 0),
+                        'reason': 'optimizer_unavailable' if not accepted else
+                                  'optimizer_zero' if power is None or power <= 0 else 'selected'})
+            except Exception:
+                _LOGGER.exception('Failed to record shared opportunity adoption')
+        self._adopted_smart_handover = {}
+        if self._last_ev_charge_schedule_updated is not None:
+            for vehicle_id, plan in (getattr(self, "_pending_smart_plan_refs", {}) or {}).items():
+                if vehicle_id not in (self._last_ev_charge_by_vehicle_w or {}):
+                    continue
+                current = ((getattr(self, "_last_ev_optimizer_policy", None) or {})
+                           .get(vehicle_id, {}).get("current", {}))
+                if current.get("max_power_kw", 0) <= 0:
+                    continue
+                self._adopted_smart_handover[vehicle_id] = {
+                    "plan": plan,
+                    "source": current.get("window_source"),
+                    "schedule_updated": self._last_ev_charge_schedule_updated,
+                }
         self._last_ev_source_by_vehicle_w = (
             dict(getattr(result, "ev_source_by_vehicle_w", None) or {}) or None
         )
@@ -9091,6 +9167,53 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._last_planned_ev_load_forecast_w = list(solved)
         if not self._last_effective_ev_load_forecast_w:
             self._last_effective_ev_load_forecast_w = list(solved)
+
+    def _merge_shared_opportunity(self, plans, schedule_timestamps):
+        """Add only a recent decision for the unchanged selected loadpoint."""
+        from ..automations.shared_loadpoint import binding_for_entry, resolve_active_shared_profile
+        from ..const import DOMAIN
+        from .ev_load_plan import add_current_opportunity
+
+        self._pending_shared_opportunity = None
+        if not schedule_timestamps:
+            return plans
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
+        request = entry_data.get('_shared_opportunity_request')
+        if not isinstance(request, dict) or request.get('generation') is None:
+            return plans
+        binding = binding_for_entry(self.config_entry)
+        selected = resolve_active_shared_profile(self.hass, self.config_entry) if binding else None
+        selector = self.hass.states.get(binding.connected_vehicle_entity) if binding else None
+        changed = getattr(selector, 'last_changed', None)
+        if (selected is None or request.get('profile') != selected or changed is None
+                or request.get('selection_changed') != changed
+                or request.get('mode') not in {'solar_surplus', 'price_level_recovery', 'price_level_opportunity'}
+                or type(request.get('allow_grid')) is not bool
+                or type(request.get('allow_battery')) is not bool):
+            return plans
+        try:
+            age = (dt_util.now() - request['decided_at']).total_seconds()
+            if not -1 <= age <= 90:
+                return plans
+            merged = add_current_opportunity(
+                plans or [], vehicle_id=selected, n_slots=len(schedule_timestamps),
+                power_kw=request['power_kw'], min_power_kw=request['min_power_kw'],
+                allow_grid=request['allow_grid'], allow_battery=request['allow_battery'],
+                battery_floor_soc=request.get('battery_floor_soc', 0.0),
+                preserve_home_battery=request.get('preserve_home_battery', False),
+                min_start_soc=request.get('min_start_soc', 0.0),
+                stop_at_battery_floor=request.get('stop_at_battery_floor', True),
+                limit_grid_import=request.get('limit_grid_import', False),
+                solar_battery_reserve_kw=request.get('solar_battery_reserve_kw', 0.0),
+                allow_min_start_solar_exception=request.get('allow_min_start_solar_exception', False),
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return plans
+        if not any(getattr(plan, 'vehicle_id', None) == selected
+                   and getattr(plan, 'opportunity_power_kw', 0) > 0 for plan in merged):
+            return plans
+        self._pending_shared_opportunity = request
+        return merged
 
     def _build_ev_charge_plan(
         self,
@@ -9138,6 +9261,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             now = dt_util.now()
             plans = []
+            pending_plan_refs = {}
             policy_diagnostics: dict[str, dict[str, Any]] = {}
             shared_binding = binding_for_entry(executor.config_entry)
             selected_shared_profile = (
@@ -9178,6 +9302,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 settings = (getattr(executor, "_settings", {}) or {}).get(vehicle_id)
                 if settings is None or not getattr(settings, "enabled", True):
                     continue
+                if historical_plan is None:
+                    pending_plan_refs[str(vehicle_id)] = charging_plan
 
                 deadline = None
                 raw_target = getattr(charging_plan, "target_time", None)
@@ -9589,6 +9715,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # window where only one car would really charge, and had no
             # per-vehicle identity to publish.
             plans = [plan for plan in plans if plan is not None]
+            self._pending_smart_plan_refs = pending_plan_refs
             self._last_ev_optimizer_policy = policy_diagnostics or None
             # ``[]`` is an intentional sentinel: a valid Smart Schedule was
             # evaluated but every managed EV slot is currently blocked. The

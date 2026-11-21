@@ -50,6 +50,31 @@ def _hass_with(coordinator_key: str, import_cents: float, export_cents: float):
     )
 
 
+def test_automation_price_reuses_priority_without_default_or_stale_copy(monkeypatch):
+    entry = {'amber_coordinator': SimpleNamespace(data={'current': [
+        {'channelType': 'general', 'perKwh': 8.0}]}),
+        'amber_prices': {'import_cents': 20}, 'tariff_schedule': {'buy_price': 30}}
+    assert ev_pricing.get_automation_import_price(entry) == 8.0
+    entry['amber_coordinator'].data['current'][0]['perKwh'] = 22.0
+    assert ev_pricing.get_automation_import_price(entry) == 22.0
+    entry['amber_coordinator'].data['current'] = []
+    assert ev_pricing.get_automation_import_price(entry) == 20
+    assert ev_pricing.get_automation_import_price({}) is None
+
+
+def test_automation_price_fallbacks_preserve_zero_and_local_slot(monkeypatch):
+    now = datetime(2026, 11, 21, 13, 42, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_pricing.dt_util, 'now', lambda: now)
+    tariff = {'tou_periods': [{'period': 'offpeak'}]}
+    entry = {'tariff_schedule': tariff, 'sigenergy_tariff': {'buy_prices': [
+        {'timeRange': '13:30-14:00', 'price': 7}]}}
+    assert ev_pricing.get_automation_import_price(entry, lambda _: (0, 0, 'offpeak')) == 0
+    del entry['tariff_schedule']
+    assert ev_pricing.get_automation_import_price(entry) == 7
+    entry['sigenergy_tariff']['buy_prices'][0]['timeRange'] = '13:00-13:30'
+    assert ev_pricing.get_automation_import_price(entry) is None
+
+
 def test_ev_prices_cover_dynamic_provider_coordinators():
     provider_prices = {
         "amber_coordinator": (12.5, 4.0),

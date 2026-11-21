@@ -4042,6 +4042,13 @@ class BatteryOptimizer:
             )
             for plan in ev_plans_lp
         ]
+        # Optional current power is admitted only in the preference solve.
+        p_ev_required_max_by_vehicle = [list(values) for values in p_ev_max_by_vehicle]
+        for vehicle, plan in enumerate(ev_plans_lp):
+            if p_ev_max_by_vehicle[vehicle] and periods[0].start == 0 and periods[0].end == 1:
+                p_ev_max_by_vehicle[vehicle][0] = max(
+                    p_ev_max_by_vehicle[vehicle][0], plan.opportunity_power_kw
+                )
         p_ev_min_power_by_vehicle = [
             [
                 min(
@@ -4052,6 +4059,12 @@ class BatteryOptimizer:
             ]
             for vehicle, plan in enumerate(ev_plans_lp)
         ]
+        for vehicle, plan in enumerate(ev_plans_lp):
+            if plan.opportunity_power_kw > 1e-6 and p_ev_min_power_by_vehicle[vehicle]:
+                p_ev_min_power_by_vehicle[vehicle][0] = min(
+                    p_ev_max_by_vehicle[vehicle][0],
+                    plan.opportunity_min_power_kw or plan.min_power_kw,
+                )
         p_ev_allow_grid = [
             [all(plan.allow_grid[period.start:period.end]) for period in periods]
             for plan in ev_plans_lp
@@ -4116,6 +4129,7 @@ class BatteryOptimizer:
             for index, capability in enumerate(p_ev_max_by_vehicle)
             if any(power > 1e-6 for power in capability)
         ]
+        p_ev_required_max_by_vehicle = [p_ev_required_max_by_vehicle[index] for index in usable]
         ev_plans_lp = [ev_plans_lp[index] for index in usable]
         p_ev_max_by_vehicle = [p_ev_max_by_vehicle[index] for index in usable]
         p_ev_min_power_by_vehicle = [
@@ -6176,6 +6190,15 @@ class BatteryOptimizer:
         )
 
         solver_start = time.monotonic()
+        opportunity_bounds = list(bounds)
+        has_opportunity = ev_charge_active and any(
+            plan.opportunity_power_kw > 1e-6 for plan in ev_plans_lp
+        )
+        if has_opportunity:
+            bounds = list(bounds)
+            for vehicle in range(n_ev_vehicles):
+                idx = ev_charge_var(vehicle, 0)
+                bounds[idx] = (bounds[idx][0], p_ev_required_max_by_vehicle[vehicle][0])
         solve_args = (
             c,
             A_ub,
@@ -6345,9 +6368,56 @@ class BatteryOptimizer:
                 export_tiebreak_used = charging_tiebreak_used
                 charging_tiebreak_stats = None
                 charging_tiebreak_used = False
+        opportunity_solver_stats = None
+        opportunity_solve_used = False
+        if has_opportunity and result.success:
+            remaining_time = LP_SOLVER_TIME_LIMIT_SECONDS - (time.monotonic() - solver_start)
+            if remaining_time > 0:
+                # Freeze the economically selected battery trajectory and the
+                # future deadline allocation, then maximize current eligible EV
+                # power. This is lexicographic, not an invented EV price.
+                preference_bounds = list(opportunity_bounds)
+                for t in range(p_n):
+                    for index in (charge_var(t), discharge_var(t), grid_charge_var(t)):
+                        value = max(0.0, float(result.x[index]))
+                        preference_bounds[index] = (value, value)
+                    if battery_to_grid_active:
+                        index = battery_to_grid_var(t)
+                        value = max(0.0, float(result.x[index]))
+                        preference_bounds[index] = (value, value)
+                    for vehicle in range(n_ev_vehicles):
+                        index = ev_charge_var(vehicle, t)
+                        value = max(0.0, float(result.x[index]))
+                        if t:
+                            preference_bounds[index] = (value, value)
+                        else:
+                            preference_bounds[index] = (value, preference_bounds[index][1])
+                preference_objective = [0.0] * num_vars
+                for vehicle, plan in enumerate(ev_plans_lp):
+                    if plan.opportunity_power_kw > 1e-6:
+                        preference_objective[ev_charge_var(vehicle, 0)] = -1.0
+                try:
+                    preferred = _solve_lp_highs(
+                        preference_objective, A_ub, b_ub, A_eq, b_eq, preference_bounds,
+                        time_limit=remaining_time, integer_indices=integer_indices,
+                        solve_role="tiebreak", initial_solution=result.x,
+                    )
+                    opportunity_solver_stats = dict(getattr(preferred, "stats", {}))
+                    if preferred.success and _solver_point_is_feasible(
+                        preferred.x, A_ub, b_ub, A_eq, b_eq, preference_bounds,
+                        integer_indices, opportunity_solver_stats.get("feasibility_tolerance", 1e-7),
+                    ):
+                        preferred.fun = math.fsum(coefficient * value for coefficient, value in zip(c, preferred.x))
+                        result = preferred
+                        opportunity_solve_used = True
+                except Exception as error:
+                    opportunity_solver_stats = {"error": type(error).__name__}
+                    _LOGGER.warning("EV opportunity solve failed; preserving primary plan: %s", error)
         solver_time_s = time.monotonic() - solver_start
         lp_stats = {
             "backend": "highspy",
+            "ev_opportunity_solve_used": opportunity_solve_used,
+            "ev_opportunity_solver": opportunity_solver_stats,
             "base_steps": n,
             "period_count": p_n,
             "variables": num_vars,

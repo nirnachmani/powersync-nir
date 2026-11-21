@@ -49,7 +49,7 @@ _HISTORICAL_EV_PREDECESSOR = "4e9a458e31ef938d2f3bcbe8ea0cbea878d660b7"
 _HISTORICAL_EV_DELTAS = {
     COORDINATOR: "cca7b699ee4a698f4dcf4ac05c6f461d876a159a92a151b3a6078e4980895cce",
     BATTERY_OPTIMIZER: "160628790a2912d0a3c6888167e06450d3ae27834a9bf0ecac1dcbacf53385f5",
-    OPTIMIZATION / "ev_load_plan.py": "b4cb768403322576d1b9a66d23cea7e1afb54e7592e67efe543b2c4c0d45573f",
+    OPTIMIZATION / "ev_load_plan.py": "efa0b69a2a3950f5872c4e63c66668257894663208b88b5ce8e6db4abc9e7c2d",
     OPTIMIZATION / "price_level_projection.py": "1e8ee5a1ad575c3a1326dc656d25bf4c7d0866c26881eabbdbf1f0fdaf815759",
 }
 
@@ -63,11 +63,11 @@ def _historical_ev_diff_is_allowlisted(actual: str, path: Path) -> bool:
     return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _HISTORICAL_EV_DELTAS[path]
 
 
-# Exact reviewed solar-funding, household-hold and negative-import PV changes.
+# Exact reviewed solar-funding, negative-import and EV opportunity changes.
 _SOLAR_HOLD_PREDECESSOR = "88679db3cd6e5d0a3a49444184e533bfc1ac78ea"
 _SOLAR_HOLD_DELTAS = {
-    COORDINATOR: "9d3429177bf37797a48b45065651f9a9413d4bc1da41c8ff5a41b5f4053b2812",
-    BATTERY_OPTIMIZER: "5378caddd3d8ad3d5ffb57c10d33f6b4d987643b720168ea44929d105ef8896c",
+    COORDINATOR: "7cfe299b31777cde3f962f53459317a4010da31e7c3731f4bb1bb717eef71c33",
+    BATTERY_OPTIMIZER: "b8fd411aa7fce192166f59491fff8d1f2e3a65f75ed89d52868450c66a7bea14",
 }
 
 

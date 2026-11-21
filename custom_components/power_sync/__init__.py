@@ -44299,47 +44299,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if _kw_coord:
                     live_status = coordinator_data_to_ev_live_status(_kw_coord.data)
 
-            # Get current price from Amber coordinator if available
-            current_price = None
-            amber_coordinator = entry_data.get("amber_coordinator")
-            if amber_coordinator and amber_coordinator.data:
-                current_prices = amber_coordinator.data.get("current", [])
-                for price in current_prices:
-                    if price.get("channelType") == "general":
-                        current_price = price.get("perKwh")
-                        break
-
-            # Fallback to stored amber_prices
-            if current_price is None:
-                amber_prices = entry_data.get("amber_prices", {})
-                if amber_prices:
-                    current_price = amber_prices.get("import_cents")
-
-            # Fallback to Tesla tariff schedule (for Globird/AEMO VPP users)
-            if current_price is None:
-                tariff_schedule = entry_data.get("tariff_schedule", {})
-                if tariff_schedule:
-                    # Use real-time TOU calculation so price updates when periods change
-                    if tariff_schedule.get("tou_periods"):
-                        current_price, _, _ = get_current_price_from_tariff_schedule(tariff_schedule)
-                    else:
-                        current_price = tariff_schedule.get("buy_price")
-
-            # Fallback to Sigenergy tariff (for Sigenergy users with Amber)
-            if current_price is None:
-                sigenergy_tariff = entry_data.get("sigenergy_tariff", {})
-                if sigenergy_tariff:
-                    buy_prices = sigenergy_tariff.get("buy_prices", [])
-                    if buy_prices:
-                        # Find current time slot price
-                        # Format: [{"timeRange": "10:00-10:30", "price": 25.0}, ...]
-                        now = dt_util.now()  # HA tz; container UTC would pick wrong slot
-                        current_time = f"{now.hour:02d}:{30 if now.minute >= 30 else 0:02d}"
-                        for slot in buy_prices:
-                            time_range = slot.get("timeRange", "")
-                            if time_range.startswith(current_time):
-                                current_price = slot.get("price")
-                                break
+            # The same source selection is used to recheck an opportunity
+            # immediately before a shared charger handover.
+            from .automations.ev_pricing import get_automation_import_price
+            current_price = get_automation_import_price(
+                entry_data, tariff_resolver=get_current_price_from_tariff_schedule
+            )
 
             # Evaluate auto-schedule executor (handles Smart Schedule mode with per-vehicle settings)
             executor = get_auto_schedule_executor()
@@ -44382,6 +44347,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     surplus_config = normalize_solar_surplus_config(stored.get("solar_surplus_config", {}))
                     surplus_enabled = surplus_config.get("enabled", False)
                     min_battery_soc = get_solar_surplus_min_battery_soc(surplus_config)
+
+                    if surplus_enabled and live_status:
+                        # A waiting Smart controller may occupy this loadpoint
+                        # even when Price-Level is disabled. Probe Solar's own
+                        # eligibility before considering a fenced handover.
+                        from .automations.ev_charging_planner import _evaluate_solar_for_idle_smart
+                        price_executor = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("price_level_executor")
+                        if price_executor is not None:
+                            await _evaluate_solar_for_idle_smart(price_executor)
 
                     # Check which vehicles already have active solar surplus sessions
                     entry_vehicles = _dynamic_ev_state.get(entry.entry_id, {})

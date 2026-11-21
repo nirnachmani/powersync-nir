@@ -144,13 +144,73 @@ class AsyncDecisionWriter:
         if self._closing or self._task is None:
             self.dropped += 1
             return False
-        if stream not in {'ev', 'optimizer'} or event.get('event') not in {'pause', 'solve', 'first', 'lost', 'shared_pause_requested', 'battery_target_decision', 'solar_export_slot', 'solar_export_budget', 'solar_battery_floor', 'solar_rate_decision', 'dynamic_stop_requested', 'dynamic_stop_result', 'stop_observation', 'price_level_decision', 'smart_schedule_decision', 'ownership_claimed', 'ownership_released', 'ev_command', 'ownership_blocked', 'shared_policy_decision', 'shared_observation', 'optimizer_action', 'optimizer_action_result', 'command_handler_requested', 'command_handler_result', 'price_level_result', 'smart_schedule_policy', 'solar_production_state', 'sigenergy_curtailment_decision', 'sigenergy_curtailment_result', 'scheduled_policy', 'scheduled_price', 'solar_export_summary', 'smart_schedule_window', 'ownership_stop_blocked'}:
+        if stream not in {'ev', 'optimizer'} or event.get('event') not in {'shared_opportunity_adoption', 'shared_opportunity_decision', 'smart_schedule_plan', 'pause', 'solve', 'first', 'lost', 'shared_pause_requested', 'battery_target_decision', 'solar_export_slot', 'solar_export_budget', 'solar_battery_floor', 'solar_rate_decision', 'dynamic_stop_requested', 'dynamic_stop_result', 'stop_observation', 'price_level_decision', 'smart_schedule_decision', 'ownership_claimed', 'ownership_released', 'ev_command', 'ownership_blocked', 'shared_policy_decision', 'shared_observation', 'optimizer_action', 'optimizer_action_result', 'command_handler_requested', 'command_handler_result', 'price_level_result', 'smart_schedule_policy', 'solar_production_state', 'sigenergy_curtailment_decision', 'sigenergy_curtailment_result', 'scheduled_policy', 'scheduled_price', 'solar_export_summary', 'smart_schedule_window', 'ownership_stop_blocked'}:
             self.dropped += 1
             self._warn_health()
             return False
         # Minimal prototype allowlist: production event schemas must expand this
         # explicitly before any control path connects to the writer.
         snapshot = {'event': event['event']}
+        if event['event'] == 'smart_schedule_plan':
+            for key, fields in (
+                ('forecast_candidates', ('hour', 'import_cents', 'export_cents', 'solar_kw', 'load_kw', 'surplus_kw')),
+                ('candidate_decisions', ('hour', 'solar_eligible', 'grid_eligible', 'solar_reason', 'grid_reason',
+                                         'solar_rank', 'grid_rank', 'solar_selected', 'grid_selected')),
+                ('planned_windows', ('start', 'end', 'source', 'power_kw', 'energy_kwh', 'price_cents')),
+            ):
+                raw = event.get(key)
+                if not isinstance(raw, list) or len(raw) > 1024:
+                    continue
+                clean = []
+                for index, item in enumerate(raw):
+                    if not isinstance(item, dict):
+                        continue
+                    row = {}
+                    for field in fields:
+                        value = item.get(field)
+                        if field in ('hour', 'start', 'end'):
+                            if isinstance(value, str) and len(value) <= 40:
+                                try:
+                                    datetime.fromisoformat(value)
+                                    row[field] = value
+                                except ValueError:
+                                    pass
+                        elif field == 'source':
+                            if value == 'solar_surplus':
+                                row[field] = value
+                            elif isinstance(value, str) and value.startswith('grid_'):
+                                row[field] = 'grid'
+                        elif field in ('solar_eligible', 'grid_eligible', 'solar_selected', 'grid_selected'):
+                            if type(value) is bool:
+                                row[field] = value
+                        elif field in ('solar_reason', 'grid_reason'):
+                            if value in {'eligible', 'insufficient_solar', 'export_limit',
+                                         'demand_window', 'price_cap', 'insufficient_power'}:
+                                row[field] = value
+                        elif value is None or type(value) in (int, float):
+                            if type(value) is float and not math.isfinite(value):
+                                row[field] = None
+                                snapshot.setdefault('invalid_numeric_fields', []).append(f'{key}[{index}].{field}')
+                            else:
+                                row[field] = value
+                    clean.append(row)
+                snapshot[key] = clean
+            if event.get('candidate_capture') in {'complete', 'partial', 'not_recorded'}:
+                snapshot['candidate_capture'] = event['candidate_capture']
+            if event.get('plan_state') in {'forecast_error', 'complete', 'target_met'}:
+                snapshot['plan_state'] = event['plan_state']
+            if event.get('price_forecast_source') in {'unknown', 'unavailable', 'amber_weighted', 'amber', 'epex_optimizer', 'site_tariff', 'sigenergy_tariff', 'generic_tou'}:
+                snapshot['price_forecast_source'] = event['price_forecast_source']
+            if event.get('priority') in {'solar_only', 'solar_preferred', 'cost_optimized', 'time_critical'}:
+                snapshot['priority'] = event['priority']
+            if type(event.get('can_meet_target')) is bool:
+                snapshot['can_meet_target'] = event['can_meet_target']
+        generation = event.get('opportunity_generation')
+        if isinstance(generation, str) and re.fullmatch(r'[0-9a-f]{32}', generation):
+            snapshot['opportunity_generation'] = generation
+        for key in ('solar_eligible', 'price_eligible', 'solar_full'):
+            if type(event.get(key)) is bool:
+                snapshot[key] = event[key]
         trace_id = event.get('trace_id')
         if isinstance(trace_id, str) and re.fullmatch(r'[0-9a-f]{32}', trace_id):
             snapshot['trace_id'] = trace_id
@@ -161,7 +221,7 @@ class AsyncDecisionWriter:
                     'current_soc', 'interval_hours', 'slot_index', 'grid_export_limit_w',
                     'solar_surplus_kw', 'export_price_per_kwh', 'remaining_headroom_kwh',
                     'deferred_kwh', 'eligible_replenishment_kwh', 'cheapest_replenishment_cost_per_kwh',
-                    'deadline_target_kwh', 'deadline_capacity_remaining_kwh',
+                    'deadline_target_kwh', 'deadline_capacity_remaining_kwh', 'energy_needed_kwh',
                     'max_charge_kw', 'capacity_kwh', 'efficiency', 'deadline_slot', 'max_grid_import_w',
                     'min_battery_soc', 'pause_battery_soc', 'allocated_surplus_kw', 'available_amps',
                     'executable_amps', 'optimizer_ceiling_amps', 'stop_delay_minutes', 'sustained_minutes',
@@ -237,7 +297,7 @@ class AsyncDecisionWriter:
                                     'surplus_stop_delay_wait', 'cycle_unavailable',
                                     'selector_changed', 'telemetry_unknown', 'solar_disabled', 'profile_unconfigured',
                                     'profile_solar_disabled', 'backend_mismatch', 'unplugged', 'solar_only',
-                                    'above_price_cap', 'demand_window', 'price_policy_blocked', 'optimizer_disabled',
+                                    'above_price_cap', 'demand_window', 'price_policy_blocked', 'optimizer_disabled', 'optimizer_unavailable',
                                     'executor_unavailable', 'restore_in_progress', 'evaluation', 'price_level_disabled', 'away',
                                     'home_battery_low', 'price_policy', 'price_unavailable', 'scheduled_disabled', 'outside_schedule',
                                     'profit_max_disabled', 'insufficient_horizon', 'capability_unsupported', 'battery_limits_unknown',

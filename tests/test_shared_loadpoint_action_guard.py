@@ -397,6 +397,9 @@ def test_shared_controller_stop_uses_selected_logical_soc_provenance(
         "solar_surplus_stop": actions._dynamic_ev_update_surplus,
         "battery_target_stop": actions._dynamic_ev_update,
     }[controller_path]
+    if controller_path == "solar_surplus_stop":
+        assert "_dynamic_ev_update_surplus_impl" in inspect.getsource(controller)
+        controller = actions._dynamic_ev_update_surplus_impl
     assert "_shared_session_end_soc_provenance" in inspect.getsource(controller)
 
     result = actions._shared_session_end_soc_provenance(

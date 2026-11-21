@@ -63,7 +63,7 @@ CLASS_FIELDS = {
         "battery_floor_soc", "stop_at_battery_floor", "preserve_home_battery",
         "limit_grid_import", "allow_min_start_solar_exception",
         "solar_battery_reserve_kw", "window_source", "initially_charging", "forecast_only",
-        "deadline_requirements",
+        "deadline_requirements", "opportunity_power_kw", "opportunity_min_power_kw",
     ),
     "CostNeutralPlan": (
         "day_ids", "earnings_caps_by_day", "forecast_import_costs_by_day",
