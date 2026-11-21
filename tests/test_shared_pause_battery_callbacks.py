@@ -69,6 +69,71 @@ def test_live_solar_surplus_enters_optimizer_even_when_old_window_was_zero(rig, 
     assert coordinator._schedule_settings_reoptimization.call_count == 2
 
 
+def test_solar_without_smart_adopts_real_solver_before_charger_start(rig, monkeypatch):
+    import importlib
+    from test_ev_load_profile_bucketing import _extract_coordinator_method
+    selector = rig.hass.states.get('sensor.connected_vehicle')
+    selector.last_changed = datetime.now(timezone.utc) - timedelta(minutes=1)
+    rig.live.update(battery_soc=90, battery_power=0, grid_power=-5000, load_power=1000)
+    rig.power.state = '0'
+    rig.runtime.update(current_amps=0, target_amps=0, charging_started=False)
+    data = rig.hass.data['power_sync'][rig.entry.entry_id]
+    data['automation_store']._data['solar_surplus_config'] = {
+        'enabled': True, 'min_battery_soc': 50, 'sustained_surplus_minutes': 0,
+        'max_export_price_cents': 10}
+    rig.runtime['params']['max_export_price_cents'] = 10
+    monkeypatch.setattr(actions, '_get_current_ev_export_price', lambda *_: 5)
+    now = datetime.now(timezone.utc)
+    coordinator = SimpleNamespace(hass=rig.hass, config_entry=rig.entry, _enabled=True,
+        _schedule_settings_reoptimization=Mock(), _config=SimpleNamespace(interval_minutes=60),
+        _last_planned_ev_load_forecast_w=None, _last_effective_ev_load_forecast_w=None)
+    data['optimization_coordinator'] = coordinator
+    monkeypatch.setattr(actions.dt_util, 'now', lambda: datetime.now(timezone.utc), raising=False)
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(actions, '_action_start_ev_charging', start)
+    async def scenario():
+        await rig.tick()
+        request = data['_shared_opportunity_request']
+        assert request['mode'] == 'solar_surplus'
+        start.assert_not_awaited()
+        timestamps = [now + timedelta(hours=i) for i in range(8)]
+        plans = _extract_coordinator_method('_merge_shared_opportunity')(coordinator, None, timestamps)
+        coordinator._pending_ev_charge_plan = plans
+        optimizer = importlib.import_module('power_sync.optimization.battery_optimizer').BatteryOptimizer(
+            capacity_wh=40000, max_charge_w=14700, max_discharge_w=10000,
+            max_grid_import_w=5000, backup_reserve=.05, interval_minutes=60, horizon_hours=8)
+        result = optimizer.optimize(import_prices=[.08]*8, export_prices=[.05]*8,
+            solar_forecast=[6.]+[0.]*7, load_forecast=[.5]*8, current_soc=1.,
+            schedule_timestamps=timestamps, allow_grid_charge=False, ev_plan=plans)
+        _extract_coordinator_method('_adopt_solved_ev_series')(coordinator, result)
+        coordinator._current_schedule = result.schedule
+        coordinator._get_current_action = lambda: result.schedule.actions[0]
+        await rig.tick()
+        await rig.tick()  # First eligible tick initializes the Solar sustain timer.
+        start.assert_awaited_once()
+    asyncio.run(scenario())
+
+
+def test_solar_export_limit_blocks_opportunity_before_real_optimizer(rig, monkeypatch):
+    from test_ev_load_profile_bucketing import _extract_coordinator_method
+    selector = rig.hass.states.get('sensor.connected_vehicle')
+    selector.last_changed = datetime.now(timezone.utc) - timedelta(minutes=1)
+    rig.live.update(battery_soc=90, battery_power=0, grid_power=-5000, load_power=1000)
+    data = rig.hass.data['power_sync'][rig.entry.entry_id]
+    data['automation_store']._data['solar_surplus_config'] = {
+        'enabled': True, 'min_battery_soc': 50, 'max_export_price_cents': 10}
+    rig.runtime['params']['max_export_price_cents'] = 10
+    coordinator = SimpleNamespace(hass=rig.hass, config_entry=rig.entry, _enabled=True,
+        _schedule_settings_reoptimization=Mock())
+    data['optimization_coordinator'] = coordinator
+    monkeypatch.setattr(actions.dt_util, 'now', lambda: datetime.now(timezone.utc), raising=False)
+    monkeypatch.setattr(actions, '_get_current_ev_export_price', lambda *_: 20)
+    asyncio.run(rig.tick())
+    assert '_shared_opportunity_request' not in data
+    timestamps = [datetime.now(timezone.utc) + timedelta(hours=i) for i in range(8)]
+    assert _extract_coordinator_method('_merge_shared_opportunity')(coordinator, None, timestamps) is None
+
+
 def test_solar_opportunity_survives_transient_low_surplus_stop_delay(rig, monkeypatch):
     selector = rig.hass.states.get('sensor.connected_vehicle')
     selector.last_changed = datetime.now(timezone.utc) - timedelta(minutes=1)

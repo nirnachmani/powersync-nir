@@ -113,6 +113,27 @@ def test_solar_opportunity_preserves_battery_demand_and_site_limit(optimizer_mod
     assert result.schedule.actions[0].ev_charge_w <= max(0, 5500 - battery) + 2
 
 
+@pytest.mark.parametrize('soc,parallel', [(0.4, False), (0.4, True), (0.8, False), (0.8, True)])
+def test_solar_opportunity_real_solver_battery_floor_and_reserve(optimizer_module, soc, parallel):
+    module = optimizer_module
+    optimizer = _optimizer(module, max_grid_import_w=5000)
+    args = _kwargs()
+    args.update(solar_forecast=[6.0] + [0.0] * 7, current_soc=soc,
+                load_forecast=[0.5] + [4.0] * 7, allow_grid_charge=False)
+    baseline = optimizer.optimize(**args)
+    add_current_opportunity = importlib.import_module('power_sync.optimization.ev_load_plan').add_current_opportunity
+    plan = add_current_opportunity([], vehicle_id='car', n_slots=8, power_kw=4, min_power_kw=1.4,
+        allow_grid=False, allow_battery=False, battery_floor_soc=.5, min_start_soc=.5,
+        allow_min_start_solar_exception=parallel and soc < .5,
+        solar_battery_reserve_kw=2 if parallel and soc < .5 else 0)
+    result = optimizer.optimize(**args, ev_plan=plan)
+    assert result.feasible
+    assert result.schedule.actions[0].battery_charge_w == pytest.approx(
+        baseline.schedule.actions[0].battery_charge_w, abs=2)
+    if soc < .5 and not parallel:
+        assert result.schedule.actions[0].ev_charge_w == pytest.approx(0, abs=1)
+
+
 def test_solar_opportunity_keeps_future_deadline_allocation(optimizer_module):
     module = optimizer_module
     optimizer = _optimizer(module, max_grid_import_w=5000)

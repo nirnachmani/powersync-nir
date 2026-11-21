@@ -938,6 +938,107 @@ def test_smart_plan_records_actual_forecast_and_windows(monkeypatch, tmp_path):
     assert all('vehicle_id' not in row for row in rows)
 
 
+@pytest.mark.parametrize('priority', [ev_planner.ChargingPriority.SOLAR_ONLY,
+                                     ev_planner.ChargingPriority.SOLAR_PREFERRED])
+def test_solar_only_plan_records_actual_candidate_rejections(monkeypatch, tmp_path, priority):
+    import importlib, json
+    now = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, 'now', lambda: now)
+    hass, entry = _FakeHass(), _FakeConfigEntry()
+    planner = ev_planner.ChargingPlanner(hass, entry)
+    planner.price_forecaster.get_price_forecast = AsyncMock(return_value=[
+        ev_planner.PriceForecast('2026-09-17T13:00:00', 10, 4, 'offpeak'),
+        ev_planner.PriceForecast('2026-09-17T14:00:00', 10, 4, 'offpeak')])
+    planner.surplus_forecaster.forecast_surplus = AsyncMock(return_value=[
+        ev_planner.SurplusForecast('2026-09-17T13:00:00', 1, 1, 0, .8),
+        ev_planner.SurplusForecast('2026-09-17T14:00:00', 5, 1, 4, .8)])
+    async def run():
+        kwargs = dict(vehicle_id='shared_ev_profile_a', current_soc=50, target_soc=55,
+            target_time=datetime(2026, 9, 17, 16, tzinfo=timezone.utc),
+            resolved_capacity=ev_capacity.resolve_ev_battery_capacity(manual_capacity_kwh=40),
+            charger_power_kw=4, priority=priority)
+        without = await planner.plan_charging(**kwargs)
+        writer = importlib.import_module('power_sync.decision_diagnostics').AsyncDecisionWriter(tmp_path)
+        writer.start()
+        hass.data['power_sync']['entry-1']['decision_diagnostics'] = writer
+        with_log = await planner.plan_charging(**kwargs)
+        await writer.close()
+        return without, with_log
+    without, with_log = asyncio.run(run())
+    assert without.to_dict() == with_log.to_dict()
+    event = next(json.loads(row) for row in next(tmp_path.glob('ev-*.jsonl')).read_text().splitlines()
+                 if json.loads(row)['event'] == 'smart_schedule_plan')
+    assert event['candidate_capture'] == 'complete'
+    assert event['candidate_decisions'][0]['solar_reason'] == 'insufficient_solar'
+    assert event['candidate_decisions'][1]['solar_selected'] is True
+
+
+def test_solar_preferred_records_grid_price_cap_and_selected_rank(monkeypatch, tmp_path):
+    import importlib, json
+    now = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, 'now', lambda: now)
+    hass, entry = _FakeHass(), _FakeConfigEntry()
+    planner = ev_planner.ChargingPlanner(hass, entry)
+    planner.price_forecaster.get_price_forecast = AsyncMock(return_value=[
+        ev_planner.PriceForecast('2026-09-17T13:00:00', 30, 4, 'peak'),
+        ev_planner.PriceForecast('2026-09-17T14:00:00', 10, 4, 'offpeak')])
+    planner.surplus_forecaster.forecast_surplus = AsyncMock(return_value=[])
+    async def run():
+        writer = importlib.import_module('power_sync.decision_diagnostics').AsyncDecisionWriter(tmp_path)
+        writer.start()
+        hass.data['power_sync']['entry-1']['decision_diagnostics'] = writer
+        await planner.plan_charging(vehicle_id='shared_ev_profile_a', current_soc=50, target_soc=80,
+            target_time=datetime(2026, 9, 17, 16, tzinfo=timezone.utc),
+            resolved_capacity=ev_capacity.resolve_ev_battery_capacity(manual_capacity_kwh=40),
+            charger_power_kw=4, priority=ev_planner.ChargingPriority.SOLAR_PREFERRED,
+            max_grid_price_cents=20)
+        await writer.close()
+    asyncio.run(run())
+    event = next(json.loads(row) for row in next(tmp_path.glob('ev-*.jsonl')).read_text().splitlines()
+                 if json.loads(row)['event'] == 'smart_schedule_plan')
+    assert event['candidate_decisions'][0]['grid_reason'] == 'price_cap'
+    assert event['candidate_decisions'][1]['grid_selected'] is True
+    assert event['candidate_decisions'][1]['grid_rank'] == 1
+
+
+@pytest.mark.parametrize('free', [False, True])
+def test_time_critical_records_actual_backward_candidate_selection(monkeypatch, tmp_path, free):
+    import importlib, json
+    now = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, 'now', lambda: now)
+    hass, entry = _FakeHass(), _FakeConfigEntry()
+    planner = ev_planner.ChargingPlanner(hass, entry)
+    planner.price_forecaster.get_price_forecast = AsyncMock(return_value=[
+        ev_planner.PriceForecast('2026-09-17T13:00:00', 0 if free else 10, 4, 'offpeak'),
+        ev_planner.PriceForecast('2026-09-17T14:00:00', 30, 4, 'peak')])
+    planner.surplus_forecaster.forecast_surplus = AsyncMock(return_value=[])
+    async def run():
+        kwargs = dict(vehicle_id='shared_ev_profile_a', current_soc=50, target_soc=55,
+            target_time=datetime(2026, 9, 17, 16, tzinfo=timezone.utc),
+            resolved_capacity=ev_capacity.resolve_ev_battery_capacity(manual_capacity_kwh=40),
+            charger_power_kw=4, priority=ev_planner.ChargingPriority.TIME_CRITICAL)
+        without = await planner.plan_charging(**kwargs)
+        writer = importlib.import_module('power_sync.decision_diagnostics').AsyncDecisionWriter(tmp_path)
+        writer.start()
+        hass.data['power_sync']['entry-1']['decision_diagnostics'] = writer
+        with_log = await planner.plan_charging(**kwargs)
+        await writer.close()
+        return without, with_log
+    without, with_log = asyncio.run(run())
+    assert without.to_dict() == with_log.to_dict()
+    event = next(json.loads(row) for row in next(tmp_path.glob('ev-*.jsonl')).read_text().splitlines()
+                 if json.loads(row)['event'] == 'smart_schedule_plan')
+    assert event['candidate_capture'] == 'complete'
+    if free:
+        assert event['candidate_decisions'][0]['grid_selected'] is True
+        assert event['candidate_decisions'][0]['grid_rank'] == 1
+        assert with_log.windows[0].reason == 'target_deadline_free_grid'
+    else:
+        assert event['candidate_decisions'][0]['grid_reason'] == 'not_considered'
+        assert event['candidate_decisions'][1]['grid_selected'] is True
+        assert event['candidate_decisions'][1]['grid_rank'] == 1
+
+
 def test_smart_plan_target_already_met_records_without_forecasts(tmp_path):
     import importlib, json
     hass, entry = _FakeHass(), _FakeConfigEntry()

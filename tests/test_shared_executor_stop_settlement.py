@@ -238,6 +238,32 @@ def test_passive_solar_candidate_preserves_active_battery_floor_hysteresis(monke
         actions._dynamic_ev_state.clear()
 
 
+@pytest.mark.parametrize('soc,parallel,expected', [(40, False, False), (80, False, True),
+                                                   (40, True, True), (80, True, True)])
+def test_solar_candidate_battery_floor_and_parallel_reserve(monkeypatch, soc, parallel, expected):
+    from test_shared_loadpoint_action_guard import _shared_solar_preflight_setup, _generic_params
+    hass, entry = _shared_solar_preflight_setup()
+    hass.states.get('sensor.connected_vehicle').last_changed = datetime.now(timezone.utc)
+    store = hass.data['power_sync'][entry.entry_id]['automation_store']
+    store._data['solar_surplus_config'].update({'min_battery_soc': 50,
+        'allow_parallel_charging': parallel, 'max_battery_charge_rate_kw': 2,
+        'household_buffer_kw': 0.5, 'max_export_price_cents': 10})
+    monkeypatch.setattr(ev_planner, 'is_ev_plugged_in', AsyncMock(return_value=True))
+    monkeypatch.setattr(actions, '_dynamic_ev_full_soc_reason', AsyncMock(return_value=None))
+    monkeypatch.setattr(actions, '_get_current_ev_export_price', lambda *_: 5)
+    monkeypatch.setattr(actions, '_get_tesla_live_status', AsyncMock(return_value={
+        'battery_soc': soc, 'solar_power': 9000, 'grid_power': -5000,
+        'battery_power': -2000, 'load_power': 2000}))
+    monkeypatch.setattr(actions, '_get_observed_ev_power_reading_kw', AsyncMock(return_value=(0.0, True)))
+    params = {**_generic_params(), 'vehicle_id': 'generic_ev', 'active_logical_vehicle_id': 'shared_ev_profile_a',
+              'voltage': 230, 'phases': 1, 'min_charge_amps': 6, 'max_charge_amps': 32}
+    result = asyncio.run(actions._evaluate_shared_solar_candidate(hass, entry, params))
+    assert result['eligible'] is expected
+    if expected:
+        assert result['capacity_kw'] == pytest.approx(4.5 if parallel else 6.5)
+        assert result['parallel'] is (soc < 50 and parallel)
+
+
 def test_live_shared_arbitration_uses_capacity_not_recovery_label(monkeypatch):
     from test_ev_price_level_ownership import _FakeHass, _FakeConfigEntry
     hass, entry = _FakeHass(), _FakeConfigEntry()
@@ -1210,7 +1236,8 @@ def test_adopted_solar_can_fence_price_runtime(monkeypatch):
         actions._dynamic_ev_state.clear()
 
 
-def test_smart_takeover_uses_matching_adopted_plan(monkeypatch):
+@pytest.mark.parametrize('outgoing_mode', ['price_level_opportunity', 'solar_surplus'])
+def test_smart_takeover_uses_matching_adopted_plan(monkeypatch, outgoing_mode):
     from test_shared_loadpoint_action_guard import _generic_params
 
     async def scenario():
@@ -1220,10 +1247,17 @@ def test_smart_takeover_uses_matching_adopted_plan(monkeypatch):
         data = hass.data['power_sync'][entry.entry_id]
         data['automation_store'] = Store()
         params = {**_generic_params(), 'vehicle_id': 'shared_ev_profile_a',
-                  'dynamic_mode': 'battery_target', 'owner_mode': 'price_level_opportunity',
+                  'dynamic_mode': 'solar_surplus' if outgoing_mode == 'solar_surplus' else 'battery_target',
+                  'owner_mode': outgoing_mode,
                   'fixed_charge_amps': 8, 'max_charge_amps': 8, 'notify_on_start': False}
         assert await actions._action_start_ev_charging_dynamic(hass, entry, params)
         runtime = actions._dynamic_ev_state[entry.entry_id]['generic_ev']
+        if outgoing_mode == 'solar_surplus':
+            runtime.update(current_amps=8, target_amps=8, charging_started=True)
+            original_get = hass.states.get
+            power_state = SimpleNamespace(state='1800', attributes={'unit_of_measurement': 'W'},
+                                          last_reported=datetime.now(timezone.utc))
+            hass.states.get = lambda key: power_state if key == 'sensor.shared_ev_power' else original_get(key)
         plan = object()
         now = datetime.now(timezone.utc)
         monkeypatch.setattr(actions.dt_util, 'now', lambda: now, raising=False)
@@ -1234,7 +1268,7 @@ def test_smart_takeover_uses_matching_adopted_plan(monkeypatch):
             _last_ev_charge_by_vehicle_w={'shared_ev_profile_a': [2000]},
             _adopted_smart_handover={'shared_ev_profile_a': {
                 'plan': plan, 'source': 'grid_offpeak', 'schedule_updated': now}})
-        incoming = {**params, 'owner_mode': 'smart_schedule', 'allow_ownership_takeover': True,
+        incoming = {**params, 'dynamic_mode': 'battery_target', 'owner_mode': 'smart_schedule', 'allow_ownership_takeover': True,
                     '_smart_handover_plan_id': id(plan), '_smart_handover_source': 'grid_offpeak'}
         from power_sync.automations.shared_loadpoint import resolve_shared_loadpoint_command
         resolved = resolve_shared_loadpoint_command(hass, entry, 'shared_ev_profile_a', incoming)
@@ -1263,6 +1297,13 @@ def test_smart_takeover_uses_matching_adopted_plan(monkeypatch):
             hass, entry, allowed=True, responsible_mode='smart_schedule', reason='', source='grid')
         assert not await actions._action_start_ev_charging_dynamic(hass, entry, incoming)
         assert 'generic_ev' not in actions._dynamic_ev_state.get(entry.entry_id, {})
+        data['optimization_coordinator']._adopted_smart_handover = {'shared_ev_profile_a': {
+            'plan': plan, 'source': 'grid_offpeak', 'schedule_updated': now}}
+        actions._begin_automated_shared_loadpoint_cycle(hass, entry)
+        actions._record_automated_shared_loadpoint_decision(
+            hass, entry, allowed=True, responsible_mode='smart_schedule', reason='', source='grid')
+        assert await actions._action_start_ev_charging_dynamic(hass, entry, incoming)
+        assert actions._dynamic_ev_state[entry.entry_id]['generic_ev']['params']['owner_mode'] == 'smart_schedule'
     try:
         asyncio.run(scenario())
     finally:

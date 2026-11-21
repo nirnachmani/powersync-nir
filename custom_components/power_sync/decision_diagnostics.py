@@ -185,7 +185,9 @@ class AsyncDecisionWriter:
                                 row[field] = value
                         elif field in ('solar_reason', 'grid_reason'):
                             if value in {'eligible', 'insufficient_solar', 'export_limit',
-                                         'demand_window', 'price_cap', 'insufficient_power'}:
+                                         'demand_window', 'price_cap', 'insufficient_power',
+                                         'not_considered', 'invalid_time', 'outside_window',
+                                         'solar_selected'}:
                                 row[field] = value
                         elif value is None or type(value) in (int, float):
                             if type(value) is float and not math.isfinite(value):

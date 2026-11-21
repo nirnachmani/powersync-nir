@@ -3326,12 +3326,20 @@ class ChargingPlanner:
                         'load_kw': getattr(surplus, 'load_kw', None),
                         'surplus_kw': getattr(surplus, 'surplus_kw', None),
                     })
-                candidate_decisions = (
-                    _smart_candidate_diagnostics.get()
-                    if priority == ChargingPriority.COST_OPTIMIZED
-                    or (priority == ChargingPriority.SOLAR_PREFERRED and target_time is None)
-                    else None
-                )
+                price_hours = {_forecast_hour_key(row.hour) for row in price_forecast}
+                for surplus in surplus_forecast:
+                    if _forecast_hour_key(surplus.hour) not in price_hours:
+                        candidates.append({'hour': surplus.hour, 'import_cents': None,
+                            'export_cents': None, 'solar_kw': surplus.solar_kw,
+                            'load_kw': surplus.load_kw, 'surplus_kw': surplus.surplus_kw})
+                candidate_decisions = _smart_candidate_diagnostics.get()
+                candidate_keys = ([_forecast_hour_key(str(row.get('hour') or '')) for row in candidate_decisions]
+                                  if candidate_decisions is not None else [])
+                expected_count = len(surplus_forecast if priority == ChargingPriority.SOLAR_ONLY else price_forecast)
+                capture_complete = (len(candidate_keys) == expected_count and
+                    len(candidate_keys) <= 1024 and len(candidates) <= 1024 and
+                    all(key is not None for key in candidate_keys) and
+                    len(set(candidate_keys)) == len(candidate_keys))
                 from .actions import _current_decision_trace
                 observer.emit('ev', {
                     'event': 'smart_schedule_plan', 'plan_state': 'complete', 'profile': vehicle_id,
@@ -3344,7 +3352,7 @@ class ChargingPlanner:
                     'forecast_candidates': candidates,
                     'candidate_decisions': candidate_decisions,
                     'candidate_capture': ('not_recorded' if candidate_decisions is None else
-                                          'complete' if len(candidate_decisions) == len(price_forecast) else 'partial'),
+                                          'complete' if capture_complete else 'partial'),
                     'planned_windows': [
                         {'start': w.start_time, 'end': w.end_time, 'source': w.source,
                          'power_kw': w.estimated_power_kw, 'energy_kwh': w.estimated_energy_kwh,
@@ -3391,19 +3399,26 @@ class ChargingPlanner:
             for price in (price_forecast or [])
             if (key := _forecast_hour_key(price.hour)) is not None
         }
-        for forecast in surplus_forecast:
+        diagnostic_rows = [{'hour': forecast.hour, 'solar_selected': False,
+                            'solar_reason': 'not_considered'} for forecast in surplus_forecast]
+        _smart_candidate_diagnostics.set(diagnostic_rows)
+        for index, forecast in enumerate(surplus_forecast):
             if energy_allocated >= energy_needed_kwh:
                 break
 
+            diagnostic_rows[index]['solar_rank'] = index + 1
+            diagnostic_rows[index]['solar_reason'] = 'insufficient_solar'
             if forecast.surplus_kw >= 1.0:  # Minimum 1kW to charge
                 export_value = export_by_hour.get(_forecast_hour_key(forecast.hour))
                 if price_forecast is not None and not solar_surplus_price_allows_charging(
                     export_value,
                     policy,
                 ):
+                    diagnostic_rows[index]['solar_reason'] = 'export_limit'
                     continue
                 hour_dt = _parse_forecast_hour_local_naive(forecast.hour)
                 if hour_dt is None:
+                    diagnostic_rows[index]['solar_reason'] = 'invalid_time'
                     continue
                 usable_window = _usable_forecast_window(
                     hour_dt,
@@ -3411,6 +3426,7 @@ class ChargingPlanner:
                     target_time_local,
                 )
                 if usable_window is None:
+                    diagnostic_rows[index]['solar_reason'] = 'outside_window'
                     continue
                 end_dt, usable_fraction = usable_window
                 hour_key = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
@@ -3429,8 +3445,11 @@ class ChargingPlanner:
                 )
 
                 if available_power < minimum_charging_power_kw:
+                    diagnostic_rows[index]['solar_reason'] = 'insufficient_power'
                     continue
 
+                diagnostic_rows[index].update(solar_eligible=True, solar_reason='eligible',
+                                              solar_selected=True)
                 energy_this_hour = available_power * usable_fraction
 
                 # Don't over-allocate
@@ -3523,17 +3542,37 @@ class ChargingPlanner:
             if (key := _forecast_hour_key(price.hour)) is not None
         }
 
-        # First pass: allocate solar
+        # Diagnostics reflect actual passes; unvisited candidates stay explicit.
+        diagnostic_rows = [{'hour': p.hour, 'solar_reason': 'not_considered',
+                            'grid_reason': 'not_considered', 'solar_selected': False,
+                            'grid_selected': False} for p in price_forecast]
+        diagnostic_by_hour = {_forecast_hour_key(row['hour']): row for row in diagnostic_rows}
         for forecast in surplus_forecast:
+            key = _forecast_hour_key(forecast.hour)
+            if key not in diagnostic_by_hour:
+                row = {'hour': forecast.hour, 'solar_reason': 'not_considered',
+                       'grid_reason': 'not_considered', 'solar_selected': False,
+                       'grid_selected': False}
+                diagnostic_rows.append(row)
+                diagnostic_by_hour[key] = row
+        _smart_candidate_diagnostics.set(diagnostic_rows)
+
+        # First pass: allocate solar
+        for rank, forecast in enumerate(surplus_forecast, 1):
             if solar_energy + grid_energy >= energy_needed_kwh:
                 break
 
+            row = diagnostic_by_hour.get(_forecast_hour_key(forecast.hour), {})
+            row['solar_rank'] = rank
+            row['solar_reason'] = 'insufficient_solar'
             if forecast.surplus_kw >= 1.0:
                 export_value = export_by_hour.get(_forecast_hour_key(forecast.hour))
                 if not solar_surplus_price_allows_charging(export_value, policy):
+                    row['solar_reason'] = 'export_limit'
                     continue
                 hour_dt = _parse_forecast_hour_local_naive(forecast.hour)
                 if hour_dt is None:
+                    row['solar_reason'] = 'invalid_time'
                     continue
                 usable_window = _usable_forecast_window(
                     hour_dt,
@@ -3541,6 +3580,7 @@ class ChargingPlanner:
                     target_time_local,
                 )
                 if usable_window is None:
+                    row['solar_reason'] = 'outside_window'
                     continue
                 end_dt, usable_fraction = usable_window
                 hour_key = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
@@ -3557,8 +3597,10 @@ class ChargingPlanner:
                 )
 
                 if available_power < minimum_charging_power_kw:
+                    row['solar_reason'] = 'insufficient_power'
                     continue
 
+                row.update(solar_eligible=True, solar_reason='eligible', solar_selected=True)
                 energy_this_hour = min(
                     available_power * usable_fraction,
                     energy_needed_kwh - solar_energy - grid_energy,
@@ -3596,10 +3638,12 @@ class ChargingPlanner:
             # Sort all hours by price (cheapest first)
             sorted_by_price = sorted(price_forecast, key=lambda p: p.import_cents)
 
-            for price_data in sorted_by_price:
+            for rank, price_data in enumerate(sorted_by_price, 1):
                 if grid_energy >= remaining_energy:
                     break
 
+                row = diagnostic_by_hour.get(_forecast_hour_key(price_data.hour), {})
+                row['grid_rank'] = rank
                 # Check if this hour is already covered by solar
                 already_covered = any(
                     _forecast_hour_key(w.start_time)
@@ -3607,10 +3651,12 @@ class ChargingPlanner:
                     for w in windows
                 )
                 if already_covered:
+                    row['grid_reason'] = 'solar_selected'
                     continue
 
                 hour_dt = _parse_forecast_hour_local_naive(price_data.hour)
                 if hour_dt is None:
+                    row['grid_reason'] = 'invalid_time'
                     continue
                 usable_window = _usable_forecast_window(
                     hour_dt,
@@ -3618,12 +3664,14 @@ class ChargingPlanner:
                     target_time_local,
                 )
                 if usable_window is None:
+                    row['grid_reason'] = 'outside_window'
                     continue
                 end_dt, usable_fraction = usable_window
                 hour_key = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
 
                 # Skip hours that fall inside a demand window (unless override set)
                 if self._is_grid_charging_blocked_at(hour_dt):
+                    row['grid_reason'] = 'demand_window'
                     continue
 
                 source = (
@@ -3637,6 +3685,7 @@ class ChargingPlanner:
                     max_grid_price_cents=max_grid_price_cents,
                     priority=ChargingPriority.SOLAR_PREFERRED,
                 ):
+                    row['grid_reason'] = 'price_cap'
                     continue
 
                 # Dynamic power sharing: cheap hours = battery charging too
@@ -3651,8 +3700,10 @@ class ChargingPlanner:
                 )
 
                 if available_power < minimum_charging_power_kw:
+                    row['grid_reason'] = 'insufficient_power'
                     continue  # Not enough capacity, try next hour
 
+                row.update(grid_eligible=True, grid_reason='eligible', grid_selected=True)
                 energy_this_hour = min(
                     available_power * usable_fraction,
                     remaining_energy - grid_energy,
@@ -4228,17 +4279,25 @@ class ChargingPlanner:
             (surplus_by_hour.get(_forecast_hour_key(price.hour)), price)
             for price in price_forecast
         ]
+        diagnostic_rows = [{'hour': price.hour, 'solar_reason': 'not_considered',
+                            'grid_reason': 'not_considered', 'solar_selected': False,
+                            'grid_selected': False} for price in price_forecast]
+        diagnostic_by_hour = {_forecast_hour_key(row['hour']): row for row in diagnostic_rows}
+        _smart_candidate_diagnostics.set(diagnostic_rows)
         combined.reverse()
 
-        for surplus, price in combined:
+        for rank, (surplus, price) in enumerate(combined, 1):
             if energy_allocated >= energy_needed_kwh:
                 break
 
+            row = diagnostic_by_hour.get(_forecast_hour_key(price.hour), {})
             hour_dt = _parse_forecast_hour_local_naive(price.hour)
             if hour_dt is None:
+                row['grid_reason'] = 'invalid_time'
                 continue
 
             if target_time_local and hour_dt >= target_time_local:
+                row['grid_reason'] = 'outside_window'
                 continue  # Skip hours that start at or after deadline
 
             # Bound this candidate by the planning instant and departure.
@@ -4251,6 +4310,7 @@ class ChargingPlanner:
             ).total_seconds() / 3600
             usable_hours = max(0.0, min(1.0, usable_hours))
             if usable_hours <= 0:
+                row['grid_reason'] = 'outside_window'
                 continue
 
             # Use one consistent power for capacity, timestamps, publication,
@@ -4260,22 +4320,31 @@ class ChargingPlanner:
                 window_power_kw = min(surplus.surplus_kw, charger_power_kw)
                 source = "solar_surplus"
                 cost = 0
+                row.update(solar_eligible=True, solar_reason='eligible',
+                           solar_rank=rank)
             else:
+                row['solar_reason'] = 'insufficient_solar'
                 # Skip grid hours that fall inside a demand window (unless override set).
                 # If this leaves the deadline unmet, the warning/can_meet_target fields
                 # will reflect that — user can opt into demand_allow_grid_charging if needed.
                 if self._is_grid_charging_blocked_at(hour_dt):
+                    row['grid_reason'] = 'demand_window'
                     continue
                 # Use grid
                 window_power_kw = charger_power_kw
                 source = f"grid_{price.period}"
                 cost = price.import_cents
+                row.update(grid_eligible=True, grid_reason='eligible',
+                           grid_rank=rank)
 
             available_kwh = window_power_kw * usable_hours
             remaining_kwh = energy_needed_kwh - energy_allocated
             energy_this_hour = min(available_kwh, remaining_kwh)
             if energy_this_hour <= 0:
+                row['solar_reason' if source == 'solar_surplus' else 'grid_reason'] = 'insufficient_power'
                 continue
+
+            row['solar_selected' if source == 'solar_surplus' else 'grid_selected'] = True
 
             if energy_this_hour + 1e-9 < available_kwh:
                 planned_start = bounded_end - timedelta(
