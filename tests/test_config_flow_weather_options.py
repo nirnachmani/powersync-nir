@@ -3918,3 +3918,27 @@ def test_ev_load_management_step_clears_removed_phase_sensors():
     # so a plain {**current, **user_input} merge could never clear a sensor.
     assert '{**{key: "" for key in phase_entity_keys}, **user_input}' in step_source
     assert "{**current, **submitted}" in step_source
+
+
+def test_switch_only_price_level_priority_options_round_trip():
+    key = "generic_charger_prioritise_price_level_ev"
+    constant = "CONF_GENERIC_CHARGER_PRIORITISE_PRICE_LEVEL_EV"
+    method = _options_flow_method("_save_ev_options")
+    assignment = next(
+        node for node in method.body if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Name)
+            and target.slice.id == constant for target in node.targets
+        )
+    )
+    code = compile(ast.Module(body=[assignment], type_ignores=[]), str(CONFIG_FLOW_PATH), "exec")
+    for submitted, saved, expected in [({key: True}, {}, True),
+                                        ({key: False}, {key: True}, False),
+                                        ({}, {key: True}, True), ({}, {}, False)]:
+        data = {}
+        exec(code, {constant: key, "ev_input": submitted, "final_data": data,
+                    "self": SimpleNamespace(_get_option=saved.get)})
+        assert data[key] is expected
+    for path in (STRINGS_PATH, TRANSLATIONS_PATH):
+        fields = json.loads(path.read_text())["options"]["step"]["ev_charging"]
+        assert key in fields["data"] and key in fields["data_description"]

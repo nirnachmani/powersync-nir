@@ -489,6 +489,7 @@ from .const import (
     CONF_GENERIC_CHARGER_ENABLED,
     CONF_GENERIC_CHARGER_SWITCH_ENTITY,
     CONF_GENERIC_CHARGER_AMPS_ENTITY,
+    CONF_GENERIC_CHARGER_PRIORITISE_PRICE_LEVEL_EV,
     CONF_GENERIC_CHARGER_STATUS_ENTITY,
     CONF_GENERIC_CHARGER_POWER_ENTITY,
     CONF_GENERIC_CHARGER_SOC_ENTITY,
@@ -16344,6 +16345,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 ),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Optional(
+                CONF_GENERIC_CHARGER_PRIORITISE_PRICE_LEVEL_EV,
+                default=self._get_option(CONF_GENERIC_CHARGER_PRIORITISE_PRICE_LEVEL_EV, False),
+            ): BooleanSelector(),
+            vol.Optional(
                 CONF_GENERIC_CHARGER_POWER_ENTITY,
                 description=(
                     {"suggested_value": current_generic_power_entity}
@@ -16720,6 +16725,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         final_data[CONF_GENERIC_CHARGER_AMPS_ENTITY] = ev_input.get(
             CONF_GENERIC_CHARGER_AMPS_ENTITY, ""
         ).strip()
+        final_data[CONF_GENERIC_CHARGER_PRIORITISE_PRICE_LEVEL_EV] = ev_input.get(
+            CONF_GENERIC_CHARGER_PRIORITISE_PRICE_LEVEL_EV,
+            self._get_option(CONF_GENERIC_CHARGER_PRIORITISE_PRICE_LEVEL_EV, False),
+        )
         final_data[CONF_GENERIC_CHARGER_STATUS_ENTITY] = ev_input.get(
             CONF_GENERIC_CHARGER_STATUS_ENTITY, ""
         ).strip()

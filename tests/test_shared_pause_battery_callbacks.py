@@ -660,6 +660,30 @@ def test_callback_started_before_settled_pause_cannot_resume(rig, monkeypatch, m
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize('physical_amps, stale_amps, expected', [('', 'number.old', True), ('number.shared_ev_amps', '', False)])
+def test_price_switch_priority_uses_physical_configuration(rig, monkeypatch, physical_amps, stale_amps, expected):
+    async def scenario():
+        rig.entry.options = {**rig.entry.options, 'generic_charger_amps_entity': physical_amps,
+            'generic_charger_prioritise_price_level_ev': True}
+        rig.runtime['params'].update(dynamic_mode='battery_target', owner_mode='price_level_opportunity',
+            charger_amps_entity=stale_amps, target_battery_charge_kw=10, max_grid_import_kw=14.4,
+            min_charge_amps=5, max_charge_amps=32, voltage=240, phases=1)
+        rig.live.update(battery_power=-4400, grid_power=11300, solar_power=1700,
+                        load_power=1200, ev_power=7680, battery_soc=64)
+        monkeypatch.setattr(actions, '_clear_ble_dynamic_session_if_unplugged', AsyncMock(return_value=False))
+        monkeypatch.setattr(actions, '_phase_load_management_enabled', lambda *_: False)
+        monkeypatch.setattr(actions, '_optimizer_planned_ev_charge_kw', lambda *_: None)
+        captured = []
+        original = actions._resolve_battery_reservation_kw
+        def observe(**kwargs):
+            captured.append(kwargs['reserve_battery_charge'])
+            return original(**kwargs)
+        monkeypatch.setattr(actions, '_resolve_battery_reservation_kw', observe)
+        await actions._dynamic_ev_update(rig.hass, rig.entry, rig.entry.entry_id, 'generic_ev')
+        assert captured and captured[0] is (not expected)
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize('confirmed, switch_profile', [(True, False), (False, False), (True, True)])
 def test_price_evac_unplug_requires_direct_idle_before_reconciling(rig, monkeypatch, confirmed, switch_profile):
     async def scenario():
