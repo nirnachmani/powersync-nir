@@ -7176,7 +7176,7 @@ def test_auto_schedule_grid_start_uses_optimizer_battery_target(monkeypatch, fak
     assert params["target_battery_charge_kw"] == 14.7
     assert params["max_battery_charge_rate_kw"] == 14.7
     assert params["max_inverter_kw"] == 10.0
-    assert params["max_grid_import_kw"] == 19.2
+    assert "max_grid_import_kw" not in params  # Resolved against live settings at execution.
 
 
 def test_auto_schedule_grid_start_prefers_tesla_site_meter_limit(monkeypatch, fake_actions):
@@ -7210,17 +7210,9 @@ def test_auto_schedule_grid_start_prefers_tesla_site_meter_limit(monkeypatch, fa
 
     asyncio.run(executor._start_charging(VIN, settings, state, "grid_offpeak"))
 
-    fake_actions._resolve_max_grid_import_kw.assert_awaited_once_with(
-        hass,
-        executor.config_entry,
-        {
-            "max_inverter_kw": 10.0,
-            "max_battery_charge_rate_kw": 14.7,
-            "target_battery_charge_kw": 14.7,
-        },
-    )
+    fake_actions._resolve_max_grid_import_kw.assert_not_awaited()
     _hass, _entry, params = fake_actions._action_start_ev_charging_dynamic.await_args.args
-    assert params["max_grid_import_kw"] == 16.1
+    assert "max_grid_import_kw" not in params  # Hardware and site caps resolve at execution.
 
 
 def test_auto_schedule_solar_uses_smart_schedule_battery_floor(monkeypatch, fake_actions):

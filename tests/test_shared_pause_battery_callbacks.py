@@ -660,6 +660,23 @@ def test_callback_started_before_settled_pause_cannot_resume(rig, monkeypatch, m
     asyncio.run(scenario())
 
 
+def test_grid_import_limit_refreshes_without_overriding_site_cap(rig, monkeypatch):
+    async def scenario():
+        config = SimpleNamespace(max_grid_import_w=13000)
+        rig.hass.data['power_sync'][rig.entry.entry_id]['optimization_coordinator'] = SimpleNamespace(_config=config)
+        monkeypatch.setattr(actions, '_get_tesla_max_site_meter_power_kw', AsyncMock(return_value=None))
+        monkeypatch.setattr(actions, '_get_home_power_max_grid_import_kw', lambda *args: 19.2)
+        params = {'max_grid_import_kw': None}
+        assert await actions._resolve_max_grid_import_kw(rig.hass, rig.entry, params) == 13
+        config.max_grid_import_w = 0
+        assert await actions._resolve_max_grid_import_kw(rig.hass, rig.entry, params) == 19.2
+        config.max_grid_import_w = 10000
+        assert await actions._resolve_max_grid_import_kw(rig.hass, rig.entry, params) == 10
+        params['max_grid_import_kw'] = 8
+        assert await actions._resolve_max_grid_import_kw(rig.hass, rig.entry, params) == 8
+    asyncio.run(scenario())
+
+
 def test_new_rate_request_discards_old_phase_cap(rig, monkeypatch):
     async def scenario():
         params = rig.runtime['params']
