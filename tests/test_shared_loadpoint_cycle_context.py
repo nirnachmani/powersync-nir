@@ -192,6 +192,21 @@ def test_cycle_context_publishes_fresh_evac_observation_provenance():
 
 
 @pytest.mark.parametrize("loadpoint", ["generic_ev", "sigenergy_charger"])
+def test_ownership_teardown_does_not_warn_before_stop_result(monkeypatch, loadpoint):
+    from power_sync import action_events
+    hass = _Hass(_Store())
+    hass.bus = SimpleNamespace(async_fire=Mock())
+    notices = Mock()
+    monkeypatch.setattr(action_events, '_notification', notices)
+    command = {'command': 'stop', 'success': False, 'source': 'powersync',
+               'at': datetime.now(UTC).isoformat(), 'reason': 'pending'}
+    action_events.publish_ev_command(hass, _Entry(), loadpoint, command, record_type='ownership')
+    notices.assert_not_called()
+    action_events.publish_ev_command(hass, _Entry(), loadpoint, command, record_type='command')
+    assert notices.call_count == 1
+
+
+@pytest.mark.parametrize("loadpoint", ["generic_ev", "sigenergy_charger"])
 def test_new_shared_start_rearms_stop_warning_without_claiming_idle(monkeypatch, loadpoint):
     """A/B share a physical warning; a later session may alert again, not clear it."""
     from power_sync import action_events

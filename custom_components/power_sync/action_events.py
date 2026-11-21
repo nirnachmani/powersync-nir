@@ -165,7 +165,8 @@ def publish_ev_command(hass: Any, config_entry: Any, vehicle_id: str,
     if physical_confirmation and command["success"]:
         if alerts.pop(vehicle_id, None) is not None:
             _notification(hass, config_entry.entry_id, vehicle_id, reason=None, clear=True)
-    elif not command["success"] and (vehicle_id not in alerts or alerts[vehicle_id].get("rearmed")):
+    elif (record_type in ("command", "observation") and not command["success"]
+          and (vehicle_id not in alerts or alerts[vehicle_id].get("rearmed"))):
         alerts[vehicle_id] = payload
         fire_action_event(hass, EVENT_EV_STOP_FAILED, payload)
         _notification(hass, config_entry.entry_id, vehicle_id, reason=payload["reason"])
