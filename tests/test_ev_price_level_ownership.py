@@ -680,6 +680,14 @@ def test_cost_optimized_still_executes_a_planned_solar_window(monkeypatch):
     assert source == "solar_surplus"
 
 
+def test_smart_solar_owner_yields_only_after_stop_delay_expired():
+    decide = ev_planner._should_block_smart_schedule_solar_start
+    assert not decide(0.5, 1.4, 'smart_schedule_solar_surplus', stop_delay_elapsed=False)
+    assert decide(0.5, 1.4, 'smart_schedule_solar_surplus', stop_delay_elapsed=True)
+    assert not decide(2.0, 1.4, 'smart_schedule_solar_surplus', stop_delay_elapsed=True)
+    assert decide(0.5, 1.4, None, stop_delay_elapsed=False)
+
+
 def test_active_smart_schedule_solar_session_delegates_low_surplus_stop():
     assert not ev_planner._should_block_smart_schedule_solar_start(
         current_surplus_kw=3.0,

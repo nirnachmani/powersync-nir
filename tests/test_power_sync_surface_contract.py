@@ -83,7 +83,7 @@ def _solar_hold_diff_is_allowlisted(actual: str, path: Path) -> bool:
 # Reviewed v1750–1784 optimizer ports on top of published nir.8.
 _REVIEWED_CYCLE_BASE = "a155ddea"
 _REVIEWED_CYCLE_DELTAS = {
-    COORDINATOR: "cdabd48c1f6350fff564e717f37d3d947f59526d8a14ca2d585c6c09974caea8",
+    COORDINATOR: "d03cc9cfe85f03dfbedf94f5a73a7bd77977293797db9df6ed2310315edcee5a",
     BATTERY_OPTIMIZER: "81e724e1a410e6c9d1546910acef52f2ce408499d282c091f2ebaa9f108a237a",
     OPTIMIZATION / "battery_efficiency.py": "09fc30f99fad4e731de7137ad9de6c037378d96f83923f39fcfe3b6e7140f2d3",
 }

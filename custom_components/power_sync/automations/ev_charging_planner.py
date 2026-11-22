@@ -231,11 +231,13 @@ def _should_block_smart_schedule_solar_start(
     current_surplus_kw: float,
     min_surplus_kw: float,
     owner_mode: Optional[str],
+    *,
+    stop_delay_elapsed: bool = False,
 ) -> bool:
-    """Keep the minimum gate for starts while delegating active-session stops."""
+    """Keep start gating distinct from an active solar controller's stop grace."""
     return (
         current_surplus_kw < min_surplus_kw
-        and owner_mode != "smart_schedule_solar_surplus"
+        and (owner_mode != "smart_schedule_solar_surplus" or stop_delay_elapsed)
     )
 
 
@@ -5074,6 +5076,15 @@ def _observe_smart_schedule(function):
     from functools import wraps
     @wraps(function)
     async def wrapped(self, vehicle_id, settings, live_status, current_price_cents):
+        # Preserve a decision only if this evaluation actually refreshed it.
+        # Early returns (e.g. missing SoC/load) otherwise leave an old denial
+        # masquerading as a fresh decision for up to 90 seconds.
+        records = None
+        identity = str(vehicle_id or '').upper()
+        if identity in {'SHARED_EV_PROFILE_A', 'SHARED_EV_PROFILE_B'}:
+            from .actions import _smart_schedule_effective_authorizations
+            records = _smart_schedule_effective_authorizations.get(self.config_entry.entry_id, {})
+        previous = records.get(identity) if records is not None else None
         failed = False
         token = None
         trace_context = None
@@ -5094,6 +5105,14 @@ def _observe_smart_schedule(function):
             failed = True
             raise
         finally:
+            if previous is not None and records is not None and records.get(identity) is previous:
+                records.pop(identity, None)
+                entry = self.hass.data.get('power_sync', {}).get(self.config_entry.entry_id, {})
+                coordinator = entry.get('optimization_coordinator')
+                refresh = getattr(coordinator, '_schedule_settings_reoptimization', None)
+                if getattr(coordinator, '_enabled', False) and callable(refresh):
+                    coordinator._smart_availability_generation = getattr(coordinator, '_smart_availability_generation', 0) + 1
+                    refresh()
             try:
                 observer = self.hass.data.get('power_sync', {}).get(self.config_entry.entry_id, {}).get('decision_diagnostics')
                 if observer is not None:
@@ -6749,6 +6768,9 @@ class AutoScheduleExecutor:
         # Resolve sequential vehicle_id to actual VIN/BLE identifier
         # so per-vehicle checks work correctly for multi-vehicle setups
         vehicle_vin = self._resolve_vehicle_vin(vehicle_id)
+        from .shared_loadpoint import canonical_shared_loadpoint_id
+        shared_owner_id = canonical_shared_loadpoint_id(self.config_entry, vehicle_id)
+        owner_lookup_id = shared_owner_id or vehicle_vin or vehicle_id
         charger_capability = await self._resolve_effective_charger_capability(
             vehicle_id,
             settings,
@@ -7193,21 +7215,39 @@ class AutoScheduleExecutor:
                 # Battery is above threshold, check surplus requirement
                 min_surplus = settings.get_min_surplus_kw()
                 active_owner_mode = None
-                if state.is_charging:
+                from .actions import _dynamic_ev_state
+                physical = shared_owner_id
+                runtime = (_dynamic_ev_state.get(self.config_entry.entry_id, {}).get(physical, {})
+                           if physical else {})
+                runtime_params = runtime.get("params") or {}
+                matching_runtime = bool(
+                    runtime.get("active")
+                    and runtime.get("active_profile_id") == vehicle_id
+                    and runtime_params.get("owner_mode") == "smart_schedule_solar_surplus"
+                )
+                # An executor flag can lag its controller; protect an actually
+                # started matching controller's existing surplus stop grace.
+                active_runtime = matching_runtime and bool(
+                    runtime.get("charging_started") or runtime.get("current_amps", 0) > 0
+                )
+                preserve_smart_owner = (
+                    active_runtime or bool(runtime.get("smart_solar_optimizer_pause"))
+                    if matching_runtime else state.is_charging
+                )
+                if preserve_smart_owner:
                     from .ev_ownership import get_active_ev_owner_mode
 
-                    owner_vehicle_id = (
-                        self._resolve_vehicle_vin(vehicle_id) or vehicle_id
-                    )
                     active_owner_mode = get_active_ev_owner_mode(
                         self.hass,
                         self.config_entry,
-                        owner_vehicle_id,
+                        owner_lookup_id,
                     )
+                stop_delay_elapsed = bool(matching_runtime and runtime.get("smart_solar_stop_delay_elapsed"))
                 if _should_block_smart_schedule_solar_start(
                     current_surplus_kw,
                     min_surplus,
                     active_owner_mode,
+                    stop_delay_elapsed=stop_delay_elapsed,
                 ):
                     if not _use_deadline_grid_fallback():
                         should_charge = False
@@ -7356,7 +7396,7 @@ class AutoScheduleExecutor:
             active_owner_mode = get_active_ev_owner_mode(
                 self.hass,
                 self.config_entry,
-                vehicle_vin or vehicle_id,
+                owner_lookup_id,
             )
             switch_active_controller = (
                 active_owner_mode
@@ -7404,7 +7444,7 @@ class AutoScheduleExecutor:
                     remaining_owner_mode = get_active_ev_owner_mode(
                         self.hass,
                         self.config_entry,
-                        vehicle_vin or vehicle_id,
+                        owner_lookup_id,
                     )
                     state.is_charging = remaining_owner_mode in {
                         "smart_schedule",

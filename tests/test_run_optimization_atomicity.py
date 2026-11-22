@@ -209,7 +209,7 @@ def _publication_pipeline(*, rerun=True):
                      manual_control_projection=None, octopus_revision=None,
                      cost_neutral_cap=None, cost_neutral_forecast_import_cost=None,
                      cost_neutral_fixed_cost_allowance=None, cost_neutral_plan=None,
-                     solve_timestamp=None, historical_ev_generation=0,
+                     solve_timestamp=None, historical_ev_generation=0, smart_availability_generation=0,
                      dt_util=SimpleNamespace(now=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc)))
     exec(compile(ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[])),
                  str(COORDINATOR_PATH), "exec"), namespace)
@@ -218,7 +218,7 @@ def _publication_pipeline(*, rerun=True):
 
 @pytest.mark.parametrize(("rerun", "failure_stage"), [
     (True, None), (True, "reserve"), (True, "external"), (True, "cancel"),
-    (False, None), (False, "external"),
+    (False, None), (False, "external"), (False, "smart_change"),
 ])
 def test_slow_reserve_rerun_never_exposes_an_uncommitted_export(rerun, failure_stage):
     """A refresh during either await must keep the previously committed plan."""
@@ -284,11 +284,18 @@ def test_slow_reserve_rerun_never_exposes_an_uncommitted_export(rerun, failure_s
             assert_previous_plan()
             if failure_stage == "external":
                 raise RuntimeError("external plan failed")
+            if failure_stage == "smart_change":
+                subject._smart_availability_generation = 1
             return result
 
         subject._apply_external_energy_plan = external
+        subject._schedule_settings_reoptimization = lambda: committed_prices.append('retry')
         publish = _publication_pipeline(rerun=rerun)
-        if failure_stage:
+        if failure_stage == 'smart_change':
+            assert await publish(subject, reference, solve_again, resolved_parameters) is False
+            assert committed_prices.pop() == 'retry'
+            assert_previous_plan()
+        elif failure_stage:
             error = asyncio.CancelledError if failure_stage == "cancel" else RuntimeError
             with pytest.raises(error):
                 await publish(subject, reference, solve_again, resolved_parameters)

@@ -7343,6 +7343,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await self._refresh_ev_forecast_inputs()
             await self._refresh_historical_ev_forecasts()
             historical_ev_generation = getattr(self, "_historical_ev_generation", 0)
+            smart_availability_generation = getattr(self, "_smart_availability_generation", 0)
 
             # Collect forecast data
             self._last_export_boost_allowed_slots = []
@@ -8445,7 +8446,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 avoided_import_prices=cost_neutral_import_prices,
                 now=solve_timestamp,
             )
-            if historical_ev_generation != getattr(self, "_historical_ev_generation", 0):
+            if (historical_ev_generation != getattr(self, "_historical_ev_generation", 0)
+                    or smart_availability_generation != getattr(self, "_smart_availability_generation", 0)):
                 self._schedule_settings_reoptimization()
                 return False
             self._current_schedule = result.schedule
@@ -9219,19 +9221,32 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _merge_shared_opportunity(self, plans, schedule_timestamps):
         """Add only a recent decision for the unchanged selected loadpoint."""
-        from ..automations.shared_loadpoint import binding_for_entry, resolve_active_shared_profile
+        from ..automations.shared_loadpoint import (
+            binding_for_entry, canonical_shared_loadpoint_id, resolve_active_shared_profile,
+        )
+        from ..automations.actions import _shared_smart_intent
         from ..const import DOMAIN
         from .ev_load_plan import add_current_opportunity
+        from dataclasses import replace
 
         self._pending_shared_opportunity = None
         if not schedule_timestamps:
             return plans
         entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
+        binding = binding_for_entry(self.config_entry)
+        selected = resolve_active_shared_profile(self.hass, self.config_entry) if binding else None
+        physical = canonical_shared_loadpoint_id(self.config_entry, selected) if selected else None
+        if plans and physical and _shared_smart_intent(
+            self.hass, self.config_entry, physical, {'active_logical_vehicle_id': selected}
+        ) is False:
+            plans = [
+                replace(plan, max_power_kw=(0.0, *plan.max_power_kw[1:]))
+                if (plan.vehicle_id == selected and plan.max_power_kw) else plan
+                for plan in plans
+            ]
         request = entry_data.get('_shared_opportunity_request')
         if not isinstance(request, dict) or request.get('generation') is None:
             return plans
-        binding = binding_for_entry(self.config_entry)
-        selected = resolve_active_shared_profile(self.hass, self.config_entry) if binding else None
         selector = self.hass.states.get(binding.connected_vehicle_entity) if binding else None
         changed = getattr(selector, 'last_changed', None)
         if (selected is None or request.get('profile') != selected or changed is None

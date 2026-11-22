@@ -10650,6 +10650,38 @@ def test_solar_surplus_does_not_mistake_post_stop_lag_for_manual_start(monkeypat
     assert set_amps_calls == [0]
 
 
+def test_smart_solar_stop_delay_sets_release_reason_not_optimizer_zero(monkeypatch):
+    hass, vehicle_id = _Hass([]), 'VIN123'
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=8)
+    state['params']['owner_mode'] = 'smart_schedule_solar_surplus'
+    state['low_surplus_start'] = datetime.now() - timedelta(minutes=6)
+    actions._dynamic_ev_state['entry-1'] = {vehicle_id: state}
+    _install_solar_surplus_runtime_stubs(monkeypatch, {
+        'battery_soc': 40, 'grid_power': 2000, 'battery_power': 0,
+        'solar_power': 0, 'load_power': 0,
+    })
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), 'entry-1', vehicle_id))
+    assert state.get('smart_solar_stop_delay_elapsed') is True
+
+
+def test_smart_solar_optimizer_zero_does_not_set_sustained_surplus_denial(monkeypatch):
+    hass, vehicle_id = _Hass([]), 'VIN123'
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=8)
+    state['params']['owner_mode'] = 'smart_schedule_solar_surplus'
+    state['low_surplus_start'] = datetime.now() - timedelta(minutes=6)
+    actions._dynamic_ev_state['entry-1'] = {vehicle_id: state}
+    _install_solar_surplus_runtime_stubs(monkeypatch, {
+        'battery_soc': 40, 'grid_power': 2000, 'battery_power': 0,
+        'solar_power': 0, 'load_power': 0,
+    })
+    monkeypatch.setattr(actions, '_optimizer_planned_ev_charge_kw', lambda *args: 0.0)
+    asyncio.run(actions._dynamic_ev_update_surplus(hass, _Entry(), 'entry-1', vehicle_id))
+    assert state.get('smart_solar_optimizer_pause') is True
+    assert not state.get('smart_solar_stop_delay_elapsed')
+
+
 def test_solar_surplus_stop_delay_stops_after_elapsed_delay(monkeypatch):
     hass = _Hass([])
     vehicle_id = "VIN123"

@@ -7,6 +7,74 @@ import pytest
 from test_ev_price_level_ownership import _FakeHass, _FakeConfigEntry, ev_planner
 
 
+def test_no_soc_invalidates_prior_shared_smart_decision(monkeypatch):
+    from datetime import datetime, timezone
+    actions = importlib.import_module('power_sync.automations.actions')
+    hass = _FakeHass(states={'sensor.connected_vehicle': 'tank'})
+    entry = _FakeConfigEntry()
+    entry.options = {'generic_charger_enabled': True,
+        'shared_loadpoint_connected_vehicle_entity': 'sensor.connected_vehicle',
+        'shared_loadpoint_profile_a_name': 'Tank', 'shared_loadpoint_profile_a_state': 'tank',
+        'shared_loadpoint_profile_b_name': 'Future', 'shared_loadpoint_profile_b_state': 'future'}
+    hass.states.get('sensor.connected_vehicle').last_changed = datetime.now(timezone.utc)
+    actions.record_smart_schedule_effective_authorization(entry, 'shared_ev_profile_a', allowed=False,
+        source='solar_surplus', hass=hass)
+    assert actions._shared_smart_intent(hass, entry, 'generic_ev', {'active_logical_vehicle_id': 'shared_ev_profile_a'}) is False
+    executor = ev_planner.AutoScheduleExecutor(hass, entry, ev_planner.ChargingPlanner(hass, entry))
+    executor._get_vehicle_soc = AsyncMock(return_value=None)
+    settings = ev_planner.AutoScheduleSettings(enabled=True, vehicle_id='shared_ev_profile_a', target_soc=80)
+    asyncio.run(executor._evaluate_vehicle('shared_ev_profile_a', settings, {}, None))
+    assert actions._shared_smart_intent(hass, entry, 'generic_ev', {'active_logical_vehicle_id': 'shared_ev_profile_a'}) is None
+
+
+@pytest.mark.parametrize('backend,physical', [('generic', 'generic_ev'), ('sigenergy', 'sigenergy_charger')])
+@pytest.mark.parametrize('elapsed,flag,started,optimizer_pause,should_stop', [
+    (False, True, True, False, False), (True, True, True, False, True),
+    (False, False, True, False, False), (True, False, True, False, True),
+    (False, True, False, False, True), (False, True, False, True, False),
+])
+def test_smart_solar_live_policy_honours_real_controller_stop_grace(monkeypatch, elapsed, flag, started, optimizer_pause, should_stop, backend, physical):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    actions = importlib.import_module('power_sync.automations.actions')
+    ownership = importlib.import_module('power_sync.automations.ev_ownership')
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(ev_planner.dt_util, 'now', lambda: now)
+    monkeypatch.setattr(ev_planner, 'get_ev_location', AsyncMock(return_value='home'))
+    monkeypatch.setattr(ev_planner, 'is_ev_plugged_in', AsyncMock(return_value=True))
+    hass = _FakeHass(states={'sensor.connected_vehicle': 'tank'})
+    entry = _FakeConfigEntry()
+    entry.options = {'generic_charger_enabled': backend == 'generic',
+        'sigenergy_charger_enabled': backend == 'sigenergy', 'sigenergy_charger_type': 'evac',
+        'shared_loadpoint_connected_vehicle_entity': 'sensor.connected_vehicle',
+        'shared_loadpoint_profile_a_name': 'Tank', 'shared_loadpoint_profile_a_state': 'tank',
+        'shared_loadpoint_profile_b_name': 'Future', 'shared_loadpoint_profile_b_state': 'future'}
+    assert ownership.acquire_shared_loadpoint_ownership(hass, entry, physical,
+        active_profile_id='shared_ev_profile_a', owner_mode='smart_schedule_solar_surplus')
+    runtime = {'active': True, 'active_profile_id': 'shared_ev_profile_a', 'charging_started': started,
+        'current_amps': 6 if started else 0, 'smart_solar_stop_delay_elapsed': elapsed,
+        'smart_solar_optimizer_pause': optimizer_pause,
+        'params': {'owner_mode': 'smart_schedule_solar_surplus', 'active_logical_vehicle_id': 'shared_ev_profile_a'}}
+    monkeypatch.setitem(actions._dynamic_ev_state, entry.entry_id, {physical: runtime})
+    planner = ev_planner.ChargingPlanner(hass, entry)
+    planner.should_charge_now = AsyncMock(return_value=(True, 'planned', 'solar_surplus'))
+    planner._is_grid_charging_blocked_at = lambda *args: False
+    executor = ev_planner.AutoScheduleExecutor(hass, entry, planner)
+    executor._get_vehicle_soc = AsyncMock(return_value=40)
+    executor._get_solar_surplus_config = AsyncMock(return_value={})
+    executor._resolve_effective_charger_capability = AsyncMock(return_value=None)
+    executor._stop_charging = AsyncMock(return_value=False)
+    executor._start_charging = AsyncMock(return_value=False)
+    settings = ev_planner.AutoScheduleSettings(enabled=True, vehicle_id='shared_ev_profile_a', target_soc=80)
+    state = executor.get_state('shared_ev_profile_a')
+    state.is_charging = flag
+    state.current_plan = SimpleNamespace(windows=[], target_time=None)
+    state.last_plan_update = ev_planner._ha_local_now_naive()
+    asyncio.run(executor._evaluate_vehicle('shared_ev_profile_a', settings,
+        {'battery_soc': 80, 'solar_power': 0, 'load_power': 1000, 'grid_power': 1000}, 10))
+    assert executor._stop_charging.await_count == int(should_stop), state.last_decision_reason
+
+
 @pytest.mark.parametrize('backend,physical', [('generic', 'generic_ev'), ('sigenergy', 'sigenergy_charger')])
 def test_price_level_false_flag_stops_matching_owner_on_price_denial(monkeypatch, backend, physical):
     hass = _FakeHass(states={'sensor.connected_vehicle': 'tank'})

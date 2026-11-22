@@ -516,6 +516,52 @@ def _extract_coordinator_method(name: str):
     return namespace[name]
 
 
+def test_inactive_smart_window_is_removed_only_from_current_slot_without_opportunity(monkeypatch):
+    from test_shared_loadpoint_action_guard import _Hass, _Entry, actions
+    from power_sync.optimization.ev_load_plan import EVChargePlan
+    merge = _extract_coordinator_method('_merge_shared_opportunity')
+    now = datetime(2026, 8, 21, 0, 5, tzinfo=timezone.utc)
+    hass, entry = _Hass(), _Entry()
+    monkeypatch.setattr(actions, '_shared_smart_intent', lambda *args: False)
+    coordinator = SimpleNamespace(hass=hass, config_entry=entry)
+    smart = EVChargePlan(vehicle_id='shared_ev_profile_a', max_power_kw=(6.05, 6.05),
+                         energy_needed_kwh=5.0, allow_grid=(False, False))
+    result = merge(coordinator, [smart], [now, now + timedelta(minutes=5)])
+    assert result[0].max_power_kw == (0.0, 6.05)
+    assert result[0].energy_needed_kwh == 5.0
+    assert smart.max_power_kw == (6.05, 6.05)
+
+
+@pytest.mark.parametrize('intent,expected', [(True, 6.05), (None, 6.05), (False, 0.0)])
+def test_smart_current_slot_respects_selected_live_intent(monkeypatch, intent, expected):
+    from test_shared_loadpoint_action_guard import _Hass, _Entry, actions
+    from power_sync.optimization.ev_load_plan import EVChargePlan
+    merge = _extract_coordinator_method('_merge_shared_opportunity')
+    hass, entry = _Hass(), _Entry()
+    monkeypatch.setattr(actions, '_shared_smart_intent', lambda *args: intent)
+    now = datetime(2026, 8, 21, 0, 5, tzinfo=timezone.utc)
+    plan = EVChargePlan(vehicle_id='shared_ev_profile_a', max_power_kw=(6.05, 6.05), energy_needed_kwh=5)
+    assert merge(SimpleNamespace(hass=hass, config_entry=entry), [plan], [now, now])[0].max_power_kw == (expected, 6.05)
+
+
+def test_smart_intent_transitions_request_reoptimization_once():
+    from unittest.mock import Mock
+    from test_shared_loadpoint_action_guard import _Hass, _Entry, actions
+    hass, entry = _Hass(), _Entry()
+    hass.states.get('sensor.connected_vehicle').last_changed = datetime.now(timezone.utc)
+    refresh = Mock()
+    hass.data['power_sync'][entry.entry_id]['optimization_coordinator'] = SimpleNamespace(
+        _enabled=True, _schedule_settings_reoptimization=refresh)
+    actions._smart_schedule_effective_authorizations.clear()
+    for allowed in (True, True, False, False, True):
+        actions.record_smart_schedule_effective_authorization(
+            entry, 'shared_ev_profile_a', allowed=allowed, source='solar_surplus', hass=hass)
+    assert refresh.call_count == 3
+    coordinator = hass.data['power_sync'][entry.entry_id]['optimization_coordinator']
+    assert coordinator._smart_availability_generation == 3
+    actions._smart_schedule_effective_authorizations.clear()
+
+
 def test_selected_fresh_opportunity_enters_optimizer_without_smart_plan(monkeypatch):
     from test_shared_loadpoint_action_guard import _Hass, _Entry
     from power_sync.optimization.ev_load_plan import EVChargePlan
@@ -636,7 +682,15 @@ def test_real_price_policy_to_solver_adoption_and_controller(monkeypatch, price_
     hass.services.async_call.assert_not_awaited()
     request = data['_shared_opportunity_request']
     timestamps = [now + timedelta(hours=i) for i in range(8)]
-    plans = merge(coordinator, None, timestamps)
+    from power_sync.optimization.ev_load_plan import EVChargePlan
+    actions.record_smart_schedule_effective_authorization(
+        entry, 'shared_ev_profile_a', allowed=False, source='solar_surplus', hass=hass)
+    smart = EVChargePlan(vehicle_id='shared_ev_profile_a', max_power_kw=(6.05,) * 8,
+                         energy_needed_kwh=5, allow_grid=(False,) * 8)
+    plans = merge(coordinator, [smart], timestamps)
+    assert plans[0].max_power_kw[0] == 0.0
+    assert plans[0].max_power_kw[1] == 6.05
+    assert plans[0].opportunity_power_kw > 0
     coordinator._pending_ev_charge_plan = plans
     optimizer = optimizer_module.BatteryOptimizer(capacity_wh=40000, max_charge_w=14700,
         max_discharge_w=10000, max_grid_import_w=5000, backup_reserve=.05,

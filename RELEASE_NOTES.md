@@ -1,3 +1,11 @@
+<!-- release: v2.12.1784-nir.2 -->
+
+## v2.12.1784-nir.2 — Smart Schedule availability and shared EV priority
+- Align the current optimizer EV slot with the selected profile's live Smart Schedule decision while preserving its future departure plan and allowing eligible opportunity charging.
+- Resolve Smart's active owner using the physical shared charger; preserve the existing solar stop delay and avoid interpreting a start wait or optimizer pause as an unavailable session.
+- Refresh and fence optimization results when Smart availability changes. Preserve existing shared stop confirmation and mode-specific charging constraints.
+- Source release only; physical charging behavior remains to be verified after installation.
+
 <!-- release: v2.12.1784-nir.1 -->
 
 ## v2.12.1784-nir.1 — reviewed upstream and shared EV compatibility

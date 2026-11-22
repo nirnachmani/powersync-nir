@@ -7672,14 +7672,28 @@ def record_smart_schedule_effective_authorization(
             return
     elif not _is_explicit_tesla_vin(normalized_vin):
         return
-    _smart_schedule_effective_authorizations.setdefault(
-        config_entry.entry_id, {}
-    )[normalized_vin] = {
+    records = _smart_schedule_effective_authorizations.setdefault(config_entry.entry_id, {})
+    previous = records.get(normalized_vin)
+    now = time.monotonic()
+    records[normalized_vin] = {
         "allowed": bool(allowed),
         "source": str(source or ""),
-        "recorded_at": time.monotonic(),
+        "recorded_at": now,
         "selection_changed": selection_changed,
     }
+    if normalized_vin in logical_ids and hass is not None:
+        stale = not isinstance(previous, dict) or previous.get("selection_changed") != selection_changed
+        if isinstance(previous, dict) and not stale:
+            try:
+                stale = not -1 <= now - float(previous["recorded_at"]) <= _SMART_SCHEDULE_AUTHORIZATION_MAX_AGE_SECONDS
+            except (KeyError, TypeError, ValueError):
+                stale = True
+        if stale or (isinstance(previous, dict) and previous.get("allowed") is not bool(allowed)):
+            coordinator = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {}).get("optimization_coordinator")
+            refresh = getattr(coordinator, "_schedule_settings_reoptimization", None)
+            if getattr(coordinator, "_enabled", False) and callable(refresh):
+                coordinator._smart_availability_generation = getattr(coordinator, "_smart_availability_generation", 0) + 1
+                refresh()
 
 
 def _shared_smart_intent(hass, config_entry, vehicle_id, params) -> Optional[bool]:
@@ -12909,6 +12923,8 @@ async def _dynamic_ev_update_surplus_impl(
                 executable_available_amps = min(executable_available_amps, optimizer_ceiling_amps)
 
     new_amps = int(round(max(0, min(max_amps, executable_available_amps))))
+    if available_amps + 1e-9 >= min_amps:
+        state.pop("smart_solar_stop_delay_elapsed", None)
 
     # Hysteresis: don't start unless we have sustained surplus
     sustained_minutes = params.get("sustained_surplus_minutes", 2)
@@ -12917,7 +12933,11 @@ async def _dynamic_ev_update_surplus_impl(
     # Keep the existing nearest-amp targeting once charging is viable, but do
     # not let rounding manufacture the minimum needed to start or continue.
     # For example, 5.5 A of physical surplus cannot satisfy a 6 A floor.
+    if optimizer_ceiling_amps != 0:
+        state.pop("smart_solar_optimizer_pause", None)
     if optimizer_ceiling_amps == 0 or load_probe_amps == 0:
+        if params.get("owner_mode") == "smart_schedule_solar_surplus":
+            state["smart_solar_optimizer_pause"] = optimizer_ceiling_amps == 0
         # An exact LP zero is a slot boundary, not a transient solar dip. Pause
         # immediately while leaving the owned controller alive for a later
         # positive slot.
@@ -12939,7 +12959,11 @@ async def _dynamic_ev_update_surplus_impl(
                 # delay even though the surplus has already disappeared.
                 new_amps = min(effective_current_amps, hardware_min_amps)
             elif (datetime.now() - low_surplus_start).total_seconds() >= stop_delay_minutes * 60:
-                # Stop charging after delay
+                # Keep the reason distinct from an LP zero or start delay so the
+                # Smart executor can release only after this actual grace.
+                if (params.get("owner_mode") == "smart_schedule_solar_surplus"
+                        and available_amps + 1e-9 < min_amps):
+                    state["smart_solar_stop_delay_elapsed"] = True
                 _LOGGER.info(f"⚡ Solar surplus EV: Stopping - insufficient surplus for {stop_delay_minutes} min")
                 new_amps = 0
             else:
