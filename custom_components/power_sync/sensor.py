@@ -4261,6 +4261,8 @@ def _lp_solar_forecast_attributes(data: dict[str, Any]) -> dict[str, Any]:
         "forecast_values_kw": data.get("solar_forecast"),
         "forecast_learning": data.get("solar_forecast_learning", {}),
         "forecast_status": data.get("solar_forecast_status", {}),
+        "forecast_monitor": data.get("solar_forecast_monitor", {}),
+        "solar_site_model_enabled": data.get("solar_site_model_enabled", False),
         "solar_nowcast_enabled": data.get("solar_nowcast_enabled", False),
         "solar_nowcast_derate": data.get("solar_nowcast_derate", 1.0),
     }

@@ -73,6 +73,7 @@ CONF_WEATHER_LOCATION = "weather_location"
 CONF_WEATHER_ENTITY = "weather_entity"
 CONF_SOLAR_NOWCAST_ENABLED = "solar_nowcast_enabled"
 DEFAULT_SOLAR_NOWCAST_ENABLED = False
+CONF_SOLAR_SITE_MODEL_ENABLED = "solar_site_model_enabled"
 CONF_SOLAR_FORECAST_PROVIDER = "solar_forecast_provider"
 SOLAR_FORECAST_PROVIDER_SOLCAST = "solcast"
 SOLAR_FORECAST_PROVIDER_OPEN_METEO = "open_meteo"

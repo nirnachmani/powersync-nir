@@ -1,3 +1,11 @@
+<!-- release: v2.12.1784-nir.4 -->
+
+## v2.12.1784-nir.4 — Solar forecast correction
+- Add an opt-in, site-specific Open-Meteo forecast correction and integrate it with live nowcasting and the Charge By Time solar shortfall allowance.
+- Save compact forecast snapshots and observed production to the NAS for up to two years; leave existing decision-log retention unchanged.
+- No automatic long-term retraining. The model is off by default and does not change other providers.
+- Source release only; Home Assistant installation and live behavior have not been verified.
+
 <!-- release: v2.12.1784-nir.3 -->
 
 ## v2.12.1784-nir.3 — Shared EV charging history

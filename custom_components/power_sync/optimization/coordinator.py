@@ -7568,9 +7568,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raw_solar_forecast = list(solar_forecast)
 
             if solar_forecast:
+                solar_forecast = self._apply_solar_site_model(solar_forecast)
+                model_solar_forecast = list(solar_forecast)
                 self._observe_solar_forecast_accuracy(solar_forecast, soc)
                 solar_forecast = self._apply_solar_nowcast_derate(solar_forecast, soc)
+            else:
+                model_solar_forecast = []
             adjusted_solar_forecast = list(solar_forecast)
+            if solar_forecast:
+                self._record_solar_forecast_monitor(
+                    raw_solar_forecast, model_solar_forecast, adjusted_solar_forecast, soc
+                )
 
             # Upstream 813ad249: preserve available PV for the solver's chosen
             # dispatch rather than capping it using a hypothetical full battery.
@@ -7670,13 +7678,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             forecast_source = getattr(
                 self._solar_forecaster, "last_forecast_source", None
             )
+            forecast_source = self._solar_learning_source(forecast_source)
             learned_margin_kwh = self._solar_forecast_learner.allowance_kwh(
                 forecast_source
             )
             learned_margin_kwh, nowcast_allowance_kwh = (
                 self._solar_error_margin_after_nowcast(
                     learned_margin_kwh=learned_margin_kwh,
-                    raw_solar_forecast=raw_solar_forecast,
+                    raw_solar_forecast=model_solar_forecast,
                     adjusted_solar_forecast=solar_forecast,
                     deadline_slot=_target_slot,
                     interval_minutes=self._config.interval_minutes,
@@ -16412,6 +16421,93 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             nowcast_allowance_kwh,
         )
 
+    def _record_solar_forecast_monitor(self, raw, model, adjusted, soc) -> None:
+        """Record independent issue-time snapshots and instantaneous telemetry."""
+        try:
+            from .solar_forecast_monitor import get_solar_monitor
+            now = dt_util.now()
+            interval_minutes = self._config.interval_minutes
+            bucket = int(now.timestamp()) // (5 * 60)
+            if getattr(self, "_solar_monitor_bucket", None) == bucket:
+                return
+            self._solar_monitor_bucket = bucket
+            data = self._get_energy_data() or {}
+            runtime = self.hass.data.get("power_sync", {}).get(self.entry_id, {})
+            reason = None
+            if data.get("telemetry_ready") is False or data.get("solar_power_valid") is False:
+                reason = "invalid_or_stale_telemetry"
+            elif soc >= 0.98:
+                reason = "near_full_soc"
+            elif getattr(self, "_last_executed_action", None) == "off_grid":
+                reason = "off_grid"
+            elif any(k.endswith("_curtailment_state") and v == "curtailed" for k, v in runtime.items()):
+                reason = "curtailment"
+            elif runtime.get("solar_production_stop", {}).get("restore_required"):
+                reason = "solar_production_stop"
+            def finite(value):
+                try:
+                    number = float(value)
+                    return round(number, 4) if math.isfinite(number) else None
+                except (TypeError, ValueError):
+                    return None
+            actual = finite(data.get("solar_power"))
+            if actual is None or actual < 0:
+                reason = reason or "invalid_telemetry"
+            limit = finite(data.get("export_limit_kw"))
+            grid = finite(data.get("grid_power"))
+            if reason is None and limit is not None and grid is not None and limit >= 0 and -grid >= max(0.0, limit - 0.1):
+                reason = "export_limit_possible"
+            def selected(values):
+                points = {}
+                for lead in (0, 60, 360, 720, 1440):
+                    if lead % interval_minutes:
+                        continue
+                    index = lead // interval_minutes
+                    if index < len(values):
+                        points[str(lead)] = finite(values[index])
+                return points
+            record = {
+                "type": "forecast_observation", "issued_at": now.isoformat(),
+                "interval_minutes": interval_minutes,
+                "source": getattr(self._solar_forecaster, "last_forecast_source", None),
+                "model_enabled": bool(getattr(self._entry, "options", {}).get("solar_site_model_enabled", False)),
+                "raw_kw_by_lead_minutes": selected(raw),
+                "model_kw_by_lead_minutes": selected(model),
+                "adjusted_kw_by_lead_minutes": selected(adjusted),
+                "actual_kw_instantaneous": actual, "soc": finite(soc),
+                "grid_power_kw": finite(data.get("grid_power")),
+                "export_limit_kw": finite(data.get("export_limit_kw")),
+                "telemetry_updated_at": str(data.get("last_update")) if data.get("last_update") else None,
+                "known_exclusion": reason,
+                "eligibility": "excluded" if reason else "unknown",
+            }
+            get_solar_monitor().emit(now.date(), record)
+        except Exception:
+            _LOGGER.exception("Solar forecast monitor capture failed")
+
+    def _solar_learning_source(self, source: str | None) -> str | None:
+        """Keep pre-model and corrected forecast histories separate."""
+        entry = getattr(self, "_entry", None)
+        if source == "open_meteo" and entry and entry.options.get("solar_site_model_enabled", False) is True and getattr(self, "_site_model_applied", True):
+            return "open_meteo:site_model_v1"
+        return source
+
+    def _apply_solar_site_model(self, forecast: list[float]) -> list[float]:
+        """Apply the optional fixed model without making forecast availability depend on it."""
+        entry = getattr(self, "_entry", None)
+        source = getattr(getattr(self, "_solar_forecaster", None), "last_forecast_source", None)
+        self._site_model_applied = False
+        if not entry or entry.options.get("solar_site_model_enabled", False) is not True or source != "open_meteo":
+            return list(forecast)
+        try:
+            from .solar_site_model import adjust_site_forecast
+            result = adjust_site_forecast(forecast, dt_util.now(), self._config.interval_minutes, True, source)
+            self._site_model_applied = True
+            return result
+        except (OSError, ValueError, KeyError, IndexError, TypeError):
+            _LOGGER.exception("Solar site model failed; retaining provider forecast")
+            return list(forecast)
+
     def _observe_solar_forecast_accuracy(
         self,
         solar_forecast: list[float],
@@ -16425,7 +16521,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         learner = getattr(self, "_solar_forecast_learner", None)
         forecaster = getattr(self, "_solar_forecaster", None)
-        source = getattr(forecaster, "last_forecast_source", None)
+        source = self._solar_learning_source(getattr(forecaster, "last_forecast_source", None))
         if learner is None or not source or not solar_forecast:
             return
 
@@ -16530,22 +16626,49 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "power_sync", {}
         ).get(getattr(self, "entry_id", ""), {})
         if runtime.get("solar_production_stop", {}).get("restore_required"):
+            self._solar_nowcast_samples = []
+            self._solar_nowcast_derate = 1.0
+            return solar_forecast
+        if any(key.endswith("_curtailment_state") and value == "curtailed" for key, value in runtime.items()):
+            self._solar_nowcast_derate = 1.0
+            self._last_solar_nowcast_ratio = None
+            self._solar_nowcast_samples = []
             return solar_forecast
         if soc >= 0.98:
             # Near-full batteries and curtailment can make measured solar lower
             # than potential production. Don't learn a false cloud signal there.
+            self._solar_nowcast_samples = []
+            self._solar_nowcast_derate = 1.0
             return solar_forecast
         data = self._get_energy_data()
         if not data:
+            self._solar_nowcast_samples = []
             return solar_forecast
+        try:
+            export_limit_kw = float(data.get("export_limit_kw"))
+            grid_power_kw = float(data.get("grid_power"))
+            if math.isfinite(export_limit_kw) and math.isfinite(grid_power_kw) and export_limit_kw >= 0 and -grid_power_kw >= max(0.0, export_limit_kw - 0.1):
+                self._solar_nowcast_samples = []
+                self._solar_nowcast_derate = 1.0
+                return solar_forecast
+        except (TypeError, ValueError):
+            pass
         if data.get("solar_power_valid") is False:
+            self._solar_nowcast_samples = []
             _LOGGER.debug(
                 "Solar forecast nowcast: ignoring unavailable live solar telemetry"
             )
             return solar_forecast
 
+        model_enabled = bool(getattr(getattr(self, "_entry", None), "options", {}).get("solar_site_model_enabled", False))
+        if model_enabled and data.get("solar_power") is None:
+            self._solar_nowcast_samples = []
+            return solar_forecast
         try:
             actual_kw = max(0.0, float(data.get("solar_power", 0) or 0))
+            if not math.isfinite(actual_kw):
+                self._solar_nowcast_samples = []
+                return solar_forecast
         except (TypeError, ValueError):
             return solar_forecast
 
@@ -16558,9 +16681,28 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # but a derate learned before sunset must still recover overnight
             # instead of freezing and suppressing next-morning forecasts.
             self._solar_nowcast_derate = min(1.0, self._solar_nowcast_derate + 0.08)
+            self._solar_nowcast_samples = []
             return solar_forecast
 
-        ratio = actual_kw / forecast_now_kw if forecast_now_kw > 0 else 1.0
+        model_active = model_enabled and getattr(self, "_site_model_applied", True)
+        if model_active:
+            if data.get("telemetry_ready") is False:
+                self._solar_nowcast_samples = []
+                return solar_forecast
+            now_ts = dt_util.now().timestamp()
+            current_bucket = int(now_ts) // 300
+            samples = [(t, a, f) for t, a, f in getattr(self, "_solar_nowcast_samples", []) if 0 < now_ts - t <= 1800 and int(t) // 300 < current_bucket]
+            if len(samples) >= 3 and samples[-1][0] - samples[0][0] >= 600:
+                ratio = sum(s[1] for s in samples) / sum(s[2] for s in samples)
+            else:
+                ratio = None
+            samples.append((now_ts, actual_kw, forecast_now_kw))
+            self._solar_nowcast_samples = samples[-12:]
+            if ratio is None:
+                self._solar_nowcast_derate = 1.0
+                return solar_forecast
+        else:
+            ratio = actual_kw / forecast_now_kw if forecast_now_kw > 0 else 1.0
         ratio = max(0.0, min(1.5, ratio))
         self._last_solar_nowcast_ratio = ratio
 
@@ -21197,9 +21339,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         learner = getattr(self, "_solar_forecast_learner", None)
         forecaster = getattr(self, "_solar_forecaster", None)
         data["solar_forecast_status"] = dict(getattr(forecaster, "forecast_status", {}))
+        from .solar_forecast_monitor import solar_monitor_status
+        data["solar_forecast_monitor"] = solar_monitor_status()
+        data["solar_site_model_enabled"] = bool(getattr(getattr(self, "_entry", None), "options", {}).get("solar_site_model_enabled", False))
         if learner is not None:
             learning_diagnostics = learner.diagnostics(
-                getattr(forecaster, "last_forecast_source", None)
+                self._solar_learning_source(getattr(forecaster, "last_forecast_source", None))
             )
             learning_diagnostics["nowcast_allowance_kwh"] = round(
                 getattr(self, "_last_solar_nowcast_allowance_kwh", 0.0), 3

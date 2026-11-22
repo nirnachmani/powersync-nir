@@ -2799,6 +2799,68 @@ def test_flow_power_kwatch_price_source_is_provider_gated():
     assert "or flow_power_kwatch_coordinator" in source
 
 
+def test_model_learning_does_not_reuse_raw_provider_history(opt_module):
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._entry = SimpleNamespace(options={'solar_site_model_enabled': True}, data={})
+    assert coordinator._solar_learning_source('open_meteo') == 'open_meteo:site_model_v1'
+    assert coordinator._solar_learning_source('solcast') == 'solcast'
+    coordinator._entry.options['solar_site_model_enabled'] = False
+    assert coordinator._solar_learning_source('open_meteo') == 'open_meteo'
+
+
+def test_nowcast_does_not_apply_constrained_solar_observation(opt_module):
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._entry = SimpleNamespace(data={}, options={'solar_nowcast_enabled': True})
+    coordinator._config = opt_module.OptimizationConfig(interval_minutes=5)
+    coordinator._solar_nowcast_derate = 1.0
+    coordinator._last_solar_nowcast_ratio = None
+    coordinator._last_logged_solar_nowcast_derate = None
+    coordinator.hass = SimpleNamespace(data={'power_sync': {'entry-1': {'sigenergy_curtailment_state': 'curtailed'}}})
+    coordinator.entry_id = 'entry-1'
+    coordinator._get_energy_data = lambda: {'solar_power': 0, 'telemetry_ready': True, 'solar_power_valid': True}
+    forecast = [8.0] * 12
+    assert coordinator._apply_solar_nowcast_derate(forecast, soc=0.5) == forecast
+
+
+def test_model_nowcast_uses_recent_completed_observations(opt_module, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._entry = SimpleNamespace(data={}, options={'solar_nowcast_enabled': True, 'solar_site_model_enabled': True})
+    coordinator._config = opt_module.OptimizationConfig(interval_minutes=5)
+    coordinator._solar_nowcast_derate = 1.0
+    coordinator._last_solar_nowcast_ratio = None
+    coordinator._last_logged_solar_nowcast_derate = None
+    coordinator._get_energy_data = lambda: {'solar_power': 2.0, 'solar_power_valid': True, 'telemetry_ready': True}
+    start = datetime(2026, 1, 1, 10, tzinfo=timezone.utc)
+    clock = [start]
+    monkeypatch.setattr(opt_module.dt_util, 'now', lambda: clock[0])
+    forecast = [8.0] * 12
+    for minutes in (0, 5, 10):
+        clock[0] = start + timedelta(minutes=minutes)
+        assert coordinator._apply_solar_nowcast_derate(forecast, soc=.5) == forecast
+    clock[0] = start + timedelta(minutes=15)
+    assert coordinator._apply_solar_nowcast_derate(forecast, soc=.5)[0] < 8.0
+
+
+def test_forecast_monitor_captures_real_snapshot_and_exclusion(opt_module, monkeypatch):
+    from power_sync.optimization import solar_forecast_monitor
+    captured = []
+    monkeypatch.setattr(solar_forecast_monitor, 'get_solar_monitor', lambda: SimpleNamespace(emit=lambda day, record: captured.append(record)))
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._entry = SimpleNamespace(options={'solar_site_model_enabled': True})
+    coordinator._solar_forecaster = SimpleNamespace(last_forecast_source='open_meteo')
+    coordinator._config = opt_module.OptimizationConfig(interval_minutes=5)
+    coordinator.entry_id = 'entry-1'
+    coordinator.hass = SimpleNamespace(data={'power_sync': {'entry-1': {'sigenergy_curtailment_state': 'curtailed'}}})
+    coordinator._get_energy_data = lambda: {'solar_power': 1, 'grid_power': -2, 'solar_power_valid': True}
+    coordinator._record_solar_forecast_monitor([5.0]*300, [4.0]*300, [3.0]*300, .5)
+    assert captured[0]['known_exclusion'] == 'curtailment'
+    assert captured[0]['raw_kw_by_lead_minutes']['1440'] == 5.0
+    assert captured[0]['model_kw_by_lead_minutes']['1440'] == 4.0
+    assert captured[0]['adjusted_kw_by_lead_minutes']['1440'] == 3.0
+    assert captured[0]['actual_kw_instantaneous'] == 1.0
+
+
 def test_solar_nowcast_derate_recovers_through_overnight_zero_forecast(opt_module):
     coordinator = object.__new__(opt_module.OptimizationCoordinator)
     coordinator._entry = SimpleNamespace(data={}, options={"solar_nowcast_enabled": True})

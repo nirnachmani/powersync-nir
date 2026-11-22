@@ -516,6 +516,7 @@ from .const import (
     SIGENERGY_CHARGER_EVAC,
     # Solcast Solar Forecast configuration
     CONF_SOLAR_NOWCAST_ENABLED,
+    CONF_SOLAR_SITE_MODEL_ENABLED,
     DEFAULT_SOLAR_NOWCAST_ENABLED,
     CONF_SOLAR_FORECAST_PROVIDER,
     DEFAULT_SOLAR_FORECAST_PROVIDER,
@@ -15673,6 +15674,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
 
             # Store weather and Solcast settings
             weather_options = {
+                CONF_SOLAR_SITE_MODEL_ENABLED: user_input.get(
+                    CONF_SOLAR_SITE_MODEL_ENABLED,
+                    self._get_option(CONF_SOLAR_SITE_MODEL_ENABLED, False),
+                ) is True,
                 CONF_SOLAR_NOWCAST_ENABLED: user_input.get(
                     CONF_SOLAR_NOWCAST_ENABLED,
                     self._get_option(CONF_SOLAR_NOWCAST_ENABLED, DEFAULT_SOLAR_NOWCAST_ENABLED),
@@ -15744,6 +15749,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         self._add_weather_entity_selector(schema_dict)
         schema_dict.update(
             {
+                vol.Optional(
+                    CONF_SOLAR_SITE_MODEL_ENABLED,
+                    default=self._get_option(CONF_SOLAR_SITE_MODEL_ENABLED, False),
+                ): BooleanSelector(),
                 vol.Optional(
                     CONF_SOLAR_NOWCAST_ENABLED,
                     default=self._get_option(

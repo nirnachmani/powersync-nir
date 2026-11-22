@@ -4199,6 +4199,8 @@ def test_curtailment_forecast_preserves_solar_for_the_chosen_dispatch(
         _config=SimpleNamespace(max_charge_w=15000, battery_capacity_wh=27000,
                                 interval_minutes=5),
         _observe_solar_forecast_accuracy=lambda forecast, soc: None,
+        _apply_solar_site_model=lambda forecast: list(forecast),
+        _record_solar_forecast_monitor=lambda raw, model, adjusted, soc: None,
         _apply_solar_nowcast_derate=lambda forecast, soc: list(forecast),
         hass=SimpleNamespace(data={}),
     )
@@ -4228,6 +4230,23 @@ def test_curtailment_forecast_preserves_solar_for_the_chosen_dispatch(
     assert namespace["solver_solar_forecast"] == pytest.approx(solar)
     if deadline:
         assert result.schedule.actions[deadline - 1].soc >= 0.99
+
+
+def test_site_model_forecast_is_accepted_by_real_full_horizon_solver(battery_optimizer_module):
+    import importlib.util
+    from datetime import datetime, timezone
+    model_path = COMPONENT_ROOT / 'optimization/solar_site_model.py'
+    spec = importlib.util.spec_from_file_location('solar_model_solver_test', model_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    source = [5.0] * 576
+    adjusted = module.adjust_site_forecast(source, datetime(2026, 6, 1, 12, tzinfo=timezone.utc), 5, True, 'open_meteo')
+    assert adjusted != source
+    optimizer = battery_optimizer_module.BatteryOptimizer(capacity_wh=27000, max_charge_w=15000, max_discharge_w=10000, backup_reserve=.2, hardware_reserve=.05, interval_minutes=5, horizon_hours=48)
+    result = optimizer.optimize(import_prices=[.3]*576, export_prices=[.1]*576, solar_forecast=adjusted, load_forecast=[1.0]*576, current_soc=.5, acquisition_cost_kwh=.05)
+    assert result.feasible is True
+    assert result.solver_used == 'highs'
 
 
 def test_pre_export_fill_uses_learned_kwh_shortfall_when_confident(

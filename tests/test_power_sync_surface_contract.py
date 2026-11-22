@@ -45,6 +45,11 @@ _HISTORICAL_EV_MODULES = {
     OPTIMIZATION / "ev_history.py": "4cf0de5b1fa59943a36418913253d5116aa735540696b97057d9af01c86eee3a",
     OPTIMIZATION / "ev_history_recorder.py": "c0fd9a4d24742eb36a4438a0e94bebc164191a1865cafaa04c49f269fa0f050d",
 }
+_SOLAR_SITE_MODULES = {
+    OPTIMIZATION / "solar_forecast_monitor.py": "f4cbf5b4af8a6618f145e13ff414d550eb69bfe9cbe9107874a3761cd2aee904",
+    OPTIMIZATION / "solar_site_model.py": "8a12f640bb2f55132aa8c9912bafba65ddd6878c949d7d2322662ff3d94bb5b4",
+}
+_SOLAR_SITE_MODEL_DATA_SHA256 = "5c54c082a372e473e388ca18775c5ad30bbb28e63e2bbbb7253dc8d3bec35f59"
 _HISTORICAL_EV_PREDECESSOR = "4e9a458e31ef938d2f3bcbe8ea0cbea878d660b7"
 _HISTORICAL_EV_DELTAS = {
     COORDINATOR: "cca7b699ee4a698f4dcf4ac05c6f461d876a159a92a151b3a6078e4980895cce",
@@ -83,7 +88,7 @@ def _solar_hold_diff_is_allowlisted(actual: str, path: Path) -> bool:
 # Reviewed v1750–1784 optimizer ports on top of published nir.8.
 _REVIEWED_CYCLE_BASE = "a155ddea"
 _REVIEWED_CYCLE_DELTAS = {
-    COORDINATOR: "d03cc9cfe85f03dfbedf94f5a73a7bd77977293797db9df6ed2310315edcee5a",
+    COORDINATOR: "3671d02bf775900633d46875474dc2e1be9b72d5d9200727276792fd4fe19563",
     BATTERY_OPTIMIZER: "81e724e1a410e6c9d1546910acef52f2ce408499d282c091f2ebaa9f108a237a",
     OPTIMIZATION / "battery_efficiency.py": "09fc30f99fad4e731de7137ad9de6c037378d96f83923f39fcfe3b6e7140f2d3",
 }
@@ -873,6 +878,7 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
         and path.relative_to(ROOT) != _AMBER_FORECAST_CONFIDENCE_MODULE
         and path.relative_to(ROOT) != _BOUNDED_ACCOUNTING_STORE_MODULE
         and path.relative_to(ROOT) not in _HISTORICAL_EV_MODULES
+        and path.relative_to(ROOT) not in _SOLAR_SITE_MODULES
     )
 
     assert restored_files == baseline_files
@@ -884,6 +890,9 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
     ).hexdigest() == _BOUNDED_ACCOUNTING_STORE_SHA256
     for module, digest in _HISTORICAL_EV_MODULES.items():
         assert hashlib.sha256((ROOT / module).read_bytes()).hexdigest() == digest
+    for module, digest in _SOLAR_SITE_MODULES.items():
+        assert hashlib.sha256((ROOT / module).read_bytes()).hexdigest() == digest
+    assert hashlib.sha256((ROOT / OPTIMIZATION / "solar_site_model_data.json").read_bytes()).hexdigest() == _SOLAR_SITE_MODEL_DATA_SHA256
     for relative_name in baseline_files:
         relative_path = Path(relative_name)
         actual = (ROOT / relative_path).read_text(encoding="utf-8").replace(
