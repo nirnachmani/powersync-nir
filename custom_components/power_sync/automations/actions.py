@@ -15623,13 +15623,23 @@ async def _action_start_ev_charging_dynamic_locked(
             old_params = dict(existing_params)
             old_charger_type = str(old_params.get("charger_type") or "").lower()
 
+            history_idle_confirmed = False
             if old_charger_type == "generic":
                 async def observe_shared_loadpoint():
+                    nonlocal history_idle_confirmed
+                    from .external_session_reconciler import generic_stop_observation_from_hass
+                    now = datetime.now(dt_timezone.utc)
+                    strict = generic_stop_observation_from_hass(
+                        hass, binding_id=vehicle_id, params=old_params,
+                        stop_at=now - timedelta(seconds=91), now=now,
+                    )
+                    history_idle_confirmed = strict.charging is False
                     return generic_observation_from_hass(
                         hass, binding_id=vehicle_id, params=old_params
                     )
             elif old_charger_type == "sigenergy":
                 async def observe_shared_loadpoint():
+                    nonlocal history_idle_confirmed
                     config = _sigenergy_charger_config(config_entry, old_params)
                     if not config.get("host"):
                         return evac_observation_from_state(
@@ -15642,6 +15652,18 @@ async def _action_start_ev_charging_dynamic_locked(
                         charger_state = None
                     finally:
                         await controller.disconnect()
+                    try:
+                        power = getattr(charger_state, "power_kw", None)
+                        raw = getattr(charger_state, "raw_state", None)
+                        history_idle_confirmed = (
+                            getattr(charger_state, "charger_type", None) == "evac"
+                            and type(raw) is int and raw in (1, 2, 3)
+                            and getattr(charger_state, "is_charging", None) is False
+                            and isinstance(power, (int, float)) and not isinstance(power, bool)
+                            and math.isfinite(power) and 0 <= power <= 0.05
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        history_idle_confirmed = False
                     return evac_observation_from_state(
                         binding_id=vehicle_id, state=charger_state
                     )
@@ -15682,6 +15704,7 @@ async def _action_start_ev_charging_dynamic_locked(
                             from_vehicle_id=str(existing_state.get("active_profile_id") or ""),
                             to_vehicle_id=requested_profile_id,
                             fresh_idle=True,
+                            history_idle_confirmed=history_idle_confirmed,
                             **end_soc_kwargs,
                         ):
                             _LOGGER.warning(
@@ -16995,6 +17018,7 @@ async def _action_start_ev_charging_dynamic_locked(
                 logical_vehicle_id=logical_vehicle_id,
                 loadpoint_id=vehicle_id,
                 mode=owner_mode,
+                **({"pending": True} if params.get("shared_loadpoint_binding") else {}),
                 start_soc=int(initial_soc) if initial_soc is not None else None,
                 **{key: value for key, value in shared_soc.items() if key != "start_soc"},
             )
@@ -17534,6 +17558,7 @@ async def _settle_pending_shared_stop(hass, config_entry, vid, state, vehicles):
                         vid, pending["params"].get("stop_reason", "manual" if pending["params"].get("manual_stop") else "stopped"),
                         sample.get("start_soc"), sample.get("start_soc_entity"),
                         sample.get("start_soc_time"), sample.get("start_soc_source"),
+                        fresh_idle=True,
                     )
     except Exception:
         _LOGGER.exception("Could not finalize EV charging history for %s", vid)

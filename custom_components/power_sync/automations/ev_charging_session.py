@@ -108,6 +108,7 @@ class ChargingSession:
     # Session metadata
     mode: str = "solar_surplus"  # or "battery_target", "scheduled", "boost"
     completed: bool = False
+    pending: bool = False
     stopped_reason: Optional[str] = None  # "target_reached", "unplugged", "manual", "time_window"
 
     # Detailed segments
@@ -149,6 +150,7 @@ class ChargingSession:
             "end_soc_source": self.end_soc_source,
             "mode": self.mode,
             "completed": self.completed,
+            "pending": self.pending,
             "stopped_reason": self.stopped_reason,
             "last_reading_time": self.last_reading_time,
             "segments": [s.to_dict() if isinstance(s, ChargingSegment) else s for s in self.segments],
@@ -188,6 +190,7 @@ class ChargingSession:
             end_soc_source=data.get("end_soc_source"),
             mode=data.get("mode", "solar_surplus"),
             completed=data.get("completed", False),
+            pending=data.get("pending", False),
             stopped_reason=data.get("stopped_reason"),
             last_reading_time=data.get("last_reading_time"),
             segments=segments,
@@ -577,6 +580,7 @@ class ChargingSessionManager:
         start_soc_entity: Optional[str] = None,
         start_soc_time: Optional[str] = None,
         start_soc_source: Optional[str] = None,
+        pending: bool = False,
     ) -> ChargingSession:
         """Start a new charging session.
 
@@ -613,12 +617,32 @@ class ChargingSessionManager:
                 start_soc_entity=start_soc_entity,
                 start_soc_time=start_soc_time,
                 start_soc_source=start_soc_source,
+                pending=pending,
             )
 
             self.active_sessions[session_key] = session
             _LOGGER.info(f"Started charging session {session.id} for {vehicle_id} (mode={mode})")
 
             return session
+
+    async def promote_pending_session(
+        self, loadpoint_id: str, logical_vehicle_id: str, session_id: str,
+        *, still_selected=None,
+    ) -> bool:
+        """Confirm only the exact pending session belonging to this profile."""
+        async with self._session_lock:
+            session = self.active_sessions.get(loadpoint_id)
+            if (
+                session is None
+                or session.completed
+                or not session.pending
+                or (session.logical_vehicle_id or session.vehicle_id) != logical_vehicle_id
+                or session.id != session_id
+                or (still_selected is not None and not still_selected())
+            ):
+                return False
+            session.pending = False
+            return True
 
     async def transfer_idle_session_attribution(
         self,
@@ -627,6 +651,7 @@ class ChargingSessionManager:
         to_vehicle_id: str,
         *,
         fresh_idle: bool,
+        history_idle_confirmed: bool = False,
         end_soc: Optional[int] = None,
         end_soc_entity: Optional[str] = None,
         end_soc_time: Optional[str] = None,
@@ -662,6 +687,7 @@ class ChargingSessionManager:
                 end_soc_entity,
                 end_soc_time,
                 end_soc_source,
+                fresh_idle=history_idle_confirmed,
             )
             return True
 
@@ -692,7 +718,7 @@ class ChargingSessionManager:
             Updated session or None if no active session
         """
         session = self.active_sessions.get(vehicle_id)
-        if not session:
+        if not session or session.pending:
             return None
 
         # Determine source from is_solar flag
@@ -724,6 +750,8 @@ class ChargingSessionManager:
         end_soc_entity: Optional[str] = None,
         end_soc_time: Optional[str] = None,
         end_soc_source: Optional[str] = None,
+        *,
+        fresh_idle: bool = False,
     ) -> Optional[ChargingSession]:
         """End a charging session and persist to storage.
 
@@ -737,7 +765,8 @@ class ChargingSessionManager:
         """
         async with self._session_lock:
             return await self._end_session_unlocked(
-                vehicle_id, reason, end_soc, end_soc_entity, end_soc_time, end_soc_source
+                vehicle_id, reason, end_soc, end_soc_entity, end_soc_time, end_soc_source,
+                fresh_idle=fresh_idle,
             )
 
     async def _end_session_unlocked(
@@ -748,11 +777,16 @@ class ChargingSessionManager:
         end_soc_entity: Optional[str] = None,
         end_soc_time: Optional[str] = None,
         end_soc_source: Optional[str] = None,
+        *,
+        fresh_idle: bool = False,
     ) -> Optional[ChargingSession]:
         """End a charging session (caller must hold _session_lock)."""
         session = self.active_sessions.pop(vehicle_id, None)
         if not session:
             return None
+
+        if session.pending and fresh_idle:
+            return session
 
         # Shared logical profiles may never inherit a physical/site or cached
         # SoC value. A valid profile-owned state sample is explicitly marked.
@@ -806,24 +840,32 @@ class ChargingSessionManager:
         self._last_cleanup_time = now_mono
 
         now = dt_util.now()
-        stale: list[str] = []
+        stale: list[tuple[str, ChargingSession]] = []
         for vehicle_id, session in list(self.active_sessions.items()):
+            # A waiting controller can legitimately have no readings for hours.
+            # Its exact ID remains part of the physical ownership/stop fence.
+            if session.pending:
+                continue
             last_time_str = session.last_reading_time or session.start_time
             if last_time_str:
                 try:
                     last = _parse_aware(last_time_str)
                     if (now - last).total_seconds() >= timeout_minutes * 60:
-                        stale.append(vehicle_id)
+                        stale.append((vehicle_id, session))
                 except (ValueError, TypeError):
                     pass
-        for vehicle_id in stale:
-            _LOGGER.warning(
-                "EV session for %s stale (>%d min since last update) — auto-ending",
-                vehicle_id,
-                timeout_minutes,
-            )
-            await self.end_session(vehicle_id, reason="stale_timeout")
-        return stale
+        ended = []
+        for vehicle_id, expected_session in stale:
+            async with self._session_lock:
+                if self.active_sessions.get(vehicle_id) is not expected_session or expected_session.pending:
+                    continue
+                _LOGGER.warning(
+                    "EV session for %s stale (>%d min since last update) — auto-ending",
+                    vehicle_id, timeout_minutes,
+                )
+                await self._end_session_unlocked(vehicle_id, reason="stale_timeout")
+                ended.append(vehicle_id)
+        return ended
 
     async def get_active_session(self, vehicle_id: str) -> Optional[ChargingSession]:
         """Get the active session for a vehicle."""

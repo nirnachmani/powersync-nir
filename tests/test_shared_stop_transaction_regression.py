@@ -19,6 +19,26 @@ def shared_store(monkeypatch, request):
     monkeypatch.setattr(_Hass, "__init__", init)
 
 
+def test_controller_start_keeps_history_session_pending_and_identity(monkeypatch, tmp_path):
+    import importlib
+    from datetime import datetime, timezone
+    sessions = importlib.import_module("power_sync.automations.ev_charging_session")
+    monkeypatch.setattr(sessions.dt_util, "now", lambda: datetime.now(timezone.utc), raising=False)
+    hass, entry = _Hass(), _Entry()
+    hass.states.async_all = lambda: []
+    manager = sessions.ChargingSessionManager(hass, storage_path=tmp_path / "history.json")
+    manager._cache_loaded = True
+    monkeypatch.setattr(sessions, "get_session_manager", lambda: manager)
+    actions._dynamic_ev_state.clear()
+    start = {**_generic_params(), "vehicle_id": "shared_ev_profile_a",
+             "dynamic_mode": "smart_schedule", "owner_mode": "smart_schedule",
+             "fixed_charge_amps": 8, "max_charge_amps": 8, "notify_on_start": False}
+    assert asyncio.run(actions._action_start_ev_charging_dynamic(hass, entry, start))
+    session = manager.active_sessions["generic_ev"]
+    assert session.pending is True
+    assert actions._dynamic_ev_state[entry.entry_id]["generic_ev"]["session_id"] == session.id
+
+
 def test_missing_store_attempts_stop_and_retains_fence():
     hass, entry = _Hass(), _Entry()
     hass.states.async_all = lambda: []

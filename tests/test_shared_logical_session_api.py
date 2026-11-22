@@ -111,6 +111,39 @@ def test_completed_history_filters_shared_records_by_logical_attribution_not_phy
     assert history[0].logical_vehicle_id == PROFILE_A_ID
 
 
+def test_pending_controller_session_is_hidden_from_active_api():
+    get = _sessions_get_method()
+    pending = _Session("generic_ev", PROFILE_A_ID)
+    pending.pending = True
+    manager = _Manager(completed=[], active={"generic_ev": pending})
+
+    class View:
+        _get_session_manager = staticmethod(lambda: manager)
+
+    response = asyncio.run(get(View(), SimpleNamespace(query={})))
+    assert response["active_sessions"] == []
+
+
+def test_pending_session_is_discarded_only_when_ended_with_fresh_idle(tmp_path):
+    sessions = _load_session_manager()
+    manager = sessions.ChargingSessionManager(
+        SimpleNamespace(config=SimpleNamespace(config_dir=".")),
+        storage_path=tmp_path / "sessions.json",
+    )
+    manager._cache_loaded = True
+
+    async def run():
+        session = await manager.start_session(PROFILE_A_ID, "solar_surplus", loadpoint_id="generic_ev")
+        session.pending = True
+        assert await manager.transfer_idle_session_attribution(
+            "generic_ev", PROFILE_A_ID, PROFILE_B_ID, fresh_idle=True, history_idle_confirmed=True
+        )
+        assert manager.active_sessions == {}
+        assert manager._sessions_cache == []
+
+    asyncio.run(run())
+
+
 def test_nonshared_session_route_remains_keyed_by_existing_vehicle_id():
     get = _sessions_get_method()
     manager = _Manager(

@@ -1937,6 +1937,7 @@ def test_live_physical_handoff_ends_only_outgoing_profile_with_its_soc(
         "sensor.tank_soc" if expected_end_soc is not None else None,
         states["sensor.tank_soc"].last_updated.isoformat() if expected_end_soc is not None else None,
         "state" if expected_end_soc is not None else None,
+        fresh_idle=True,
     )
 
 

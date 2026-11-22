@@ -1,3 +1,10 @@
+<!-- release: v2.12.1784-nir.3 -->
+
+## v2.12.1784-nir.3 — Shared EV charging history
+- Keep waiting shared EV controllers out of active charging history until measured charging is observed; discard pending entries when verified idle without evidence of charging.
+- Preserve uncertain records when telemetry cannot establish what happened, and retain shared session identity and stop confirmation.
+- Source release only; live charger behavior remains to be verified after installation.
+
 <!-- release: v2.12.1784-nir.2 -->
 
 ## v2.12.1784-nir.2 — Smart Schedule availability and shared EV priority

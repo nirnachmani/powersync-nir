@@ -580,8 +580,36 @@ async def reconcile_selected_shared_loadpoint_cycle(
         selected_params["charger_power_entity"] = options.get(
             "generic_charger_power_entity"
         )
+    manager = entry_data.get("session_manager") if isinstance(entry_data, dict) else None
+    sessions = getattr(manager, "active_sessions", None)
+    session = sessions.get(loadpoint_id) if isinstance(sessions, Mapping) else None
+    session_id = getattr(session, "id", None)
+    if not (isinstance(session_id, str) and session_id
+            and getattr(session, "logical_vehicle_id", None) == active_profile_id
+            and getattr(session, "loadpoint_id", None) == loadpoint_id):
+        session_id = None
+    trusted_active = False
     evac_idle_power_confirmed = False
     if loadpoint_id == "generic_ev":
+        current = now if now is not None else datetime.now(timezone.utc)
+        if isinstance(current, datetime) and current.utcoffset() is not None:
+            observation = generic_stop_observation_from_hass(
+                hass, binding_id=loadpoint_id, params=selected_params,
+                stop_at=current - timedelta(seconds=DEFAULT_FRESHNESS_SECONDS + 1), now=current,
+            )
+            try:
+                session_start_text = getattr(session, "start_time", None)
+                session_started = datetime.fromisoformat(session_start_text) if isinstance(session_start_text, str) else None
+                if session_started is not None and session_started.utcoffset() is None:
+                    session_started = None
+            except (AttributeError, TypeError, ValueError):
+                session_started = None
+            trusted_active = (
+                session_started is not None
+                and observation.observed_at is not None
+                and observation.observed_at >= session_started
+                and observation.power_kw is not None and observation.power_kw > 0
+            )
         state = reconcile_generic_session_from_hass(
             hass,
             config_entry,
@@ -596,8 +624,24 @@ async def reconcile_selected_shared_loadpoint_cycle(
             state = ReconciliationState()
         else:
             async def read_evac_for_stop_observation() -> Any | None:
-                nonlocal evac_idle_power_confirmed
+                nonlocal evac_idle_power_confirmed, trusted_active
+                started = datetime.now(timezone.utc)
                 raw = await read_evac_state()
+                elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+                raw_state = getattr(raw, "raw_state", None)
+                charging = getattr(raw, "is_charging", None)
+                power = getattr(raw, "power_kw", None)
+                if (str(getattr(raw, "charger_type", "")).lower() == "evac"
+                        and type(raw_state) is int and raw_state in (1, 2, 3, 4, 5)
+                        and type(charging) is bool and power is not None
+                        and not isinstance(power, bool)
+                        and 0 <= elapsed <= DEFAULT_FRESHNESS_SECONDS):
+                    try:
+                        numeric_power = float(power)
+                        trusted_active = (math.isfinite(numeric_power) and numeric_power >= 0
+                                          and (numeric_power > 0 or (raw_state in (4, 5) and charging)))
+                    except (TypeError, ValueError, OverflowError):
+                        pass
                 if (
                     str(getattr(raw, "charger_type", "")).lower() == "evac"
                     and getattr(raw, "is_charging", None) is False
@@ -620,6 +664,26 @@ async def reconcile_selected_shared_loadpoint_cycle(
             )
     else:
         return None
+
+    promote: Any = getattr(manager, "promote_pending_session", None)
+    sessions = getattr(manager, "active_sessions", None)
+    current_session = sessions.get(loadpoint_id) if isinstance(sessions, Mapping) else None
+    if (trusted_active and session_id and callable(promote)
+            and isinstance(entry_data, dict) and entry_data.get("session_manager") is manager
+            and resolve_active_shared_profile(hass, config_entry) == active_profile_id
+            and canonical_shared_loadpoint_id(config_entry, active_profile_id) == loadpoint_id
+            and current_session is session
+            and getattr(current_session, "id", None) == session_id
+            and getattr(current_session, "logical_vehicle_id", None) == active_profile_id
+            and getattr(current_session, "loadpoint_id", None) == loadpoint_id):
+        await promote(
+            loadpoint_id, active_profile_id, session_id,
+            still_selected=lambda: (
+                entry_data.get("session_manager") is manager
+                and resolve_active_shared_profile(hass, config_entry) == active_profile_id
+                and canonical_shared_loadpoint_id(config_entry, active_profile_id) == loadpoint_id
+            ),
+        )
 
     await persist_reconciliation_state(hass, config_entry, loadpoint_id, state)
     # A fresh physical idle read may settle the latest recorded PowerSync stop

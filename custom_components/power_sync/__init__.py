@@ -18353,6 +18353,8 @@ class ChargingSessionsView(HomeAssistantView):
             # dictionary key. Nonshared records retain their vehicle key.
             active_sessions = []
             for vid, session in manager.active_sessions.items():
+                if getattr(session, "pending", False):
+                    continue
                 session_vehicle_id = getattr(session, "logical_vehicle_id", None) or getattr(
                     session, "vehicle_id", vid
                 )
