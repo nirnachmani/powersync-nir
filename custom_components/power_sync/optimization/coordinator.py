@@ -2398,7 +2398,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         generic export permission does not, because a flat positive tariff may
         leave export permitted for the entire forecast horizon.
         """
-        if not self.auto_apply_reserve_enabled:
+        if not self.auto_apply_reserve_enabled or getattr(result, "degraded", False):
             return
 
         schedule = getattr(result, "schedule", None)
@@ -4991,6 +4991,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             interval_minutes=self._config.interval_minutes,
             horizon_hours=self._config.horizon_hours,
             target_charge_power_supported=self._supports_target_charge_power(),
+            allow_greedy_fallback=False,
         )
 
         # Initialize load estimator
@@ -8067,7 +8068,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             result: OptimizerResult = await _run_optimizer_once(
                 solve_reserve_override
             )
-            if not result.feasible and any(profit_max_solar_export_slots):
+            if (
+                not result.feasible
+                and any(profit_max_solar_export_slots)
+                and (
+                    not getattr(result, "degraded", False)
+                    or result.lp_stats.get("fallback_reason") == "infeasible_self_consumption_hold"
+                )
+            ):
                 _LOGGER.warning(
                     "Profit Max solar-export hold made the solve infeasible; "
                     "retrying with provider charge blocks only"
@@ -8094,6 +8102,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ]
             if (
                 not result.feasible
+                and (
+                    not getattr(result, "degraded", False)
+                    or result.lp_stats.get("fallback_reason") == "infeasible_self_consumption_hold"
+                )
                 and self.charge_by_time_enabled
                 and affected_before_deadline
             ):
@@ -8246,126 +8258,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ]
             used_reference_override = solve_reserve_override is not None
 
-            schedule = result.schedule
-            if self._should_spread_import_schedule():
-                schedule = self._spread_import_schedule(
-                    schedule,
-                    import_prices,
-                    spread_import_blocked,
-                    soc,
-                    solar_forecast=solar_forecast,
-                    load_forecast=load_forecast,
-                    manual_control_projection=manual_control_projection,
-                )
-            reference_export_windows = self._reference_export_bridge_windows(
-                schedule,
-                battery_export_allowed,
-                priority_export_slots,
-            )
-            post_solve_export_floor = self._merge_export_protection_floors(
-                reference_reserve_floor,
-                result.future_export_protection_floor_slots,
-                len(schedule.actions or []),
-            )
-            if self._should_spread_export_schedule():
-                schedule = self._spread_export_schedule(
-                    schedule,
-                    battery_export_allowed,
-                    export_reserve_floor=post_solve_export_floor,
-                    export_prices=spread_export_prices,
-                    manual_control_projection=manual_control_projection,
-                )
-            schedule = self._bridge_short_export_gaps(
-                schedule,
-                cost_neutral_export_prices,
-                authoritative_reserve_floor=post_solve_export_floor,
-                manual_control_projection=manual_control_projection,
-            )
-            # Apply off-grid curtailment overlay if enabled — converts
-            # eligible SELF_CONSUMPTION/IDLE slots to OFF_GRID during
-            # negative export price periods.
-            if self._should_apply_offgrid_overlay():
-                schedule = self._apply_offgrid_overlay(
-                    schedule, export_prices,
-                )
-            schedule = self._annotate_manual_control_schedule(
-                schedule,
-                manual_control_projection,
-            )
-            result = self._optimizer.reconcile_result_with_schedule(
-                result,
-                schedule,
-                import_prices=import_prices,
-                export_prices=export_prices,
-                solar=solar_forecast,
-                load=load_forecast,
-                export_bonus_prices=self._last_zerohero_bonus_prices,
-                export_bonus_cap_kwh=self._last_zerohero_bonus_cap_kwh,
-                import_bonus_prices=self._last_zerocharge_bonus_prices,
-                import_bonus_cap_kwh=self._last_zerocharge_bonus_cap_kwh,
-                initial_soc=soc,
-                cost_neutral_earnings_cap=cost_neutral_cap,
-                block_battery_charge=battery_charge_blocked,
-                cost_neutral_slots=cost_neutral_slots,
-                cost_neutral_forecast_import_cost=(
-                    cost_neutral_forecast_import_cost
-                ),
-                cost_neutral_fixed_cost_allowance=(
-                    cost_neutral_fixed_cost_allowance
-                ),
-                cost_neutral_plan=cost_neutral_plan,
-            )
-            self._restore_bridged_export_gap_provenance(
-                schedule,
-                result.schedule,
-            )
-            self._annotate_manual_control_schedule(
-                result.schedule,
-                manual_control_projection,
-            )
-            result.lp_stats["manual_control_projection_slots"] = (
-                manual_control_projection.slot_count
-                if manual_control_projection is not None
-                else 0
-            )
-            self._set_forecast_bridge_reserve_recommendation(
-                result,
-                reference_export_windows,
-                solar_forecast,
-                load_forecast,
-            )
-            reserve_semantic_keys = (
-                "manual_optimizer_reserve_percent",
-                "suggested_optimizer_reserve_percent",
-                "needs_optimizer_reserve_raise",
-                "forecast_bridge_kwh",
-                "forecast_bridge_reserve_percent",
-                "forecast_bridge_export_window_start",
-                "forecast_bridge_export_window_end",
-                "forecast_bridge_boundary_source",
-                "protects_until",
-                "next_charge_reason",
-            )
-            reference_reserve_semantics = {
-                key: value
-                for key, value in dict(
-                    getattr(result, "reserve_recommendation", {}) or {}
-                ).items()
-                if key in reserve_semantic_keys
-            }
-            # Keep the reference plan private until all reruns complete.
-            reserve_changed = self._apply_auto_reserve_recommendation(result)
-            if reserve_changed or used_reference_override:
-                result = await _run_optimizer_once()
-                applied_reserve_floor = (
-                    self._reserve_ratio(self._config.backup_reserve, 0.0) or 0.0
-                )
+            def _prepare_schedule(
+                result: OptimizerResult, reserve_floor: float,
+            ) -> tuple[OptimizerResult, list[tuple[int, int, str]]]:
+                # A degraded schedule is already a projection of native
+                # operation. Economic overlays cannot add commands to it.
+                if getattr(result, "degraded", False):
+                    return result, []
                 schedule = result.schedule
-                post_solve_export_floor = self._merge_export_protection_floors(
-                    applied_reserve_floor,
-                    result.future_export_protection_floor_slots,
-                    len(schedule.actions or []),
-                )
                 if self._should_spread_import_schedule():
                     schedule = self._spread_import_schedule(
                         schedule,
@@ -8376,6 +8276,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         load_forecast=load_forecast,
                         manual_control_projection=manual_control_projection,
                     )
+                reference_export_windows = self._reference_export_bridge_windows(
+                    schedule,
+                    battery_export_allowed,
+                    priority_export_slots,
+                )
+                post_solve_export_floor = self._merge_export_protection_floors(
+                    reserve_floor,
+                    result.future_export_protection_floor_slots,
+                    len(schedule.actions or []),
+                )
                 if self._should_spread_export_schedule():
                     schedule = self._spread_export_schedule(
                         schedule,
@@ -8390,6 +8300,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     authoritative_reserve_floor=post_solve_export_floor,
                     manual_control_projection=manual_control_projection,
                 )
+                # Apply off-grid curtailment overlay if enabled — converts
+                # eligible SELF_CONSUMPTION/IDLE slots to OFF_GRID during
+                # negative export price periods.
                 if self._should_apply_offgrid_overlay():
                     schedule = self._apply_offgrid_overlay(
                         schedule, export_prices,
@@ -8425,28 +8338,73 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     schedule,
                     result.schedule,
                 )
-                self._annotate_manual_control_schedule(
-                    result.schedule,
-                    manual_control_projection,
-                )
+                if not getattr(result, "degraded", False):
+                    self._annotate_manual_control_schedule(
+                        result.schedule,
+                        manual_control_projection,
+                    )
                 result.lp_stats["manual_control_projection_slots"] = (
                     manual_control_projection.slot_count
                     if manual_control_projection is not None
                     else 0
                 )
-                final_recommendation = dict(
+                return result, reference_export_windows
+
+            result, reference_export_windows = _prepare_schedule(
+                result, reference_reserve_floor
+            )
+            self._set_forecast_bridge_reserve_recommendation(
+                result,
+                reference_export_windows,
+                solar_forecast,
+                load_forecast,
+            )
+            reserve_semantic_keys = (
+                "manual_optimizer_reserve_percent",
+                "suggested_optimizer_reserve_percent",
+                "needs_optimizer_reserve_raise",
+                "forecast_bridge_kwh",
+                "forecast_bridge_reserve_percent",
+                "forecast_bridge_export_window_start",
+                "forecast_bridge_export_window_end",
+                "forecast_bridge_boundary_source",
+                "protects_until",
+                "next_charge_reason",
+            )
+            reference_reserve_semantics = {
+                key: value
+                for key, value in dict(
                     getattr(result, "reserve_recommendation", {}) or {}
+                ).items()
+                if key in reserve_semantic_keys
+            }
+            # Keep the reference plan private: Auto-Apply may replace it after
+            # another slow solve. Coordinator refreshes must keep seeing the
+            # previously committed plan until every planning stage completes.
+            reserve_changed = self._apply_auto_reserve_recommendation(result)
+            if (
+                (reserve_changed or used_reference_override)
+                and not getattr(result, "degraded", False)
+            ):
+                result = await _run_optimizer_once()
+                applied_reserve_floor = (
+                    self._reserve_ratio(self._config.backup_reserve, 0.0) or 0.0
                 )
-                for key in reserve_semantic_keys:
-                    final_recommendation.pop(key, None)
-                final_recommendation.update(reference_reserve_semantics)
-                final_recommendation["auto_apply_enabled"] = bool(
-                    self.auto_apply_reserve_enabled
-                )
-                final_recommendation["applied_optimizer_reserve_percent"] = int(
-                    round(applied_reserve_floor * 100)
-                )
-                result.reserve_recommendation = final_recommendation
+                result, _ = _prepare_schedule(result, applied_reserve_floor)
+                if not getattr(result, "degraded", False):
+                    final_recommendation = dict(
+                        getattr(result, "reserve_recommendation", {}) or {}
+                    )
+                    for key in reserve_semantic_keys:
+                        final_recommendation.pop(key, None)
+                    final_recommendation.update(reference_reserve_semantics)
+                    final_recommendation["auto_apply_enabled"] = bool(
+                        self.auto_apply_reserve_enabled
+                    )
+                    final_recommendation["applied_optimizer_reserve_percent"] = int(
+                        round(applied_reserve_floor * 100)
+                    )
+                    result.reserve_recommendation = final_recommendation
             result = await self._apply_external_energy_plan(
                 result,
                 timestamps=schedule_timestamps,
@@ -9820,6 +9778,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         timestamp: datetime | None = None,
     ) -> str | None:
         """Return the action that runtime execution will apply."""
+        result = getattr(self, "_last_optimizer_result", None)
+        if action_name is not None and getattr(result, "degraded", False):
+            return "self_consumption"
         if action_name != "idle":
             return action_name
         # No Idle takes precedence over every optimizer hold, including Charge
@@ -11585,6 +11546,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # method to behave as if the optimizer is running.
         if not getattr(self, "_enabled", True):
             return
+        degraded = getattr(getattr(self, "_last_optimizer_result", None), "degraded", False)
         if not self._executor or not self._executor.battery_controller:
             return
         if getattr(self, "_optimizer_restore_in_progress", False):
@@ -11765,7 +11727,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 preserve_active_for_force = self._scheduled_ev_preserve_active()
                 lp_matches_force = (
-                    _action_matches_force(action)
+                    not degraded
+                    and _action_matches_force(action)
                     and not battery_export_price_blocked
                 )
                 bridged_export_gap = bool(
@@ -12400,9 +12363,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if not cap_cancelled_for_new_action:
                     # LP changed its mind — cancel the optimizer's force mode.
                     if (
-                        action.action in SELF_USE_ACTIONS
-                        or action.action == "idle"
-                        or bridged_export_gap
+                        not degraded
+                        and (
+                            action.action in SELF_USE_ACTIONS
+                            or action.action == "idle"
+                            or bridged_export_gap
+                        )
                     ):
                         if force_type == "charge":
                             commitment_remaining = (
@@ -12498,7 +12464,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     _LOGGER.info(
                         "Optimizer: LP changed mind (%s → %s) — canceling optimizer-triggered "
                         "force %s to execute new action",
-                        force_type, action.action, force_type,
+                        force_type, runtime_action, force_type,
                     )
                     optimizer_force_snapshot = None
                     if force_state.get("scope") == "optimizer":
@@ -21553,13 +21519,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
         # Determine status message
-        if optimizer_available:
+        degraded = getattr(getattr(self, "_last_optimizer_result", None), "degraded", False)
+        if degraded and self._enabled:
+            status_message = "Optimizer degraded — waiting for a usable plan"
+            optimization_status = "degraded"
+        elif optimizer_available:
+            optimization_status = "stale" if is_stale else "active"
             if self._current_schedule and self._current_schedule.actions:
                 status_message = "Optimization active"
             else:
                 status_message = "Optimizer ready — waiting for data"
         else:
             status_message = "Optimizer not initialized"
+            optimization_status = "not_available"
 
         # Get current action info
         default_action = (
@@ -21807,11 +21779,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 else None
             ),
             "status": "active" if self._enabled and optimizer_available else "disabled",
-            "optimization_status": (
-                "stale"
-                if is_stale
-                else ("active" if optimizer_available else "not_available")
-            ),
+            "optimization_status": optimization_status,
             "schedule_age_s": schedule_age_s,
             "current_action": current_action,
             "current_action_detail": current_action_detail,

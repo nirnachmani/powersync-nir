@@ -51,28 +51,14 @@ def _run_optimization_source() -> str:
 
 
 def _chain_blocks(method_source: str) -> list[str]:
-    """Split the method source into the two override-chain blocks.
-
-    Each chain starts from the solve-local ``schedule = result.schedule``.
-    Both remain local until the final external-energy stage has completed.
-    There are two structurally identical chains: the initial solve and the
-    optional Auto-Apply reserve rerun.
-    """
-    start_marker = "schedule = result.schedule"
-    starts = [
-        m.start()
-        for m in re.finditer(
-            rf"(?m)^\s*{re.escape(start_marker)}\s*$",
-            method_source,
-        )
-    ]
-    assert len(starts) == 2, (
-        f"expected exactly 2 solve-local schedule chains (initial + Auto-Apply "
-        f"rerun), found {len(starts)} — _run_optimization's structure changed, "
-        f"update this test's chain boundaries"
-    )
-    final_stage = method_source.index("result = await self._apply_external_energy_plan(")
-    return [method_source[starts[0]:starts[1]], method_source[starts[1]:final_stage]]
+    """Both solves use one shared local-only overlay helper."""
+    start = method_source.index("def _prepare_schedule(")
+    end = method_source.index("result, reference_export_windows = _prepare_schedule(", start)
+    helper = method_source[start:end]
+    assert method_source.count("_prepare_schedule(result, applied_reserve_floor)") == 1
+    assert method_source.count("result, reference_export_windows = _prepare_schedule(") == 1
+    assert 'if getattr(result, "degraded", False):' in helper
+    return [helper, helper]
 
 
 def test_override_chain_blocks_are_present_and_ordered():
@@ -154,20 +140,15 @@ def test_auto_apply_bridge_uses_one_frozen_reference_across_both_solves():
     capture = first_chain.index("self._reference_export_bridge_windows(")
     spread = first_chain.index("self._spread_export_schedule(")
     assert capture < spread
-    assert (
-        "self._merge_export_protection_floors(\n                reference_reserve_floor"
-        in first_chain
-    )
+    assert "self._merge_export_protection_floors(" in first_chain
+    assert "reserve_floor," in first_chain
     assert "export_reserve_floor=post_solve_export_floor" in first_chain
     assert "authoritative_reserve_floor=post_solve_export_floor" in first_chain
-    assert (
-        "self._merge_export_protection_floors(\n                    applied_reserve_floor"
-        in second_chain
-    )
-    assert "export_reserve_floor=post_solve_export_floor" in second_chain
-    assert "authoritative_reserve_floor=post_solve_export_floor" in second_chain
+    assert "result, reference_export_windows = _prepare_schedule(\n                result, reference_reserve_floor" in method_source
+    assert "_prepare_schedule(result, applied_reserve_floor)" in method_source
     assert method_source.count("self._set_forecast_bridge_reserve_recommendation(") == 1
-    assert "final_recommendation.update(reference_reserve_semantics)" in second_chain
+    assert "final_recommendation.update(reference_reserve_semantics)" in method_source
+
 
 
 def test_spread_export_uses_effective_bonus_prices_in_both_solve_chains():
