@@ -48150,6 +48150,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok:
         if diagnostics := entry_data.pop("decision_diagnostics", None):
             await diagnostics.close()
+        if opt_coordinator:
+            try:
+                await opt_coordinator.async_close_battery_efficiency_learning()
+            except Exception:
+                _LOGGER.exception("Battery efficiency checkpoint could not be saved on unload")
         hass.data[DOMAIN].pop(entry.entry_id)
 
     # Remove services if this is the last entry

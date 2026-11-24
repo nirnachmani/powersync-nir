@@ -205,6 +205,16 @@ canonical identity and ownership checks; they are not API payload bypasses.
 - A selector change clears the non-selected logical forecast; control remains
   fenced by a fresh selected profile plus physical loadpoint guard.
 
+## Upstream v2.12.1787 compatibility (candidate)
+
+- Solver failure now projects native self-consumption and does not authorize
+  economic battery or planned EV dispatch; user-owned force is retained. Private
+  solar forecasts, shared charger fences and Android routes remain intact.
+- Battery-efficiency learning checkpoints unfinished cycles atomically across
+  reload/restart, retaining fresh-reading, topology and telemetry gap guards.
+  Local learner, persistence, optimizer and Android contract tests passed.
+- No deployment or physical-device verification was performed.
+
 ## Reviewed EV safety ports
 
 ### Upstream v2.12.1745–1784 compatibility
