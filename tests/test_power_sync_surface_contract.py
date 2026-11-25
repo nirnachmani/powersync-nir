@@ -103,6 +103,24 @@ def _reviewed_cycle_diff_is_allowlisted(actual: str, path: Path) -> bool:
     return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _REVIEWED_CYCLE_DELTAS[path]
 
 
+# Reviewed maintenance updates through the fully processed v2.12.1792 checkpoint.
+_REVIEWED_MAINTENANCE_BASE = "a220027b0c36ebffb823f5a0502a1dc5d6b1cd95"
+_REVIEWED_MAINTENANCE_DELTAS = {
+    COORDINATOR: "0f37ac88be40e059f2e886045a93c049f4f0fb39dd92d3973cc9292f98ec4a48",
+    BATTERY_OPTIMIZER: "fbe00ef1c29528360147cbd7a7aa8902d8b76f01b70fb796a2176e89723049b2",
+    OPTIMIZATION / "battery_efficiency.py": "98bc75a71e78237a353fd07cd7a47ef84712727773a1d712fd50995f93a1ee14",
+}
+
+
+def _reviewed_maintenance_diff_is_allowlisted(actual: str, path: Path) -> bool:
+    previous = _git_show(_REVIEWED_MAINTENANCE_BASE, path)
+    diff = "\n".join(difflib.unified_diff(
+        previous.splitlines(), actual.splitlines(), fromfile="published_" + path.name,
+        tofile="maintenance_" + path.name, lineterm="",
+    ))
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest() == _REVIEWED_MAINTENANCE_DELTAS[path]
+
+
 def _expected_battery_optimizer_source() -> str:
     """Return the immutable baseline plus this reviewed solar-only hunk."""
     baseline = _git_show(BASELINE_COMMIT, BATTERY_OPTIMIZER)
@@ -949,7 +967,8 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
             assert _micro_export_diff_is_allowlisted(_git_show(_HISTORICAL_EV_PREDECESSOR, COORDINATOR), COORDINATOR)
             assert _historical_ev_diff_is_allowlisted(_git_show(_SOLAR_HOLD_PREDECESSOR, COORDINATOR), COORDINATOR)
             assert _solar_hold_diff_is_allowlisted(_git_show(_REVIEWED_CYCLE_BASE, COORDINATOR), COORDINATOR)
-            assert _reviewed_cycle_diff_is_allowlisted(actual, COORDINATOR)
+            assert _reviewed_cycle_diff_is_allowlisted(_git_show(_REVIEWED_MAINTENANCE_BASE, COORDINATOR), COORDINATOR)
+            assert _reviewed_maintenance_diff_is_allowlisted(actual, COORDINATOR)
         elif relative_path == BATTERY_OPTIMIZER:
             # Preserve proof that e3c17217 itself contains only the earlier,
             # reviewed solar-refill and reachable-deadline changes before
@@ -990,10 +1009,12 @@ def test_core_optimizer_sources_match_the_pre_rename_baseline():
             assert _micro_export_diff_is_allowlisted(_git_show(_HISTORICAL_EV_PREDECESSOR, BATTERY_OPTIMIZER), BATTERY_OPTIMIZER)
             assert _historical_ev_diff_is_allowlisted(_git_show(_SOLAR_HOLD_PREDECESSOR, BATTERY_OPTIMIZER), BATTERY_OPTIMIZER)
             assert _solar_hold_diff_is_allowlisted(_git_show(_REVIEWED_CYCLE_BASE, BATTERY_OPTIMIZER), BATTERY_OPTIMIZER)
-            assert _reviewed_cycle_diff_is_allowlisted(actual, BATTERY_OPTIMIZER)
+            assert _reviewed_cycle_diff_is_allowlisted(_git_show(_REVIEWED_MAINTENANCE_BASE, BATTERY_OPTIMIZER), BATTERY_OPTIMIZER)
+            assert _reviewed_maintenance_diff_is_allowlisted(actual, BATTERY_OPTIMIZER)
         elif relative_path == OPTIMIZATION / "battery_efficiency.py":
             assert _git_show(_REVIEWED_CYCLE_BASE, relative_path) == expected
-            assert _reviewed_cycle_diff_is_allowlisted(actual, relative_path)
+            assert _reviewed_cycle_diff_is_allowlisted(_git_show(_REVIEWED_MAINTENANCE_BASE, relative_path), relative_path)
+            assert _reviewed_maintenance_diff_is_allowlisted(actual, relative_path)
         elif relative_path in _HISTORICAL_EV_DELTAS:
             assert _git_show(_HISTORICAL_EV_PREDECESSOR, relative_path) == expected
             assert _historical_ev_diff_is_allowlisted(actual, relative_path)
@@ -1039,8 +1060,11 @@ def test_stepped_soc_allowlist_rejects_unreviewed_change():
     assert _solar_hold_diff_is_allowlisted(published_coordinator, COORDINATOR)
     assert not _solar_hold_diff_is_allowlisted(published_coordinator + "\n# unreviewed change\n", COORDINATOR)
     assert not _solar_hold_diff_is_allowlisted(published_coordinator.replace("clipped_funding_slots.add(future_idx)", "pass", 1), COORDINATOR)
-    assert _reviewed_cycle_diff_is_allowlisted(actual, COORDINATOR)
-    assert not _reviewed_cycle_diff_is_allowlisted(actual + "\n# unreviewed change\n", COORDINATOR)
+    published_coordinator = _git_show(_REVIEWED_MAINTENANCE_BASE, COORDINATOR)
+    assert _reviewed_cycle_diff_is_allowlisted(published_coordinator, COORDINATOR)
+    assert not _reviewed_cycle_diff_is_allowlisted(published_coordinator + "\n# unreviewed change\n", COORDINATOR)
+    assert _reviewed_maintenance_diff_is_allowlisted(actual, COORDINATOR)
+    assert not _reviewed_maintenance_diff_is_allowlisted(actual + "\n# unreviewed change\n", COORDINATOR)
     optimizer = (ROOT / BATTERY_OPTIMIZER).read_text(encoding="utf-8")
     optimizer_base = _git_show(_MICRO_EXPORT_SOURCE, BATTERY_OPTIMIZER)
     assert _local_replay_diff_is_allowlisted(optimizer_base, BATTERY_OPTIMIZER)
@@ -1059,9 +1083,12 @@ def test_stepped_soc_allowlist_rejects_unreviewed_change():
     assert not _solar_hold_diff_is_allowlisted(published_optimizer.replace(
         "action_reason = FUTURE_HOME_USE_HOLD_REASON", "action_reason = None", 1), BATTERY_OPTIMIZER)
     for path in _REVIEWED_CYCLE_DELTAS:
+        published = _git_show(_REVIEWED_MAINTENANCE_BASE, path)
+        assert _reviewed_cycle_diff_is_allowlisted(published, path)
+        assert not _reviewed_cycle_diff_is_allowlisted(published + "\n# unreviewed change\n", path)
         source = (ROOT / path).read_text(encoding="utf-8")
-        assert _reviewed_cycle_diff_is_allowlisted(source, path)
-        assert not _reviewed_cycle_diff_is_allowlisted(source + "\n# unreviewed change\n", path)
+        assert _reviewed_maintenance_diff_is_allowlisted(source, path)
+        assert not _reviewed_maintenance_diff_is_allowlisted(source + "\n# unreviewed change\n", path)
     for path in (OPTIMIZATION / "ev_load_plan.py", OPTIMIZATION / "price_level_projection.py"):
         source = (ROOT / path).read_text(encoding="utf-8")
         assert _historical_ev_diff_is_allowlisted(source, path)
